@@ -176,6 +176,9 @@ type playbackResult struct {
 }
 
 var methods = map[string]method{
+	"syncHttp": func(ctx context.Context, c *sdk.Client, a []json.RawMessage) (any, error) {
+		return syncHttp(ctx, a)
+	},
 	"discover": func(ctx context.Context, c *sdk.Client, a []json.RawMessage) (any, error) {
 		var o sdk.DiscoverOptions
 		if err := arg(a, 0, &o); err != nil {
