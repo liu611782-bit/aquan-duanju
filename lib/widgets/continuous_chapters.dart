@@ -26,6 +26,8 @@ class ContinuousChapters extends StatefulWidget {
     this.chapterTitle,
     this.controller,
     this.typography,
+    this.textColor,
+    this.night = false,
     this.highlightChapter,
     this.highlightParagraph,
     this.highlightBase,
@@ -57,6 +59,14 @@ class ContinuousChapters extends StatefulWidget {
 
   /// 排版参数（字号/行距/段距/边距/字体）。为空时退回旧默认值。
   final ReaderTypography? typography;
+
+  /// 正文字色：阅读页传夜间切换后的阅读主题字色。
+  /// 不传退回 App 主题色——但 App 主题不随阅读夜间开关变化，
+  /// 黑底深字不可读（滚动模式夜间字色 bug 的根因）。
+  final Color? textColor;
+
+  /// 阅读器夜间开关（朗读高亮的黑白兜底跟着它走，而非 App 主题亮度）。
+  final bool night;
 
   /// 正在朗读的章（与 [highlightParagraph] 配合，null 表示不高亮）。
   final int? highlightChapter;
@@ -465,7 +475,7 @@ class _ContinuousChaptersState extends State<ContinuousChapters> {
                 active: active,
                 style: widget.highlightStyle,
                 colorArgb: widget.highlightColorArgb,
-                night: theme.brightness == Brightness.dark,
+                night: widget.night || theme.brightness == Brightness.dark,
               ),
             ),
             style: _bodyStyle(theme),
@@ -490,7 +500,9 @@ class _ContinuousChaptersState extends State<ContinuousChapters> {
   }
 
   TextStyle _bodyStyle(ThemeData theme) {
-    final color = theme.textTheme.bodyLarge?.color ?? const Color(0xFF222222);
+    final color = widget.textColor ??
+        theme.textTheme.bodyLarge?.color ??
+        const Color(0xFF222222);
     final type = widget.typography;
     if (type != null) return type.bodyStyle(color: color);
     return TextStyle(fontSize: 19, height: 1.8, color: color);

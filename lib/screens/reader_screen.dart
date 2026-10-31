@@ -227,6 +227,7 @@ class _BookmarkSheet extends StatelessWidget {
     required this.markings,
     required this.bookId,
     required this.onJump,
+    this.onAdd,
   });
 
   final BookmarkStore store;
@@ -236,6 +237,10 @@ class _BookmarkSheet extends StatelessWidget {
   /// 跳转到某章某字符位置。
   final Future<void> Function(int chapterIndex, int charOffset) onJump;
 
+  /// 在当前位置加书签。空/非空两态都把入口摆在面板顶部可达处——
+  /// 原先只藏在九宫格点击位里，面板打开了也找不到「添加」在哪。
+  final Future<void> Function()? onAdd;
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -244,25 +249,55 @@ class _BookmarkSheet extends StatelessWidget {
         final theme = Theme.of(context);
         final bookmarkList = store.of(bookId);
         final markingList = markings.of(bookId);
+        final header = Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 8, 0),
+          child: Row(
+            children: [
+              Text('书签与划线', style: theme.textTheme.titleMedium),
+              const Spacer(),
+              Text(
+                '${bookmarkList.length} 书签 · ${markingList.length} 划线',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.outline),
+              ),
+              if (onAdd != null)
+                TextButton.icon(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    onAdd!();
+                  },
+                  icon: const Icon(Icons.bookmark_add_outlined, size: 18),
+                  label: const Text('添加书签'),
+                ),
+            ],
+          ),
+        );
         if (bookmarkList.isEmpty && markingList.isEmpty) {
           return SizedBox(
             height: 220,
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.bookmarks_outlined,
-                      size: 40, color: theme.colorScheme.outline),
-                  const SizedBox(height: 10),
-                  Text('还没有书签', style: theme.textTheme.bodyMedium),
-                  const SizedBox(height: 4),
-                  Text(
-                    '长按正文选字可划线；九宫格「添加书签」可存位置',
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(color: theme.colorScheme.outline),
+            child: Column(
+              children: [
+                header,
+                Expanded(
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.bookmarks_outlined,
+                            size: 40, color: theme.colorScheme.outline),
+                        const SizedBox(height: 10),
+                        Text('还没有书签', style: theme.textTheme.bodyMedium),
+                        const SizedBox(height: 4),
+                        Text(
+                          '点右上「添加书签」存位置；长按正文选字可划线',
+                          style: theme.textTheme.bodySmall
+                              ?.copyWith(color: theme.colorScheme.outline),
+                        ),
+                      ],
+                    ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           );
         }
@@ -270,20 +305,7 @@ class _BookmarkSheet extends StatelessWidget {
           heightFactor: 0.8,
           child: Column(
             children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Row(
-                  children: [
-                    Text('书签与划线', style: theme.textTheme.titleMedium),
-                    const Spacer(),
-                    Text(
-                      '${bookmarkList.length} 书签 · ${markingList.length} 划线',
-                      style: theme.textTheme.bodySmall
-                          ?.copyWith(color: theme.colorScheme.outline),
-                    ),
-                  ],
-                ),
-              ),
+              header,
               const Divider(height: 16),
               Expanded(
                 child: ListView(
@@ -908,6 +930,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         markings: _markings,
         bookId: widget.bookId,
         onJump: _jumpTo,
+        onAdd: _addBookmark,
       ),
     );
   }
@@ -1967,6 +1990,8 @@ class _ReaderScreenState extends State<ReaderScreen>
         child: ContinuousChapters(
           controller: _continuous,
           typography: _type,
+          textColor: theme.foreground,
+          night: _settings.nightMode,
           chapters: widget.chapters.map((c) => c.id).toList(),
           initialChapter: _index,
           loadChapter: (i, _) => _paragraphsOf(i),

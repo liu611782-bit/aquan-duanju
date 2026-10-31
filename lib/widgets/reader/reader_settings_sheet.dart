@@ -600,15 +600,24 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
         _sectionTitle('背景色'),
         _colorRow(
           colors: _bgColors,
-          selected: config.backgroundColor,
-          onPick: (v) => _applyTheme(config.copyWith(backgroundColor: v)),
+          // 夜间开关开着时选的就是夜间底色：所见即所选，否则改白天字段毫无反馈。
+          selected: settings.nightMode
+              ? config.backgroundColorNight
+              : config.backgroundColor,
+          onPick: (v) => _applyTheme(settings.nightMode
+              ? config.copyWith(backgroundColorNight: v)
+              : config.copyWith(backgroundColor: v)),
         ),
         const SizedBox(height: 10),
         _sectionTitle('文字色'),
         _colorRow(
           colors: _textColors,
-          selected: config.textColor,
-          onPick: (v) => _applyTheme(config.copyWith(textColor: v)),
+          selected: settings.nightMode
+              ? config.textColorNight
+              : config.textColor,
+          onPick: (v) => _applyTheme(settings.nightMode
+              ? config.copyWith(textColorNight: v)
+              : config.copyWith(textColor: v)),
         ),
         SwitchListTile(
           contentPadding: EdgeInsets.zero,

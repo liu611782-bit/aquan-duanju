@@ -120,7 +120,12 @@ String renderTip(
   }
 }
 
-/// 自定义模板：替换 `{BookName}` 一类变量；未知变量原样保留，便于用户排错。
+/// 自定义模板：替换 `{BookName}` 一类变量。
+///
+/// 匹配大小写与下划线不敏感（`{bookname}`/`{book_name}` 都命中）：
+/// 用户照着别处手抄模板时最容易写出发音相同但拼写不同的变体，
+/// 严格按原文匹配会让整条模板「一堆变量原文」直接糊在页脚上。
+/// 仍然不认识的变量原样保留，便于排错。
 String renderTipTemplate(String template, ReaderTipContext ctx) {
   if (template.isEmpty) return '';
   final remaining =
@@ -139,11 +144,14 @@ String renderTipTemplate(String template, ReaderTipContext ctx) {
     'FullPageIndex': '${ctx.wholePageIndex + 1}',
     'FullPageSize': '${ctx.wholePageSize}',
   };
-  var out = template;
-  values.forEach((key, replacement) {
-    out = out.replaceAll('{$key}', replacement);
-  });
-  return out;
+  String normalize(String key) => key.replaceAll('_', '').toLowerCase();
+  final byNormalized = <String, String>{
+    for (final e in values.entries) normalize(e.key): e.value,
+  };
+  return template.replaceAllMapped(
+    RegExp(r'\{([A-Za-z_][A-Za-z0-9_]*)\}'),
+    (m) => byNormalized[normalize(m.group(1)!)] ?? m.group(0)!,
+  );
 }
 
 /// 组装一行的三个位置。
