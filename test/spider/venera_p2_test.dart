@@ -55,14 +55,29 @@ void main() {
     // 最多尝试 3 个候选。
     VeneraComicDetail? detail;
     VeneraComic? target;
+    // copy_manga 对连续请求回 210（"Expected available in N seconds"）——
+    // 源自身 loadEp 的重试窗口是 40s；这里同口径等待后重试一次。
+    await Future<void>.delayed(const Duration(seconds: 5));
     for (final hit in hits.take(3)) {
-      try {
-        detail = await source.loadInfo(hit.id).timeout(const Duration(seconds: 30));
-        target = hit;
-        if (detail.flatEpisodes.isNotEmpty) break;
-      } catch (_) {
-        continue;
+      for (var attempt = 0; attempt < 2; attempt++) {
+        try {
+          detail =
+              await source.loadInfo(hit.id).timeout(const Duration(seconds: 30));
+          target = hit;
+          break;
+        } catch (e) {
+          final msg = '$e';
+          // ignore: avoid_print
+          print('loadInfo[${hit.id}] attempt$attempt 失败: $msg');
+          if (msg.contains('210') && attempt == 0) {
+            await Future<void>.delayed(const Duration(seconds: 40));
+            continue;
+          }
+          break;
+        }
       }
+      if (detail != null && detail.flatEpisodes.isNotEmpty) break;
+      detail = null;
     }
     if (detail == null || target == null) {
       markTestSkipped('前 3 个候选的 loadInfo 均失败（站方数据变体）');
