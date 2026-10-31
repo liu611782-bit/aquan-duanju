@@ -24,6 +24,7 @@ import '../core/player/playback_buffer_monitor.dart';
 import '../core/player/playback_health.dart';
 import '../core/playback_failure.dart';
 import '../core/playback_fallback.dart';
+import '../core/playback_recovery.dart';
 import '../core/playback_utils.dart';
 import '../core/player/player_engine.dart';
 import '../core/progress_throttle.dart';
@@ -116,6 +117,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   List<PlaybackCandidate> _candidates = const [];
   Timer? _fallbackTimer;
   bool _fallbackInFlight = false;
+
+  /// 本集自动恢复预算（换线次数上限，防「错误→防抖→换线」循环折腾）。
+  final PlaybackRecoveryBudget _recoveryBudget = PlaybackRecoveryBudget();
   int _playEpoch = 0;
   Duration _attemptStart = Duration.zero;
   static const Duration _earlyWindow = Duration(seconds: 15);
@@ -605,7 +609,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (verdict == null) return;
       unawaited(_recordPlaybackHealth(PlaybackHealthEvent.slowBuffer));
       if (_candidates.isNotEmpty) {
-        // 有备选线路就直接换，别让用户盯着缓冲圈手动操作。
+        // 有备选线路就直接换，别让用户盯着缓冲圈手动操作；预算耗尽后只提示。
+        if (_recoveryBudget.exhausted) {
+          if (mounted) _showToast(verdict.message);
+          return;
+        }
         final label = _candidates.first.label;
         _showOsd(Icons.swap_horiz_rounded, '画面卡顿，换到「$label」…');
         unawaited(_attemptFallback());
@@ -645,6 +653,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _rawPlaybackError = null;
     _reResolved = false;
     _reResolving = false;
+    _recoveryBudget.attempts = 0;
     _fallbackTimer?.cancel();
     _fallbackTimer = null;
     _fallbackInFlight = false;
@@ -906,7 +915,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     _rawPlaybackError = error;
     _logBuffer.add('[error] $error');
     final failure = classifyPlaybackFailure(error);
-    if (_position >= _attemptStart + _earlyWindow) {
+    final action = decideRecovery(
+      kind: failure.kind,
+      playedAheadOfAttempt: _position >= _attemptStart + _earlyWindow,
+      hasCandidates: _candidates.isNotEmpty,
+      budgetExhausted: _recoveryBudget.exhausted,
+    );
+    if (action == RecoveryAction.none) {
       // 晚期错误：不自动换线；先给 OSD 提示，若播放确实停了再给错误面板。
       _showOsd(Icons.error_outline_rounded, '播放出错，可在菜单重试');
       unawaited(Future<void>.delayed(const Duration(seconds: 2), () {
@@ -919,11 +934,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       }));
       return;
     }
-    if (_candidates.isEmpty) {
+    if (action == RecoveryAction.finalize) {
       unawaited(_finalizeFailure());
       return;
     }
-    if (failure.kind == PlaybackFailureKind.permanent) {
+    if (action == RecoveryAction.immediateFallback) {
       unawaited(_attemptFallback());
       return;
     }
@@ -948,10 +963,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     try {
       while (candidates.isNotEmpty) {
         if (_disposed || epoch != _playEpoch) return;
+        if (_recoveryBudget.exhausted) break;
         final candidate = candidates.removeAt(0);
         if (_triedUrls.contains(candidate.url)) continue;
         _candidates = List<PlaybackCandidate>.unmodifiable(candidates);
         _triedUrls.add(candidate.url);
+        _recoveryBudget.recordAttempt();
         _playbackFailure = null;
         setState(() => _selectedDefinition = streamLabel(candidate.stream));
         _showOsd(Icons.swap_horiz_rounded, '线路不可用，尝试「${candidate.label}」…');
@@ -968,6 +985,11 @@ class _PlayerScreenState extends State<PlayerScreen>
           _logBuffer.add('[error] $e');
           // 打开直接抛错：继续尝试下一条候选。
         }
+      }
+      // 预算耗尽但候选未用完：转入过期重解析收尾，不再继续硬切。
+      if (_recoveryBudget.exhausted && _candidates.isNotEmpty && mounted) {
+        unawaited(_finalizeFailure());
+        return;
       }
       if (mounted) {
         setState(() =>
