@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'local_media_server.dart';
@@ -31,6 +32,15 @@ class CastMediaProxy {
     _client.connectionTimeout = const Duration(seconds: 8);
   }
 
+  /// 登记条目上限：HLS 逐级改写会为每个变体/分片/KEY 各注册一条，
+  /// 不设上限会随播放时长无限增长。超限按最旧淘汰（LRU，访问即续期）。
+  static const int maxEntries = 512;
+
+  /// 清单/字幕等文本体的大小上限：异常源（错误页循环、死循环清单）不撑爆内存。
+  static const int maxTextBytes = 2 * 1024 * 1024;
+
+  static final Random _random = Random.secure();
+
   final int defaultPort;
   final int portAttempts;
 
@@ -41,7 +51,6 @@ class CastMediaProxy {
   ServerSocket? _socket;
   String? _localAddress;
   final Map<String, _ProxyEntry> _entries = <String, _ProxyEntry>{};
-  int _seq = 0;
 
   bool get running => _socket != null;
   int? get port => _socket?.port;
@@ -153,6 +162,11 @@ class CastMediaProxy {
     final requestLine = lines.first.split(' ');
     if (requestLine.length < 2) return;
     final method = requestLine[0].toUpperCase();
+    if (method != 'GET' && method != 'HEAD') {
+      // 只读代理：POST 等一律拒绝（防把代理当转发器滥用）。
+      await _writeStatus(socket, 405, 'Method Not Allowed');
+      return;
+    }
     String? range;
     for (final line in lines.skip(1)) {
       final idx = line.indexOf(':');
@@ -163,9 +177,15 @@ class CastMediaProxy {
     }
     final path = Uri.tryParse(requestLine[1])?.path ?? '';
     final segments = path.split('/').where((s) => s.isNotEmpty).toList();
-    final entry = segments.length == 2 && segments.first == 'p'
-        ? _entries[segments[1]]
+    final token = segments.length == 2 && segments.first == 'p'
+        ? segments[1]
         : null;
+    final entry = token != null ? _entries[token] : null;
+    if (entry != null) {
+      // LRU 续期：正在看的分片不被新注册的分片挤掉。
+      _entries.remove(token);
+      _entries[token!] = entry;
+    }
     if (entry == null) {
       await _writeStatus(socket, 404, 'Not Found');
       return;
@@ -215,12 +235,28 @@ class CastMediaProxy {
   }
 
   /// 直链/分片：Range 透传，状态码与 Content-Range 原样回给电视。
+  ///
+  /// 加固：Range 格式校验（非法 416）、上游 ≥400 归一 502、GET 先嗅探
+  /// 前 512B——防盗链错误页/失效页（HTML/XML/清单文本）不喂给电视（防黑屏）。
   Future<void> _serveStream(
       Socket socket, String method, _ProxyEntry entry, String? range) async {
+    if (range != null && !validRangeHeader(range)) {
+      await _writeStatus(socket, 416, 'Range Not Satisfiable');
+      return;
+    }
     final req = await _client.openUrl('GET', entry.url!);
     entry.headers.forEach(req.headers.set);
     if (range != null) req.headers.set('Range', range);
     final res = await req.close();
+
+    Future<void> drainUpstream() =>
+        res.drain<void>().timeout(const Duration(seconds: 2), onTimeout: () {});
+
+    if (res.statusCode >= 400) {
+      await drainUpstream();
+      await _writeStatus(socket, 502, 'Bad Gateway');
+      return;
+    }
 
     final head = StringBuffer()
       ..write('HTTP/1.1 ${res.statusCode} ${res.reasonPhrase}\r\n')
@@ -232,13 +268,83 @@ class CastMediaProxy {
     final contentRange = res.headers.value('content-range');
     if (contentRange != null) head.write('Content-Range: $contentRange\r\n');
     head.write('Connection: close\r\n\r\n');
-    socket.add(utf8.encode(head.toString()));
-    if (method != 'HEAD') {
-      await socket.addStream(res);
-    } else {
-      await res.drain<void>().timeout(const Duration(seconds: 2), onTimeout: () {});
+
+    if (method == 'HEAD') {
+      socket.add(utf8.encode(head.toString()));
+      await drainUpstream();
+      await socket.flush();
+      return;
     }
+    // 嗅探 + 转发（单订阅流只听一次）：先攒前 512B 判文本特征（二进制媒体
+    // 永远放行），之后的数据块在回调里直接写 socket。命中错误页 → 取消订阅
+    // 并回 502（防黑屏）。
+    final peeked = BytesBuilder(copy: false);
+    final peekReady = Completer<void>();
+    final upstreamDone = Completer<void>();
+    List<int>? remainder;
+    late final StreamSubscription<List<int>> sub;
+    sub = res.listen((chunk) {
+      if (peekReady.isCompleted) {
+        socket.add(chunk);
+        return;
+      }
+      final need = 512 - peeked.length;
+      if (chunk.length <= need) {
+        peeked.add(chunk);
+        if (peeked.length >= 512) peekReady.complete();
+      } else {
+        peeked.add(chunk.sublist(0, need));
+        remainder = chunk.sublist(need);
+        peekReady.complete();
+      }
+    }, onError: (Object e, StackTrace st) {
+      if (!peekReady.isCompleted) peekReady.complete();
+      upstreamDone.completeError(e, st);
+    }, onDone: () {
+      if (!peekReady.isCompleted) peekReady.complete();
+      if (!upstreamDone.isCompleted) upstreamDone.complete();
+    });
+    await peekReady.future;
+
+    final bytes = peeked.takeBytes();
+    if (_looksLikeTextDocument(bytes)) {
+      await sub.cancel();
+      await _writeStatus(socket, 502, 'Bad Gateway');
+      return;
+    }
+    socket.add(utf8.encode(head.toString()));
+    socket.add(bytes);
+    final rest = remainder;
+    if (rest != null) socket.add(rest);
+    await upstreamDone.future;
     await socket.flush();
+  }
+
+  /// 文本文档特征：清单/错误页/裸 URL。只看开头，二进制媒体不会命中。
+  static bool _looksLikeTextDocument(List<int> bytes) {
+    if (bytes.isEmpty) return false;
+    var text = utf8.decode(bytes, allowMalformed: true);
+    if (text.startsWith('\uFEFF')) text = text.substring(1);
+    final lower = text.trimLeft().toLowerCase();
+    return lower.startsWith('#extm3u') ||
+        lower.startsWith('<!doctype') ||
+        lower.startsWith('<html') ||
+        lower.startsWith('<?xml') ||
+        lower.startsWith('<mpd') ||
+        lower.startsWith('http://') ||
+        lower.startsWith('https://');
+  }
+
+  /// 客户端 Range 头格式校验：`bytes=s-e` / `bytes=s-` / `bytes=-n`，
+  /// 多段/带空格/非数字一律非法（不透传，避免上游行为不可控）。
+  static bool validRangeHeader(String value) {
+    final m = RegExp(r'^bytes=([0-9]{0,19})-([0-9]{0,19})$').firstMatch(value);
+    if (m == null) return false;
+    final startText = m.group(1)!;
+    final endText = m.group(2)!;
+    if (startText.isEmpty) return endText.isNotEmpty && int.parse(endText) > 0;
+    final start = int.parse(startText);
+    return endText.isEmpty || int.parse(endText) >= start;
   }
 
   // ---------------------------------------------------------------------------
@@ -285,10 +391,15 @@ class CastMediaProxy {
   // ---------------------------------------------------------------------------
 
   String _addToken(_ProxyEntry entry) {
-    _seq++;
-    final token = '${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}'
-        '${_seq.toRadixString(36)}';
+    // 随机 token（SecureRandom 24B base64Url）：旧「时间戳+序号」在局域网
+    // 内可预测枚举，任何设备都能拉走登记过的受保护流。
+    final bytes =
+        List<int>.generate(24, (_) => _random.nextInt(256), growable: false);
+    final token = base64Url.encode(bytes).replaceAll('=', '');
     _entries[token] = entry;
+    while (_entries.length > maxEntries) {
+      _entries.remove(_entries.keys.first); // LinkedHashMap 保序：最旧先出
+    }
     return token;
   }
 
@@ -299,10 +410,19 @@ class CastMediaProxy {
     if (range != null) req.headers.set('Range', range);
     final res = await req.close();
     if (res.statusCode >= 400) {
+      unawaited(
+          res.drain<void>().timeout(const Duration(seconds: 2), onTimeout: () {}));
       throw HttpException('upstream ${res.statusCode}');
     }
-    return utf8.decode(await res.fold<List<int>>(<int>[],
-        (acc, chunk) => acc..addAll(chunk)), allowMalformed: true);
+    // 大小上限：异常源（循环清单/超大错误页）不撑爆内存。
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in res) {
+      builder.add(chunk);
+      if (builder.length > maxTextBytes) {
+        throw HttpException('text body exceeds $maxTextBytes bytes');
+      }
+    }
+    return utf8.decode(builder.takeBytes(), allowMalformed: true);
   }
 
   Uri? _resolveAgainst(String ref, Uri base) {

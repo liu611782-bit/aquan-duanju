@@ -156,6 +156,35 @@ void main() {
       expect(res.statusCode, 404);
     });
 
+    test('suffix Range（bytes=-n）返回末尾 n 字节', () async {
+      final url = await server.urlFor(file.path);
+      final res = await http.get(
+        Uri.parse(url!),
+        headers: <String, String>{'Range': 'bytes=-100'},
+      );
+      expect(res.statusCode, 206);
+      expect(res.bodyBytes.length, 100);
+      expect(res.headers['content-range'], 'bytes 900-999/1000');
+    });
+
+    test('不可满足的 Range → 416（不再退化整文件 200）', () async {
+      final url = await server.urlFor(file.path);
+      for (final bad in ['bytes=1000-', 'bytes=1000-2000', 'bytes=5-2',
+        'bytes=0-1,3-4', 'bytes=abc']) {
+        final res = await http.get(
+          Uri.parse(url!),
+          headers: <String, String>{'Range': bad},
+        );
+        expect(res.statusCode, 416, reason: '$bad 应判不可满足');
+      }
+    });
+
+    test('方法白名单：POST → 405', () async {
+      final url = await server.urlFor(file.path);
+      final res = await http.post(Uri.parse(url!), body: 'x');
+      expect(res.statusCode, 405);
+    });
+
     test('start 幂等', () async {
       expect(await server.start(), isTrue);
       final first = server.baseUrl;

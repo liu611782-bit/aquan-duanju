@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 /// 本地 HTTP 媒体服务：把本机文件以「token URL」的形式喂给电视。
@@ -106,12 +107,14 @@ class LocalMediaServer {
     return token;
   }
 
-  static int _seq = 0;
+  static final Random _random = Random.secure();
 
+  /// 随机 token（SecureRandom 24B base64Url）：局域网内不可猜测，
+  /// 防止非目标设备枚举 token 拉取本机文件。旧「时间戳+序号」可预测，已弃。
   static String _newToken() {
-    _seq++;
-    final now = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
-    return '$now${_seq.toRadixString(36)}';
+    final bytes =
+        List<int>.generate(24, (_) => _random.nextInt(256), growable: false);
+    return base64Url.encode(bytes).replaceAll('=', '');
   }
 
   Future<void> _handleSocket(Socket socket) async {
@@ -155,6 +158,10 @@ class LocalMediaServer {
     final requestLine = lines.first.split(' ');
     if (requestLine.length < 2) return;
     final method = requestLine[0].toUpperCase();
+    if (method != 'GET' && method != 'HEAD') {
+      await _writeStatus(socket, 405, 'Method Not Allowed');
+      return;
+    }
     final rawPath = requestLine[1];
     String? rangeHeader;
     for (final line in lines.skip(1)) {
@@ -185,6 +192,17 @@ class LocalMediaServer {
     final total = await file.length();
     final mime = mimeTypeForPath(filePath);
     final range = _parseRange(rangeHeader, total);
+    if (range == null) {
+      // 不可满足的 Range（起点越界/区间非法/多段）：按 HTTP 语义回 416，
+      // 不再静默退化成整文件 200（旧行为会掩盖客户端的错区间 bug）。
+      await _writeStatus(
+        socket,
+        416,
+        'Range Not Satisfiable',
+        extraHeaders: 'Content-Range: bytes */$total\r\n',
+      );
+      return;
+    }
     final head = StringBuffer()
       ..write(range.partial ? 'HTTP/1.1 206 Partial Content\r\n' : 'HTTP/1.1 200 OK\r\n')
       ..write('Content-Type: $mime\r\n')
@@ -209,30 +227,46 @@ class LocalMediaServer {
   static Future<void> _writeStatus(
     Socket socket,
     int code,
-    String reason,
-  ) async {
+    String reason, {
+    String extraHeaders = '',
+  }) async {
     socket.add(utf8.encode(
       'HTTP/1.1 $code $reason\r\n'
+      '$extraHeaders'
       'Content-Length: 0\r\n'
       'Connection: close\r\n\r\n',
     ));
     await socket.flush();
   }
 
-  static _ByteRange _parseRange(String? header, int total) {
+  /// 解析 `bytes=` 单段 Range；返回 null = 不可满足（调用方回 416）。
+  ///
+  /// 支持 `bytes=s-e`、`bytes=s-`、`bytes=-n`（末尾 n 字节）；多段 Range
+  /// 一律不可满足（电视端不会发，发了也没法逐段伺服）。
+  static _ByteRange? _parseRange(String? header, int total) {
     if (header == null || !header.startsWith('bytes=')) {
       return _ByteRange(0, total, partial: false);
     }
     final spec = header.substring('bytes='.length);
-    final dash = spec.indexOf('-');
-    if (dash < 0) return _ByteRange(0, total, partial: false);
-    final startText = spec.substring(0, dash).trim();
-    final endText = spec.substring(dash + 1).trim();
-    var start = int.tryParse(startText) ?? 0;
-    var end = endText.isEmpty ? total : (int.tryParse(endText) ?? total) + 1;
-    if (start < 0 || start >= total) start = 0;
-    if (end > total) end = total;
-    if (end <= start) end = total;
+    final m = RegExp(r'^([0-9]{0,19})-([0-9]{0,19})$').firstMatch(spec);
+    if (m == null) return null;
+    final startText = m.group(1)!;
+    final endText = m.group(2)!;
+    if (startText.isEmpty) {
+      // suffix：末尾 n 字节；n<=0、无 end 或空文件视为非法。
+      final n = int.tryParse(endText);
+      if (n == null || n <= 0 || total <= 0) return null;
+      final start = n >= total ? 0 : total - n;
+      return _ByteRange(start, total, partial: true);
+    }
+    final start = int.parse(startText);
+    if (start >= total) return null;
+    var end = total;
+    if (endText.isNotEmpty) {
+      final requested = int.parse(endText) + 1;
+      if (requested < start) return null;
+      end = requested > total ? total : requested;
+    }
     return _ByteRange(start, end, partial: true);
   }
 

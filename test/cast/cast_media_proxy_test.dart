@@ -48,6 +48,25 @@ void main() {
         await req.response.close();
         return;
       }
+      if (req.uri.path == '/gone') {
+        req.response.statusCode = 404;
+        await req.response.close();
+        return;
+      }
+      if (req.uri.path == '/error-page') {
+        req.response.headers.contentType = ContentType.html;
+        req.response.write('<!DOCTYPE html><html><body>403 blocked</body></html>');
+        await req.response.close();
+        return;
+      }
+      if (req.uri.path == '/huge.m3u8') {
+        req.response.headers.contentType =
+            ContentType('application', 'vnd.apple.mpegurl');
+        // 超过 2MB 的异常清单。
+        req.response.write('#EXTM3U\n${'x' * (3 * 1024 * 1024)}');
+        await req.response.close();
+        return;
+      }
       if (req.uri.path == '/forbidden-without-header') {
         if (upstreamHeaders[req.uri.path]?['referer'] == null) {
           req.response.statusCode = 403;
@@ -172,6 +191,87 @@ void main() {
         .getUrl(Uri.parse('http://127.0.0.1:${proxy.port}/p/unknown'))
         .then((r) => r.close());
     expect(res.statusCode, 404);
+    client.close();
+  });
+
+  test('token 随机：连续登记不重复、不可由时间推导', () async {
+    final a = await proxy.register('http://127.0.0.1:${upstream.port}/seg1.ts');
+    final b = await proxy.register('http://127.0.0.1:${upstream.port}/seg1.ts');
+    expect(a, isNotNull);
+    expect(b, isNotNull);
+    expect(a, isNot(b), reason: '同 URL 两次登记 token 必须不同（防猜）');
+    // 旧 token 是时间戳 base36 + 序号；新 token 是 24B base64Url（含 -/_ 可能）。
+    final tokenA = Uri.parse(a!).pathSegments.last;
+    expect(tokenA.length, 32, reason: '24B base64Url 去掉 padding = 32 字符');
+  });
+
+  test('方法白名单：POST → 405', () async {
+    final proxied = await proxy.register(
+      'http://127.0.0.1:${upstream.port}/seg1.ts',
+    );
+    final client = HttpClient();
+    final req = await client.openUrl('POST', localOf(proxied!));
+    final res = await req.close();
+    expect(res.statusCode, 405);
+    client.close();
+  });
+
+  test('非法 Range → 416（不透传给上游）', () async {
+    final proxied = await proxy.register(
+      'http://127.0.0.1:${upstream.port}/seg1.ts',
+    );
+    final client = HttpClient();
+    for (final bad in ['bytes=abc', 'bytes=5-2', 'bytes=0-1,3-4']) {
+      final req = await client.getUrl(localOf(proxied!));
+      req.headers.set('Range', bad);
+      final res = await req.close();
+      expect(res.statusCode, 416, reason: '$bad 应被判非法');
+      expect(upstreamHeaders['/seg1.ts']?['range'], isNot(bad),
+          reason: '$bad 不应透传');
+    }
+    client.close();
+  });
+
+  test('上游返回 HTML 错误页 → 502（不喂给电视防黑屏）', () async {
+    final proxied = await proxy.register(
+      'http://127.0.0.1:${upstream.port}/error-page',
+    );
+    final client = HttpClient();
+    final res = await client.getUrl(localOf(proxied!)).then((r) => r.close());
+    expect(res.statusCode, 502);
+    client.close();
+  });
+
+  test('上游 4xx → 502（错误归一）', () async {
+    final proxied = await proxy.register(
+      'http://127.0.0.1:${upstream.port}/gone',
+    );
+    final client = HttpClient();
+    final res = await client.getUrl(localOf(proxied!)).then((r) => r.close());
+    expect(res.statusCode, 502);
+    client.close();
+  });
+
+  test('超大清单 → 502（2MB 上限）', () async {
+    final proxied = await proxy.register(
+      'http://127.0.0.1:${upstream.port}/huge.m3u8',
+    );
+    final client = HttpClient();
+    final res = await client.getUrl(localOf(proxied!)).then((r) => r.close());
+    expect(res.statusCode, 502);
+    client.close();
+  });
+
+  test('条目 LRU 上限：最旧 token 被淘汰 → 404', () async {
+    final first = await proxy.register('http://127.0.0.1:${upstream.port}/a');
+    for (var i = 0; i < CastMediaProxy.maxEntries; i++) {
+      await proxy.register('http://127.0.0.1:${upstream.port}/fill/$i');
+    }
+    final client = HttpClient();
+    final res = await client
+        .getUrl(localOf(first!))
+        .then((r) => r.close());
+    expect(res.statusCode, 404, reason: '最旧条目应被 LRU 淘汰');
     client.close();
   });
 }
