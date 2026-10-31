@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../models/book.dart';
@@ -50,6 +52,13 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   bool _loading = true;
   bool _abstractExpanded = false;
 
+  /// 当前内容来自快照缓存（秒开）；后台刷新失败时保留缓存并提示。
+  bool _fromCache = false;
+  bool _refreshFailed = false;
+
+  String get _detailKey => 'aqua:detail:${widget.bookId}';
+  String get _directoryKey => 'aqua:dir:${widget.bookId}';
+
   @override
   void initState() {
     super.initState();
@@ -60,25 +69,59 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     setState(() {
       _loading = true;
       _error = null;
+      _fromCache = false;
+      _refreshFailed = false;
     });
+    // 快照秒开：命中先渲染（无 loading 闪烁），后台刷新；失败保留缓存。
+    // async 间隙不摸 context：scope 在首个 await 前一次取齐。
+    final scope = AppScope.read(context);
+    final store = scope.detailSnapshots;
+    final api = scope.api;
+    await store.ensureLoaded();
+    final cachedDetail = store.get(_detailKey);
+    final cachedDirectory = store.get(_directoryKey);
+    final hasSnapshot = cachedDetail != null || cachedDirectory != null;
+    if (hasSnapshot && mounted) {
+      setState(() {
+        if (cachedDetail != null) _detail = BookDetail.fromJson(cachedDetail);
+        if (cachedDirectory != null) {
+          _directory = BookDirectory.fromJson(cachedDirectory);
+        }
+        _loading = false;
+        _fromCache = true;
+      });
+    }
     try {
-      final api = AppScope.read(context).api;
       final results = await Future.wait<Object>([
         api.bookDetail(widget.bookId),
         api.bookDirectory(widget.bookId),
       ]);
       if (!mounted) return;
+      final detail = results[0] as BookDetail;
+      final directory = results[1] as BookDirectory;
       setState(() {
-        _detail = results[0] as BookDetail;
-        _directory = results[1] as BookDirectory;
+        _detail = detail;
+        _directory = directory;
         _loading = false;
+        _fromCache = false;
+        _refreshFailed = false;
       });
+      unawaited(store.put(_detailKey, detail.toJson()));
+      unawaited(store.put(_directoryKey, directory.toJson()));
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        _error = e;
-        _loading = false;
-      });
+      if (hasSnapshot) {
+        // 刷新失败：保留缓存内容，轻提示（详情页仍可用）。
+        setState(() {
+          _loading = false;
+          _refreshFailed = true;
+        });
+      } else {
+        setState(() {
+          _error = e;
+          _loading = false;
+        });
+      }
     }
   }
 
@@ -167,11 +210,18 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   Widget _buildScaffold(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('书籍详情')),
-      body: LoadView(
-        loading: _loading,
-        error: _error,
-        onRetry: _load,
-        child: _buildContent(context),
+      body: Column(
+        children: [
+          if (_fromCache && _refreshFailed) _buildCacheBanner(context),
+          Expanded(
+            child: LoadView(
+              loading: _loading,
+              error: _error,
+              onRetry: _load,
+              child: _buildContent(context),
+            ),
+          ),
+        ],
       ),
       bottomNavigationBar: _loading || _error != null
           ? null
@@ -204,6 +254,30 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                 ),
               ),
             ),
+    );
+  }
+
+  /// 缓存兜底横幅：刷新失败但快照可用。
+  Widget _buildCacheBanner(BuildContext context) {
+    final theme = Theme.of(context);
+    return Material(
+      color: theme.colorScheme.surfaceContainerHighest,
+      child: SizedBox(
+        width: double.infinity,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+          child: Row(
+            children: [
+              Icon(Icons.cloud_off_rounded,
+                  size: 14, color: theme.colorScheme.outline),
+              const SizedBox(width: 6),
+              Text('网络不可用，正在显示缓存数据',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.outline)),
+            ],
+          ),
+        ),
+      ),
     );
   }
 

@@ -1873,6 +1873,146 @@ class BookChapterCache extends _JsonFileStore {
   Future<void> persist(Map<String, dynamic> json) => _writeJson(json);
 }
 
+// ---------- 详情快照缓存 ----------
+
+/// 详情快照缓存（详情页秒开）：`aquan_detail_snapshot.json`。
+///
+/// 键约定：`aqua:detail:<bookId>` / `aqua:dir:<bookId>`（自家书籍详情与目录）、
+/// `src:<sourceKey>:<itemId>`（书源详情 UnifiedSeries）。
+/// 值为模型 toJson 的原始 Map（含 Map 字段的模型必须存原始 JSON，
+/// 二次转模型会丢字段——VenHM 教训）。快照可再生，不进备份白名单。
+/// 双阈值淘汰（条数 + 字节）参照 [BookChapterCache]；损坏条目跳过不抛。
+class DetailSnapshotStore extends _JsonFileStore {
+  DetailSnapshotStore({super.testDirectory}) : super('aquan_detail_snapshot.json');
+
+  static const int defaultLimit = 200;
+  static const int defaultMaxBytes = 4 * 1024 * 1024;
+
+  final Map<String, _CachedSnapshot> _items = {};
+  int _limit = defaultLimit;
+  int _maxBytes = defaultMaxBytes;
+
+  int get limit => _limit;
+
+  set limit(int v) => _limit = v < 1 ? defaultLimit : v;
+
+  int get maxBytes => _maxBytes;
+
+  set maxBytes(int v) =>
+      _maxBytes = v < 64 * 1024 ? defaultMaxBytes : v;
+
+  /// 当前占用（UTF-16 估算：`json.length * 2`，与 BookChapterCache 同口径）。
+  int get totalBytes {
+    var sum = 0;
+    for (final item in _items.values) {
+      sum += item.bytes;
+    }
+    return sum;
+  }
+
+  int get length => _items.length;
+
+  /// 取快照原始 JSON（未命中/已淘汰返回 null）。
+  Map<String, dynamic>? get(String key) => _items[key]?.data;
+
+  /// 快照保存时间（用于调试/展示「缓存于…」）。
+  DateTime? savedAtOf(String key) => _items[key]?.savedAt;
+
+  Future<void> put(String key, Map<String, dynamic> data) async {
+    await ensureLoaded();
+    _items[key] = _CachedSnapshot(
+      data: Map<String, dynamic>.of(data),
+      savedAt: DateTime.now(),
+      bytes: jsonEncode(data).length * 2,
+    );
+    await _flush();
+  }
+
+  Future<void> remove(String key) async {
+    await ensureLoaded();
+    if (_items.remove(key) == null) return;
+    await _flush();
+  }
+
+  Future<void> clear() async {
+    await ensureLoaded();
+    if (_items.isEmpty) return;
+    _items.clear();
+    await _flush();
+  }
+
+  Future<void> _flush() async {
+    _prune();
+    await _writeJson({
+      for (final e in _items.entries) e.key: e.value.toJson(),
+    });
+    notifyListeners();
+  }
+
+  /// 双阈值淘汰：超条数或超字节时按最旧淘汰，至少保留一条。
+  void _prune() {
+    if (_items.length <= _limit && totalBytes <= _maxBytes) return;
+    final ordered = _items.entries.toList()
+      ..sort((a, b) => b.value.savedAt.compareTo(a.value.savedAt));
+    final keep = <String>{};
+    var bytes = 0;
+    for (final entry in ordered) {
+      if (keep.length >= _limit) break;
+      if (bytes + entry.value.bytes > _maxBytes && keep.isNotEmpty) break;
+      bytes += entry.value.bytes;
+      keep.add(entry.key);
+    }
+    _items.removeWhere((k, _) => !keep.contains(k));
+  }
+
+  @override
+  Future<void> loadFromDisk() async {
+    final json = await _readJson();
+    _items.clear();
+    json.forEach((k, v) {
+      final snap = _CachedSnapshot.tryFromJson(v);
+      if (snap != null) _items[k] = snap;
+    });
+    _loaded = true;
+    _prune();
+    notifyListeners();
+  }
+
+  @override
+  Future<void> persist(Map<String, dynamic> json) => _writeJson(json);
+}
+
+class _CachedSnapshot {
+  const _CachedSnapshot({
+    required this.data,
+    required this.savedAt,
+    required this.bytes,
+  });
+
+  final Map<String, dynamic> data;
+  final DateTime savedAt;
+
+  /// 估算占用（jsonEncode 长度 ×2），put 时算好，淘汰时不重复编码。
+  final int bytes;
+
+  Map<String, dynamic> toJson() => {
+        'data': data,
+        'saved_at': savedAt.millisecondsSinceEpoch,
+      };
+
+  static _CachedSnapshot? tryFromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final data = raw['data'];
+    final savedAt = (raw['saved_at'] as num?)?.toInt();
+    if (data is! Map<String, dynamic> || savedAt == null) return null;
+    return _CachedSnapshot(
+      data: data,
+      savedAt: DateTime.fromMillisecondsSinceEpoch(savedAt),
+      bytes: jsonEncode(data).length * 2,
+    );
+  }
+}
+
 // ---------- 播放线路健康度 ----------
 
 /// 播放线路健康度（`aquan_playback_health.json`）。

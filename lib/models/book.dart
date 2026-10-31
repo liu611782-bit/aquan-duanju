@@ -50,6 +50,21 @@ class BookDetail {
         readCount: (json['read_count'] as num?)?.toInt() ?? 0,
         finished: json['finished'] as bool? ?? false,
       );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'author': author,
+        'abstract': abstractText,
+        'cover_url': coverUrl,
+        'word_count': wordCount,
+        'chapter_count': chapterCount,
+        'last_chapter_title': lastChapterTitle,
+        'category': category,
+        'score': score,
+        'read_count': readCount,
+        'finished': finished,
+      };
 }
 
 /// 目录里的一章。
@@ -74,6 +89,13 @@ class BookChapter {
         volume: json['volume'] as String? ?? '',
         index: (json['index'] as num?)?.toInt() ?? 0,
       );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'volume': volume,
+        'index': index,
+      };
 }
 
 /// 整本目录。
@@ -92,4 +114,9 @@ class BookDirectory {
             .map(BookChapter.fromJson)
             .toList(),
       );
+
+  Map<String, dynamic> toJson() => {
+        'total': total,
+        'chapters': [for (final c in chapters) c.toJson()],
+      };
 }

@@ -28,6 +28,7 @@ class AppScope extends InheritedNotifier<ChangeNotifier> {
     required this.searches,
     required this.playSkip,
     required this.downloads,
+    required this.detailSnapshots,
     required this.sources,
     required this.sourceHealth,
     required this.marketSites,
@@ -53,6 +54,9 @@ class AppScope extends InheritedNotifier<ChangeNotifier> {
   final SearchHistoryStore searches;
   final PlaySkipStore playSkip;
   final DownloadService downloads;
+
+  /// 详情页快照缓存（秒开；可再生数据，不进备份）。
+  final DetailSnapshotStore detailSnapshots;
 
   /// 第三方影视源（TVBox / CMS）：配置、健康、源市场索引站。
   final SourcesStore sources;

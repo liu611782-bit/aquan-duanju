@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/sources/source_adapter.dart';
@@ -37,6 +39,13 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
   bool _loading = true;
   Object? _error;
 
+  /// 当前内容来自快照缓存（秒开）；后台刷新失败时保留缓存并提示。
+  bool _fromCache = false;
+  bool _refreshFailed = false;
+
+  String get _snapshotKey =>
+      'src:${widget.source.id}:${widget.series.sourceItemId}';
+
   @override
   void initState() {
     super.initState();
@@ -44,19 +53,50 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
   }
 
   Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+      _fromCache = false;
+      _refreshFailed = false;
+    });
+    // 快照秒开：命中先渲染，后台刷新；失败保留缓存。
+    final store = AppScope.read(context).detailSnapshots;
+    await store.ensureLoaded();
+    final cached = store.get(_snapshotKey);
+    final hasSnapshot = cached != null;
+    if (hasSnapshot && mounted) {
+      final snapshot = UnifiedSeries.tryFromJson(cached);
+      if (snapshot != null) {
+        setState(() {
+          _series = snapshot;
+          _loading = false;
+          _fromCache = true;
+        });
+      }
+    }
     try {
       final detail = await widget.adapter.detail(widget.series.sourceItemId);
       if (!mounted) return;
       setState(() {
         _series = detail;
         _loading = false;
+        _fromCache = false;
+        _refreshFailed = false;
       });
+      unawaited(store.put(_snapshotKey, detail.toJson()));
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        _error = e;
-        _loading = false;
-      });
+      if (hasSnapshot && _series != null) {
+        setState(() {
+          _loading = false;
+          _refreshFailed = true;
+        });
+      } else {
+        setState(() {
+          _error = e;
+          _loading = false;
+        });
+      }
     }
   }
 
@@ -77,15 +117,39 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
         .firstOrNull;
     return Scaffold(
       appBar: AppBar(title: Text(series.title)),
-      body: LoadView(
-        loading: _loading,
-        error: _error,
-        onRetry: _load,
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
+      body: Column(
+        children: [
+          if (_fromCache && _refreshFailed)
+            Material(
+              color: theme.colorScheme.surfaceContainerHighest,
+              child: SizedBox(
+                width: double.infinity,
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  child: Row(
+                    children: [
+                      Icon(Icons.cloud_off_rounded,
+                          size: 14, color: theme.colorScheme.outline),
+                      const SizedBox(width: 6),
+                      Text('网络不可用，正在显示缓存数据',
+                          style: theme.textTheme.bodySmall
+                              ?.copyWith(color: theme.colorScheme.outline)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          Expanded(
+            child: LoadView(
+              loading: _loading,
+              error: _error,
+              onRetry: _load,
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -173,11 +237,14 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
                   ],
                 );
               }),
-            ],
+                ],
+              ),
+            ),
           ),
         ),
-      ),
-    );
+          ],
+        ),
+      );
   }
 
   void _play(UnifiedEpisode ep) {

@@ -138,6 +138,25 @@ class PlayLine {
   const PlayLine({required this.name, required this.episodes});
   final String name;
   final List<UnifiedEpisode> episodes;
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'episodes': [for (final e in episodes) e.toJson()],
+      };
+
+  static PlayLine? tryFromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final name = raw['name'];
+    final episodes = raw['episodes'];
+    if (name is! String) return null;
+    if (episodes is! List) return null;
+    final parsed = <UnifiedEpisode>[];
+    for (final e in episodes) {
+      final ep = UnifiedEpisode.tryFromJson(e);
+      if (ep != null) parsed.add(ep);
+    }
+    return PlayLine(name: name, episodes: parsed);
+  }
 }
 
 /// 一集可播地址。
@@ -150,6 +169,20 @@ class UnifiedEpisode {
   final String title;
   final String url;
   final int index;
+
+  Map<String, dynamic> toJson() => {'title': title, 'url': url, 'index': index};
+
+  static UnifiedEpisode? tryFromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final title = raw['title'];
+    final url = raw['url'];
+    if (title is! String || url is! String) return null;
+    return UnifiedEpisode(
+      title: title,
+      url: url,
+      index: (raw['index'] as num?)?.toInt() ?? 0,
+    );
+  }
 }
 
 /// 统一内模：红果与第三方源都适配成它，供详情/播放器/历史复用。
@@ -194,6 +227,57 @@ class UnifiedSeries {
       }
     }
     return best;
+  }
+
+  Map<String, dynamic> toJson() => {
+        'source_key': sourceKey,
+        'source_item_id': sourceItemId,
+        'title': title,
+        'normalized_title': normalizedTitle,
+        'year': year,
+        'cover_url': coverUrl,
+        'remarks': remarks,
+        'description': description,
+        'lines': [for (final l in lines) l.toJson()],
+        'headers': headers,
+      };
+
+  /// 详情快照容错解析：关键字段（title/sourceItemId）缺失返回 null，
+  /// 其余字段缺失按空值（参照 PlaySkipEntry.tryFromJson 风格）。
+  static UnifiedSeries? tryFromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final title = raw['title'];
+    final itemId = raw['source_item_id'];
+    if (title is! String || itemId is! String) return null;
+    final linesRaw = raw['lines'];
+    final lines = <PlayLine>[];
+    if (linesRaw is List) {
+      for (final l in linesRaw) {
+        final line = PlayLine.tryFromJson(l);
+        if (line != null) lines.add(line);
+      }
+    }
+    final headersRaw = raw['headers'];
+    final headers = <String, String>{};
+    if (headersRaw is Map) {
+      headersRaw.forEach((k, v) {
+        if (k is String && v is String) headers[k] = v;
+      });
+    }
+    return UnifiedSeries(
+      sourceKey: raw['source_key'] is String ? raw['source_key'] as String : '',
+      sourceItemId: itemId,
+      title: title,
+      normalizedTitle:
+          raw['normalized_title'] is String ? raw['normalized_title'] as String : title,
+      year: raw['year'] is String ? raw['year'] as String : '',
+      coverUrl: raw['cover_url'] is String ? raw['cover_url'] as String : '',
+      remarks: raw['remarks'] is String ? raw['remarks'] as String : '',
+      description:
+          raw['description'] is String ? raw['description'] as String : '',
+      lines: lines,
+      headers: headers,
+    );
   }
 }
 

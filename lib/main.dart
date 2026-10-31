@@ -235,6 +235,7 @@ class _AquaAppState extends State<AquaApp> {
   FollowStore? _follows;
   SearchHistoryStore? _searches;
   PlaySkipStore? _playSkip;
+  DetailSnapshotStore? _detailSnapshots;
   DownloadService? _downloads;
   SourcesStore? _sources;
   SourceHealthStore? _sourceHealth;
@@ -261,6 +262,7 @@ class _AquaAppState extends State<AquaApp> {
       _bookCache != null &&
       _follows != null &&
       _playSkip != null &&
+      _detailSnapshots != null &&
       _sources != null &&
       _sourceHealth != null &&
       _marketSites != null &&
@@ -306,6 +308,7 @@ class _AquaAppState extends State<AquaApp> {
       final follows = FollowStore();
       final searches = SearchHistoryStore();
       final playSkip = PlaySkipStore();
+      final detailSnapshots = DetailSnapshotStore();
       final downloads = DownloadStore();
       // 第三方影视源：启动即加载（索引站种子在 store 首载时写入）。
       final sources = SourcesStore();
@@ -326,6 +329,7 @@ class _AquaAppState extends State<AquaApp> {
       await follows.ensureLoaded();
       await searches.ensureLoaded();
       await playSkip.ensureLoaded();
+      await detailSnapshots.ensureLoaded();
       await downloads.ensureLoaded();
       await sources.ensureLoaded();
       await sourceHealth.ensureLoaded();
@@ -381,6 +385,7 @@ class _AquaAppState extends State<AquaApp> {
         _follows = follows;
         _searches = searches;
         _playSkip = playSkip;
+        _detailSnapshots = detailSnapshots;
         _downloads = downloadService;
         _sources = sources;
         _sourceHealth = sourceHealth;
@@ -509,6 +514,7 @@ class _AquaAppState extends State<AquaApp> {
         searches: _searches!,
         playSkip: _playSkip!,
         downloads: _downloads!,
+        detailSnapshots: _detailSnapshots!,
         sources: _sources!,
         sourceHealth: _sourceHealth!,
         marketSites: _marketSites!,
