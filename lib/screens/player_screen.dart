@@ -201,6 +201,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _mini = false;
   Rect? _preMiniBounds;
 
+  /// 桌面「铺满」模式：画面 cover 裁剪填充窗口（抖音式），再点切回 contain。
+  bool _fill = false;
+
   bool get _isDesktop =>
       Platform.isWindows || Platform.isMacOS || Platform.isLinux;
 
@@ -429,6 +432,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     _smtc = null;
     _engine.dispose();
     _disposed = true;
+    // 全屏/置顶残留会把主窗口卡在全屏态：退播放页时还原。
+    if (_isDesktop) {
+      windowManager.isFullScreen().then((full) {
+        if (full) windowManager.setFullScreen(false);
+      });
+    }
     WakelockPlus.disable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _restoreOrientation();
@@ -2251,7 +2260,20 @@ class _PlayerScreenState extends State<PlayerScreen>
     return Video(
       controller: _engine.videoController,
       controls: NoVideoControls,
+      fit: _fill ? BoxFit.cover : BoxFit.contain,
     );
+  }
+
+  /// 桌面「铺满」：进全屏（若尚未全屏）+ 画面 cover 裁剪填充；再点切回 contain。
+  /// 全屏开关仍归「全屏(F)」按钮管，这里只负责画面填充方式。
+  Future<void> _toggleFill() async {
+    if (!_isDesktop) return;
+    try {
+      if (!await windowManager.isFullScreen()) {
+        await windowManager.setFullScreen(true);
+      }
+      if (mounted) setState(() => _fill = !_fill);
+    } catch (_) {}
   }
 
   Widget _buildLoadError(BuildContext context) {
@@ -2886,6 +2908,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                           },
                           icon: const Icon(Icons.aspect_ratio,
                               color: Colors.white),
+                        ),
+                      // 桌面端：铺满——全屏 + 画面裁剪填充（竖屏剧也能无黑边）。
+                      if (_isDesktop)
+                        IconButton(
+                          tooltip: _fill ? '适应画面' : '铺满全屏',
+                          onPressed: _toggleFill,
+                          icon: Icon(
+                            _fill ? Icons.fit_screen : Icons.crop_free,
+                            color: Colors.white,
+                          ),
                         ),
                       // 桌面端：迷你置顶小窗（I 键），边干活边看。
                       if (_isDesktop)

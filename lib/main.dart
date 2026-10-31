@@ -81,6 +81,15 @@ Future<void> _start(List<String> args) async {
   }
 
   MediaKit.ensureInitialized();
+  // window_manager 的 native 句柄只在 ensureInitialized 后才绑定：
+  // 缺了它 setFullScreen/setBounds/show 全部静默失效（窗口 API 全线失灵的根因）。
+  if (_isDesktop) {
+    try {
+      await windowManager.ensureInitialized();
+    } catch (e, stack) {
+      ErrorLog.instance.record('窗口初始化', e, stack);
+    }
+  }
   final settings = await SettingsStore.load();
   SingleInstance? instance;
   // 单实例转交 / aquan-cli 只用于桌面端；Android 由系统 singleTop 管理，
