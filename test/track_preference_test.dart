@@ -20,6 +20,26 @@ void main() {
     test('subtitleOff 恒为 -1', () {
       expect(TrackPreference.subtitleOff, -1);
     });
+
+    test('stableTrackKey：归一化 + 无名轨 null', () {
+      expect(
+        TrackPreference.stableTrackKey(language: ' Chi ', title: ' 中文配音  2'),
+        'chi|中文配音 2',
+        reason: '小写 + 空白压扁',
+      );
+      expect(TrackPreference.stableTrackKey(language: '', title: '   '), isNull);
+      expect(TrackPreference.stableTrackKey(), isNull);
+    });
+
+    test('uniqueMatchIndex：唯一命中才应用（Pathfin singleOrNull）', () {
+      final keys = <String?>['chi|中文', null, 'chi|中文', 'eng'];
+      // 命中两条 → 不应用（宁可保持默认，不错配）。
+      expect(TrackPreference.uniqueMatchIndex('chi|中文', keys), isNull);
+      // 唯一命中。
+      expect(TrackPreference.uniqueMatchIndex('eng', keys), 3);
+      // 无命中。
+      expect(TrackPreference.uniqueMatchIndex('jpn', keys), isNull);
+    });
   });
 
   group('HistoryEntry 轨道偏好持久化', () {
@@ -28,11 +48,15 @@ void main() {
         seriesId: 's1',
         audioTrackIndex: 1,
         subtitleTrackIndex: TrackPreference.subtitleOff,
+        audioTrackKey: 'chi|中文',
+        subtitleTrackKey: 'eng|english',
       );
       final back = HistoryEntry.fromJson(
           jsonDecode(jsonEncode(entry.toJson())) as Map<String, dynamic>);
       expect(back.audioTrackIndex, 1);
       expect(back.subtitleTrackIndex, -1);
+      expect(back.audioTrackKey, 'chi|中文');
+      expect(back.subtitleTrackKey, 'eng|english');
 
       final legacy = HistoryEntry.fromJson(<String, dynamic>{
         'series_id': 's2',
@@ -49,6 +73,7 @@ void main() {
           seriesId: 's1',
           audioTrackIndex: 0,
           subtitleTrackIndex: TrackPreference.subtitleOff,
+          audioTrackKey: 'chi|中文',
         );
         await store.record(
           seriesId: 's1',
@@ -62,6 +87,7 @@ void main() {
         final entry = store.get('s1');
         expect(entry?.audioTrackIndex, 0, reason: 'record 合并保留音轨偏好');
         expect(entry?.subtitleTrackIndex, -1, reason: 'record 合并保留关闭字幕偏好');
+        expect(entry?.audioTrackKey, 'chi|中文', reason: 'record 合并保留身份键');
         expect(entry?.episode, 3);
       } finally {
         await tmp.delete(recursive: true);

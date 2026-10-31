@@ -21,8 +21,9 @@ Future<void> showPlayerTracksSheet(
     BuildContext context, PlayerEngine engine, {
   double initialSubtitleDelay = 0,
   Future<void> Function(double delayMs)? onSubtitleDelayChanged,
-  Future<void> Function(int trackIndex)? onAudioTrackSelected,
-  Future<void> Function(int trackIndex)? onSubtitleTrackSelected,
+  Future<void> Function(int trackIndex, String trackKey)? onAudioTrackSelected,
+  Future<void> Function(int trackIndex, String trackKey)?
+      onSubtitleTrackSelected,
 }) async {
   final tracks = engine.state.tracks;
   final audioTracks =
@@ -68,7 +69,12 @@ Future<void> showPlayerTracksSheet(
                     engine.setAudioTrack(track);
                     final idx = audioTracks.indexOf(track);
                     if (idx >= 0) {
-                      unawaited(onAudioTrackSelected?.call(idx));
+                      unawaited(onAudioTrackSelected?.call(
+                        idx,
+                        TrackPreference.stableTrackKey(
+                                language: track.language, title: track.title) ??
+                            '',
+                      ));
                     }
                     Navigator.pop(sheetContext);
                   },
@@ -108,7 +114,12 @@ Future<void> showPlayerTracksSheet(
                     engine.setSubtitleTrack(track);
                     final idx = subtitleTracks.indexOf(track);
                     if (idx >= 0) {
-                      unawaited(onSubtitleTrackSelected?.call(idx));
+                      unawaited(onSubtitleTrackSelected?.call(
+                        idx,
+                        TrackPreference.stableTrackKey(
+                                language: track.language, title: track.title) ??
+                            '',
+                      ));
                     }
                     Navigator.pop(sheetContext);
                   },
@@ -119,8 +130,8 @@ Future<void> showPlayerTracksSheet(
                     currentSubtitle == 'no' ? const Icon(Icons.check) : null,
                 onTap: () {
                   engine.setSubtitleTrack(SubtitleTrack.no());
-                  unawaited(onSubtitleTrackSelected
-                      ?.call(TrackPreference.subtitleOff));
+                  unawaited(onSubtitleTrackSelected?.call(
+                      TrackPreference.subtitleOff, ''));
                   Navigator.pop(sheetContext);
                 },
               ),

@@ -107,6 +107,8 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   /// 音轨/字幕选择按剧记忆（面板展示序；字幕 -1=关闭）。
   int? _prefAudioIndex;
   int? _prefSubtitleIndex;
+  String? _prefAudioKey;
+  String? _prefSubtitleKey;
   bool _trackPrefApplied = false;
   StreamSubscription? _tracksSub;
 
@@ -149,6 +151,12 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
         .firstOrNull;
     _prefAudioIndex = histEntry?.audioTrackIndex;
     _prefSubtitleIndex = histEntry?.subtitleTrackIndex;
+    _prefAudioKey = (histEntry?.audioTrackKey ?? '').isEmpty
+        ? null
+        : histEntry!.audioTrackKey;
+    _prefSubtitleKey = (histEntry?.subtitleTrackKey ?? '').isEmpty
+        ? null
+        : histEntry!.subtitleTrackKey;
     _tracksSub = _engine.stream.tracks.listen((_) => _applyTrackPreference());
     castController.onRemoteStopped = (device, position) {
       if (!mounted) return;
@@ -328,25 +336,46 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
         tracks.audio.where((t) => t.id != 'auto' && t.id != 'no').toList();
     final subs =
         tracks.subtitle.where((t) => t.id != 'auto' && t.id != 'no').toList();
-    if (_prefAudioIndex == null && _prefSubtitleIndex == null) {
+    if (_prefAudioIndex == null &&
+        _prefSubtitleIndex == null &&
+        (_prefAudioKey ?? '').isEmpty &&
+        (_prefSubtitleKey ?? '').isEmpty) {
       _trackPrefApplied = true;
       return;
     }
-    final wantAudio = _prefAudioIndex != null && _prefAudioIndex! >= 0;
-    final wantSub = _prefSubtitleIndex != null && _prefSubtitleIndex! >= 0;
-    if (wantAudio && audio.isEmpty) return;
-    if (wantSub && subs.isEmpty) return;
+    if (audio.isEmpty && subs.isEmpty) return; // 轨道事件未到
     _trackPrefApplied = true;
-    if (wantAudio && _prefAudioIndex! < audio.length) {
-      unawaited(_engine.setAudioTrack(audio[_prefAudioIndex!]));
+    final audioTarget = _resolveTrackTarget(
+        _prefAudioIndex, _prefAudioKey, audio, (t) => TrackPreference.stableTrackKey(
+            language: t.language, title: t.title));
+    final subTarget = _resolveTrackTarget(
+        _prefSubtitleIndex, _prefSubtitleKey, subs, (t) => TrackPreference.stableTrackKey(
+            language: t.language, title: t.title));
+    if (audioTarget != null) {
+      unawaited(_engine.setAudioTrack(audio[audioTarget]));
     }
-    if (_prefSubtitleIndex != null) {
-      if (_prefSubtitleIndex == TrackPreference.subtitleOff) {
-        unawaited(_engine.setSubtitleTrack(SubtitleTrack.no()));
-      } else if (_prefSubtitleIndex! >= 0 && _prefSubtitleIndex! < subs.length) {
-        unawaited(_engine.setSubtitleTrack(subs[_prefSubtitleIndex!]));
-      }
+    if (_prefSubtitleIndex == TrackPreference.subtitleOff) {
+      unawaited(_engine.setSubtitleTrack(SubtitleTrack.no()));
+    } else if (subTarget != null) {
+      unawaited(_engine.setSubtitleTrack(subs[subTarget]));
     }
+  }
+
+  /// 轨道目标解析（Pathfin 语义）：稳定身份键**唯一命中**优先——命中多条
+  /// 宁可保持默认（不错配语言）；键缺失/失配时序号在界内兜底。
+  static int? _resolveTrackTarget(
+    int? index,
+    String? key,
+    List<dynamic> tracks,
+    String? Function(dynamic track) keyOf,
+  ) {
+    final keys = [for (final t in tracks) keyOf(t)];
+    if (key != null && key.isNotEmpty) {
+      final unique = TrackPreference.uniqueMatchIndex(key, keys);
+      if (unique != null) return unique;
+    }
+    if (index != null && index >= 0 && index < tracks.length) return index;
+    return null;
   }
 
   void _subscribe() {
@@ -721,21 +750,29 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
                   onPressed: () {
                     showPlayerTracksSheet(context, _engine,
                       initialSubtitleDelay: _subDelay,
-                      onAudioTrackSelected: (idx) async {
-                        setState(() => _prefAudioIndex = idx);
+                      onAudioTrackSelected: (idx, key) async {
+                        setState(() {
+                          _prefAudioIndex = idx;
+                          _prefAudioKey = key.isEmpty ? null : key;
+                        });
                         try {
                           await _history.setPlaybackPrefs(
                             seriesId: widget.series.historyKey,
                             audioTrackIndex: idx,
+                            audioTrackKey: key,
                           );
                         } catch (_) {}
                       },
-                      onSubtitleTrackSelected: (idx) async {
-                        setState(() => _prefSubtitleIndex = idx);
+                      onSubtitleTrackSelected: (idx, key) async {
+                        setState(() {
+                          _prefSubtitleIndex = idx;
+                          _prefSubtitleKey = key.isEmpty ? null : key;
+                        });
                         try {
                           await _history.setPlaybackPrefs(
                             seriesId: widget.series.historyKey,
                             subtitleTrackIndex: idx,
+                            subtitleTrackKey: key,
                           );
                         } catch (_) {}
                       },

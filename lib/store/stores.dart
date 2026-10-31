@@ -529,6 +529,8 @@ class HistoryEntry {
     this.subtitleDelayMs,
     this.audioTrackIndex,
     this.subtitleTrackIndex,
+    this.audioTrackKey = '',
+    this.subtitleTrackKey = '',
     DateTime? updatedAt,
   }) : updatedAt = updatedAt ?? DateTime.now();
 
@@ -552,6 +554,11 @@ class HistoryEntry {
   /// 面板展示序的同类下标；字幕 -1 = 关闭字幕；null = 未设置。
   final int? audioTrackIndex;
   final int? subtitleTrackIndex;
+
+  /// 轨道稳定身份键（language|title 归一化；空 = 无名轨/未设置）。
+  /// 参考实现教训：轨道编号跨集不稳定，键唯一命中才自动套用。
+  final String audioTrackKey;
+  final String subtitleTrackKey;
 
   /// 内容来源：空 = 红果（旧数据兼容）；否则为源 id 或 'bili'。
   final String sourceKey;
@@ -589,6 +596,8 @@ class HistoryEntry {
         if (subtitleDelayMs != null) 'subtitle_delay_ms': subtitleDelayMs,
         if (audioTrackIndex != null) 'audio_track_index': audioTrackIndex,
         if (subtitleTrackIndex != null) 'subtitle_track_index': subtitleTrackIndex,
+        if (audioTrackKey.isNotEmpty) 'audio_track_key': audioTrackKey,
+        if (subtitleTrackKey.isNotEmpty) 'subtitle_track_key': subtitleTrackKey,
         'updated_at': updatedAt.toIso8601String(),
       };
 
@@ -607,6 +616,8 @@ class HistoryEntry {
         subtitleDelayMs: (json['subtitle_delay_ms'] as num?)?.toInt(),
         audioTrackIndex: (json['audio_track_index'] as num?)?.toInt(),
         subtitleTrackIndex: (json['subtitle_track_index'] as num?)?.toInt(),
+        audioTrackKey: json['audio_track_key'] as String? ?? '',
+        subtitleTrackKey: json['subtitle_track_key'] as String? ?? '',
         updatedAt:
             DateTime.tryParse(json['updated_at'] as String? ?? '') ??
                 DateTime.now(),
@@ -856,6 +867,8 @@ class HistoryStore extends _JsonFileStore {
       subtitleDelayMs: existing?.subtitleDelayMs,
       audioTrackIndex: existing?.audioTrackIndex,
       subtitleTrackIndex: existing?.subtitleTrackIndex,
+      audioTrackKey: existing?.audioTrackKey ?? '',
+      subtitleTrackKey: existing?.subtitleTrackKey ?? '',
       sourceKey: sourceKey.isNotEmpty ? sourceKey : (existing?.sourceKey ?? ''),
     );
     _prune();
@@ -874,6 +887,8 @@ class HistoryStore extends _JsonFileStore {
     int? subtitleDelayMs,
     int? audioTrackIndex,
     int? subtitleTrackIndex,
+    String audioTrackKey = '',
+    String subtitleTrackKey = '',
   }) async {
     await ensureLoaded();
     final e = _entries[seriesId];
@@ -891,6 +906,12 @@ class HistoryStore extends _JsonFileStore {
       subtitleDelayMs: subtitleDelayMs ?? e?.subtitleDelayMs,
       audioTrackIndex: audioTrackIndex ?? e?.audioTrackIndex,
       subtitleTrackIndex: subtitleTrackIndex ?? e?.subtitleTrackIndex,
+      audioTrackKey: audioTrackKey.isNotEmpty
+          ? audioTrackKey
+          : (e?.audioTrackKey ?? ''),
+      subtitleTrackKey: subtitleTrackKey.isNotEmpty
+          ? subtitleTrackKey
+          : (e?.subtitleTrackKey ?? ''),
       updatedAt: e?.updatedAt,
     );
     await _writeJson({
