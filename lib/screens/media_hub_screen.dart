@@ -250,6 +250,9 @@ class _BrowseTabState extends State<_BrowseTab>
   Object? _error;
   int _seq = 0;
 
+  /// 跨页去重 + 整页重复终止（站点分页垃圾重复防护）。
+  final SearchPageLedger _ledger = SearchPageLedger();
+
   @override
   bool get wantKeepAlive => true;
 
@@ -275,6 +278,7 @@ class _BrowseTabState extends State<_BrowseTab>
       _items.clear();
       _page = 1;
       _hasMore = false;
+      _ledger.reset();
     });
     try {
       final cats = await _adapter.categories();
@@ -302,11 +306,12 @@ class _BrowseTabState extends State<_BrowseTab>
       final result = await _adapter.list(
           categoryId: _categoryId.isEmpty ? null : _categoryId, page: page);
       if (!mounted || seq != _seq) return;
+      final fresh = _ledger.accept(page, result.items);
       setState(() {
         if (reset) _items.clear();
-        _items.addAll(result.items);
+        _items.addAll(fresh);
         _page = page + 1;
-        _hasMore = result.hasMore;
+        _hasMore = result.hasMore && _ledger.wantsMore;
         _loading = false;
         _loadingMore = false;
       });
@@ -411,6 +416,13 @@ class _SearchTabState extends State<_SearchTab>
   CancelToken? _cancel;
   StreamSubscription<SearchEvent>? _sub;
 
+  /// 各源是否还有下一页（「加载更多结果」页脚可见性）。
+  final _hasMoreBySource = <String, bool>{};
+  bool _loadingMore = false;
+  String _lastQuery = '';
+  List<SourceAdapter> _lastAdapters = const [];
+  StreamSubscription<SearchEvent>? _moreSub;
+
   @override
   bool get wantKeepAlive => true;
 
@@ -428,6 +440,7 @@ class _SearchTabState extends State<_SearchTab>
     _controller.dispose();
     _cancel?.cancel();
     _sub?.cancel();
+    _moreSub?.cancel();
     super.dispose();
   }
 
@@ -441,11 +454,16 @@ class _SearchTabState extends State<_SearchTab>
     if (query.isEmpty || adapters.isEmpty) return;
 
     _cancel?.cancel();
+    _moreSub?.cancel();
     final cancel = _cancel = CancelToken();
     final seq = ++_seq;
+    _lastQuery = query;
+    _lastAdapters = adapters;
     setState(() {
       _groups.clear();
       _failedSources.clear();
+      _hasMoreBySource.clear();
+      _loadingMore = false;
       _searching = true;
       _done = 0;
       _responded.clear();
@@ -467,6 +485,7 @@ class _SearchTabState extends State<_SearchTab>
           case SourceResult():
             _mergeGroups(event);
             _responded.add(event.sourceId);
+            _hasMoreBySource[event.sourceId] = event.hasMore;
             _done = _responded.length;
           case SourceFailedEvent():
             _failedSources[event.sourceName] = event.code;
@@ -479,6 +498,44 @@ class _SearchTabState extends State<_SearchTab>
             break;
         }
       });
+    });
+  }
+
+  /// 聚合续页：对还有下一页的源拉下一页，增量并入分组。
+  ///
+  /// 编排层已做去重/重复页终止/代际保护；这里只负责合并与页脚状态。
+  void _loadMoreResults() {
+    if (_searching || _loadingMore || _lastQuery.isEmpty) return;
+    final scope = AppScope.read(context);
+    final adapters = _lastAdapters.isNotEmpty
+        ? _lastAdapters
+        : [for (final s in scope.sources.enabled) ?buildSourceAdapter(s)];
+    if (adapters.isEmpty) return;
+    final seq = ++_seq;
+    _moreSub?.cancel();
+    setState(() => _loadingMore = true);
+    _moreSub = _orchestrator
+        .searchMore(
+      _lastQuery,
+      adapters: adapters,
+      parallelism: scope.settings.searchParallelism,
+      perSourceTimeout: Duration(milliseconds: scope.settings.searchTimeoutMs),
+      cancel: _cancel,
+    )
+        .listen((event) {
+      if (!mounted || seq != _seq) return;
+      switch (event) {
+        case SourceResult():
+          _mergeGroups(event);
+          _hasMoreBySource[event.sourceId] = event.hasMore;
+        case SourceFailedEvent():
+          // 续页失败不打断已有结果；页脚保留，可再次点击重试。
+          break;
+        case SearchDoneEvent():
+          setState(() => _loadingMore = false);
+        case SearchStarted():
+          break;
+      }
     });
   }
 
@@ -571,6 +628,22 @@ class _SearchTabState extends State<_SearchTab>
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: theme.colorScheme.outline),
               ),
+            ),
+          ),
+        if (!_searching && _hasMoreBySource.containsValue(true))
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Center(
+              child: _loadingMore
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : TextButton.icon(
+                      onPressed: _loadMoreResults,
+                      icon: const Icon(Icons.expand_more, size: 18),
+                      label: const Text('加载更多结果'),
+                    ),
             ),
           ),
         Expanded(

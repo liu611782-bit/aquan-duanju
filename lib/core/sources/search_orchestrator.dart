@@ -78,6 +78,13 @@ class SearchOrchestrator {
   final Map<String, DateTime> _negativeCache = {};
   int _seq = 0;
 
+  /// 聚合续页账本：query → sourceId → ledger。search() 重开时重置并播种第 1 页。
+  final Map<String, Map<String, SearchPageLedger>> _pagingLedgers = {};
+
+  /// 续页代际：search() 重开或新的 searchMore() 都会自增，
+  /// 晚到的续页事件按代际丢弃（VenHM SearchSession 语义）。
+  int _pagingGen = 0;
+
   static const negativeTtl = Duration(seconds: 90);
   static const totalBudget = Duration(seconds: 12);
 
@@ -100,6 +107,11 @@ class SearchOrchestrator {
       yield SearchDoneEvent(0, 0);
       return;
     }
+    // 新搜索重置换页状态：账本清空（第 1 页下面重新播种）、续页代际自增
+    // （正在跑的 searchMore 流整体作废）。
+    _pagingGen++;
+    final ledgers = _pagingLedgers.putIfAbsent(q, () => {});
+    ledgers.clear();
     yield SearchStarted(adapters.length);
 
     String cacheKey(String sourceId) => '$sourceId|$q|1';
@@ -114,6 +126,8 @@ class SearchOrchestrator {
         continue;
       }
       if (hit != null && DateTime.now().difference(hit.at) < positiveTtl) {
+        // 播种续页账本：第 1 页条目参与后续页去重。
+        ledgers.putIfAbsent(a.id, SearchPageLedger.new).accept(1, hit.items);
         yield SourceResult(
             sourceId: a.id,
             sourceName: a.name,
@@ -175,6 +189,9 @@ class SearchOrchestrator {
                 items: const [],
                 page: 1));
           } else {
+            ledgers
+                .putIfAbsent(adapter.id, SearchPageLedger.new)
+                .accept(1, hits);
             _cache[cacheKey(adapter.id)] =
                 _CacheEntry(items: hits, at: DateTime.now(), hasMore: hasMore);
             collect.add(SourceResult(
@@ -229,6 +246,117 @@ class SearchOrchestrator {
     yield SearchDoneEvent(groups.length, DateTime.now().difference(started).inMilliseconds);
   }
 
+  /// 聚合搜索续页：对 [query] 已有第 1 页账本的源继续拉下一页。
+  ///
+  /// 语义（VenHM SearchSession）：
+  /// - 跨页按 `sourceKey:sourceItemId` 去重，只回新增条目；
+  /// - 某页返回条目**全部**重复 → 该源游标耗尽（结果 hasMore=false，防死循环翻页）；
+  /// - 晚到保护：期间发生新的 search()/searchMore()，旧流整体按代际丢弃；
+  /// - 短页不视为结尾（是否继续由上游 hasMore 与账本共同决定）。
+  /// - 续页失败不发负缓存（不应毒化第 1 页正缓存），调用方可重试。
+  ///
+  /// [SearchDoneEvent.groupCount] 恒为 0：分组合并由调用方负责。
+  Stream<SearchEvent> searchMore(
+    String query, {
+    required List<SourceAdapter> adapters,
+    int parallelism = 4,
+    Duration perSourceTimeout = const Duration(seconds: 5),
+    CancelToken? cancel,
+  }) async* {
+    final q = query.trim();
+    if (q.isEmpty || adapters.isEmpty) return;
+    final gen = ++_pagingGen;
+    final ledgers = _pagingLedgers.putIfAbsent(q, () => {});
+    final pending = <(SourceAdapter, SearchPageLedger)>[];
+    for (final a in adapters) {
+      final ledger = ledgers[a.id];
+      if (ledger == null || !ledger.wantsMore) continue;
+      pending.add((a, ledger));
+    }
+    if (pending.isEmpty) return;
+    yield SearchStarted(pending.length);
+
+    final internal = CancelToken();
+    cancel?.whenCancelled(internal.cancel);
+
+    final collect = StreamController<SearchEvent>();
+    var next = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        if (internal.isCancelled || gen != _pagingGen) return;
+        final i = next++;
+        if (i >= pending.length) return;
+        final (adapter, ledger) = pending[i];
+        final page = ledger.lastPage + 1;
+        try {
+          final events = await adapter
+              .search(q, page: page)
+              .timeout(perSourceTimeout)
+              .toList();
+          if (internal.isCancelled || gen != _pagingGen) return;
+          final hits = <UnifiedSeries>[];
+          var failed = false;
+          SourceExceptionCode failCode = SourceExceptionCode.network;
+          var failDetail = '';
+          var rawHasMore = false;
+          for (final e in events) {
+            if (e is SourceHits) {
+              hits.addAll(e.items);
+              rawHasMore = rawHasMore || e.hasMore;
+            } else if (e is SourceSearchFailed) {
+              failed = true;
+              failCode = e.code;
+              failDetail = e.detail;
+            }
+          }
+          if (hits.isEmpty && failed) {
+            collect.add(SourceFailedEvent(
+                adapter.id, adapter.name, failCode, failDetail));
+          } else {
+            final fresh = ledger.accept(page, hits);
+            collect.add(SourceResult(
+              sourceId: adapter.id,
+              sourceName: adapter.name,
+              items: fresh,
+              page: page,
+              hasMore: rawHasMore && ledger.wantsMore,
+            ));
+          }
+        } on TimeoutException {
+          if (internal.isCancelled || gen != _pagingGen) return;
+          collect.add(SourceFailedEvent(adapter.id, adapter.name,
+              SourceExceptionCode.searchTimeout,
+              '单源超时 ${perSourceTimeout.inMilliseconds}ms'));
+        } on SourceException catch (e) {
+          if (internal.isCancelled || gen != _pagingGen) return;
+          collect.add(
+              SourceFailedEvent(adapter.id, adapter.name, e.code, e.detail));
+        } catch (e) {
+          if (internal.isCancelled || gen != _pagingGen) return;
+          collect.add(SourceFailedEvent(adapter.id, adapter.name,
+              SourceExceptionCode.network, e.toString()));
+        }
+      }
+    }
+
+    final workers = <Future<void>>[];
+    final workerCount = parallelism.clamp(1, pending.length);
+    for (var i = 0; i < workerCount; i++) {
+      workers.add(worker());
+    }
+    unawaited(Future.wait(workers).whenComplete(() {
+      if (!collect.isClosed) collect.close();
+    }));
+
+    await for (final event in collect.stream) {
+      if (gen != _pagingGen) break;
+      yield event;
+    }
+    if (gen != _pagingGen) return;
+    yield const SearchDoneEvent(0, 0);
+  }
+
   /// 归一化标题 + 年份去重合并（tvbox mergeMovies 同键）。
   void _addToGroup(List<SourceGroup> groups, UnifiedSeries series) {
     final key = '${series.normalizedTitle}@${series.year}';
@@ -267,6 +395,43 @@ class _CacheEntry {
   final List<UnifiedSeries> items;
   final DateTime at;
   final bool hasMore;
+}
+
+/// 单源分页账本（聚合续页 / 单源浏览共用）：跨页去重 + 重复页终止。
+///
+/// VenHM SearchSession 语义：已见条目（`sourceKey:sourceItemId`）不再返回；
+/// 某页返回条目**全部**与已见集合重复 → 游标耗尽（[wantsMore] 置 false，
+/// 防部分站点永远重复同一页）；空页不算重复页（结尾交给 hasMore）；
+/// 短页**不**视为结尾。
+class SearchPageLedger {
+  final Set<String> _seen = <String>{};
+
+  /// 最后接受的页码（searchMore 以此 +1 续拉）。
+  int lastPage = 0;
+
+  bool _exhausted = false;
+
+  /// 是否还需要继续翻页。
+  bool get wantsMore => !_exhausted;
+
+  /// 清空账本（重开浏览/换分类/新搜索时）。
+  void reset() {
+    _seen.clear();
+    lastPage = 0;
+    _exhausted = false;
+  }
+
+  /// 收下一页：返回新增条目；整页重复时置耗尽并返回空表。
+  List<UnifiedSeries> accept(int page, List<UnifiedSeries> items) {
+    lastPage = page;
+    if (_exhausted) return const [];
+    final fresh = <UnifiedSeries>[];
+    for (final s in items) {
+      if (_seen.add('${s.sourceKey}:${s.sourceItemId}')) fresh.add(s);
+    }
+    if (items.isNotEmpty && fresh.isEmpty) _exhausted = true;
+    return fresh;
+  }
 }
 
 /// 组排序：命中源数 ↓ > 精确匹配 > 保持流式到达序（CineFlow mergeHits 同策略）。
