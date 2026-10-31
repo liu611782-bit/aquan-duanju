@@ -32,6 +32,8 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
   int _exploreIndex = 0;
   List<VeneraComic> _comics = const [];
   bool _comicsLoading = false;
+  bool _hasAccount = false;
+  bool _logged = false;
 
   @override
   void initState() {
@@ -52,6 +54,8 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
       final source = VeneraMangaSource(js);
       await source.load();
       final titles = await source.exploreTitles();
+      _hasAccount = await source.hasAccount();
+      _logged = await source.isLogged();
       if (!mounted) return;
       setState(() {
         _source = source;
@@ -135,6 +139,14 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
       appBar: AppBar(
         title: Text(_source?.name ?? '漫画源'),
         actions: [
+          if (_hasAccount)
+            IconButton(
+              icon: Icon(_logged ? Icons.person : Icons.person_outline,
+                  color:
+                      _logged ? Theme.of(context).colorScheme.primary : null),
+              onPressed: _showAccountAction,
+              tooltip: _logged ? '账号（已登录）' : '登录',
+            ),
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _loadSource,
@@ -214,6 +226,86 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
         ),
       ],
     );
+  }
+
+  /// 账号动作：已登录 → 确认登出；未登录 → 登录对话框。
+  Future<void> _showAccountAction() async {
+    final source = _source;
+    if (source == null) return;
+    if (_logged) {
+      final logout = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('登出'),
+          content: const Text('退出当前源账号？'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('登出')),
+          ],
+        ),
+      );
+      if (logout != true) return;
+      try {
+        await source.logout();
+        if (!mounted) return;
+        setState(() => _logged = false);
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('已登出')));
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('登出失败: $e')));
+      }
+      return;
+    }
+    final username = TextEditingController();
+    final password = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('登录 ${source.name}'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: username,
+              decoration: const InputDecoration(labelText: '用户名'),
+            ),
+            TextField(
+              controller: password,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: '密码'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('登录')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await source.login(username.text.trim(), password.text);
+      if (!mounted) return;
+      final logged = await source.isLogged();
+      if (!mounted) return;
+      setState(() => _logged = logged);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('登录成功')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('登录失败: $e')));
+    }
   }
 
   void _openDetail(VeneraComic comic) {

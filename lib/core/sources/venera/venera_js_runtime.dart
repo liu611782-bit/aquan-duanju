@@ -6,6 +6,8 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
+import '../../../store/stores.dart';
+
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:fast_gbk/fast_gbk.dart' as gbk;
 import 'package:flutter_qjs/flutter_qjs.dart';
@@ -36,11 +38,8 @@ class VeneraJsRuntime {
   final Map<String, dynamic> _domRegistry = {};
   var _domSeq = 0;
 
-  /// load_data/save_data 持久化壳（Phase 2 接 _JsonFileStore）。
-  final Map<String, dynamic> _dataStore = {};
-
-  /// load_setting/save_setting 壳（Phase 2 接设置存储）。
-  final Map<String, dynamic> _settingsStore = {};
+  /// data/settings 落盘 KV（VeneraStore；测试可注入 testDirectory 实例）。
+  VeneraStore store = VeneraStore();
 
   Future<void> _ensure() async {
     if (_ready) return;
@@ -136,23 +135,21 @@ $export
       case 'html':
         return _handleHtml(message);
       case 'load_setting':
-        return _settingsStore['${message['key']}/${message['setting_key']}'];
+        return store.value('setting/${message['key']}/${message['setting_key']}');
       case 'save_setting':
-        _settingsStore['${message['key']}/${message['setting_key']}'] =
-            message['value'];
+        unawaited(store.setValue(
+            'setting/${message['key']}/${message['setting_key']}',
+            message['value']));
         return null;
       case 'load_data':
-        final key = '${message['key']}/${message['data_key']}';
-        return _dataStore[key];
+        return store.value('data/${message['key']}/${message['data_key']}');
       case 'save_data':
-        final key = '${message['key']}/${message['data_key']}';
-        _dataStore[key] =
-            message['data'] is Map
-                ? Map<String, dynamic>.from(message['data'] as Map)
-                : message['data'];
+        unawaited(store.setValue(
+            'data/${message['key']}/${message['data_key']}',
+            message['data']));
         return null;
       case 'delete_data':
-        _dataStore.remove('${message['key']}/${message['data_key']}');
+        unawaited(store.remove('data/${message['key']}/${message['data_key']}'));
         return null;
       case 'log':
         return null;
@@ -172,7 +169,7 @@ $export
       case 'appVersion':
         return '1.0.0';
       case 'isLogged':
-        return false;
+        return store.value('data/${message['key']}/token') != null;
       case 'cookie':
       case 'getClipboard':
       case 'setClipboard':
@@ -386,7 +383,10 @@ $export
     if (settingsRaw is Map) {
       settingsRaw.forEach((sk, sv) {
         final def = sv is Map ? sv['default'] : null;
-        _settingsStore.putIfAbsent('$key/$sk', () => def);
+        final k = 'setting/$key/$sk';
+        if (store.value(k) == null && def != null) {
+          unawaited(store.setValue(k, def));
+        }
       });
     }
     return info;
@@ -438,7 +438,6 @@ $export
     _ready = false;
     sources.clear();
     _domRegistry.clear();
-    _dataStore.clear();
   }
 }
 

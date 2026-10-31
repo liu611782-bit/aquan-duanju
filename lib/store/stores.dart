@@ -2070,6 +2070,50 @@ class _CachedSnapshot {
 /// 播放线路健康度（`aquan_playback_health.json`）。
 ///
 /// 键为 `源|影片|集|线路`，与 `SourceHealthStore`（按源）互补。
+/// Venera 源数据/设置的落盘 KV（`aquan_venera.json`）。
+///
+/// 键形如 `data/<sourceKey>/<dataKey>`、`setting/<sourceKey>/<settingKey>`；
+/// 值动态（字符串/对象均可——save_data 语义）。不进备份白名单（源数据可重取）。
+class VeneraStore extends _JsonFileStore {
+  VeneraStore({super.testDirectory}) : super('aquan_venera.json');
+
+  final Map<String, dynamic> _kv = {};
+
+  dynamic value(String key) => _kv[key];
+
+  bool has(String key) => _kv.containsKey(key);
+
+  Future<void> setValue(String key, dynamic v) async {
+    await ensureLoaded();
+    _kv[key] = v;
+    await _flush();
+  }
+
+  Future<void> remove(String key) async {
+    await ensureLoaded();
+    if (_kv.remove(key) == null) return;
+    await _flush();
+  }
+
+  Future<void> _flush() async {
+    await _writeJson(Map<String, dynamic>.of(_kv));
+    notifyListeners();
+  }
+
+  @override
+  Future<void> loadFromDisk() async {
+    final json = await _readJson();
+    _kv
+      ..clear()
+      ..addAll(json);
+    _loaded = true;
+    notifyListeners();
+  }
+
+  @override
+  Future<void> persist(Map<String, dynamic> json) => _writeJson(json);
+}
+
 class PlaybackHealthStore extends _JsonFileStore {
   PlaybackHealthStore({super.testDirectory})
       : super('aquan_playback_health.json');

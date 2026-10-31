@@ -83,6 +83,27 @@ class VeneraMangaSource {
     );
   }
 
+  /// 源是否声明账号功能（`account` 对象）。
+  Future<bool> hasAccount() async => (await VeneraJsRuntime.instance.evalJson(
+          '!!globalThis.__veneraSources["$key"].account')) ==
+      true;
+
+  /// 登录态（源的 isLogged getter → 宿主按 token 判定）。
+  Future<bool> isLogged() async => (await VeneraJsRuntime.instance.evalJson(
+          '(globalThis.__veneraSources["$key"].isLogged) === true')) ==
+      true;
+
+  /// 登录（`account.login(username, password)`——源内部经 save_data 存 token）。
+  Future<void> login(String username, String password) async {
+    await VeneraJsRuntime.instance
+        .callMethod(key, 'account.login', [username, password]);
+  }
+
+  /// 登出（`account.logout()` → delete_data(token)）。
+  Future<void> logout() async {
+    await VeneraJsRuntime.instance.callMethod(key, 'account.logout', []);
+  }
+
   /// 章节图片：`comic.loadEp(comicId, epId)` → {images}。
   Future<List<String>> loadEpImages(String comicId, String epId) async {
     final result = await VeneraJsRuntime.instance
