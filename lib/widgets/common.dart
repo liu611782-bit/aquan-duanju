@@ -3,11 +3,11 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 
 import '../core/aqua_api.dart';
 import '../core/aqua_error.dart';
 import '../core/download_service.dart';
+import '../core/image_cache_store.dart';
 import '../core/reader/reader_speech_controller.dart';
 import '../models/models.dart';
 import '../store/stores.dart';
@@ -368,7 +368,7 @@ class AquaImageProvider extends ImageProvider<AquaImageProvider> {
   int get hashCode => url.hashCode;
 }
 
-/// 封面字节的三级缓存：内存 LRU → 磁盘（flutter_cache_manager）→ 核心转码。
+/// 封面字节的三级缓存：内存 LRU → 磁盘（ImageCacheStore，LRU+上限）→ 核心转码。
 /// 磁盘与内存里存的都是转码后可直接解码的字节；相同 URL 的并发请求合并。
 class AquaImageCache {
   AquaImageCache({this.fetchOverride});
@@ -395,7 +395,7 @@ class AquaImageCache {
       _memoryPut(url, image.bytes);
       try {
         // 存的是转码后的字节；下次直接命中磁盘，不再进核心。
-        await DefaultCacheManager().putFile(url, image.bytes);
+        await ImageCacheStore.instance.put(url, image.bytes);
       } catch (_) {
         // 磁盘缓存失败不影响显示（测试环境没有 path_provider）。
       }
@@ -410,9 +410,8 @@ class AquaImageCache {
     final mem = _memoryGet(url);
     if (mem != null) return mem;
     try {
-      final file = await DefaultCacheManager().getFileFromCache(url);
-      if (file != null) {
-        final bytes = await file.file.readAsBytes();
+      final bytes = await ImageCacheStore.instance.get(url);
+      if (bytes != null) {
         _memoryPut(url, bytes);
         return bytes;
       }

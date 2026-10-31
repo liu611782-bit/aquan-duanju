@@ -5,6 +5,8 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
+
+import '../core/image_cache_store.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -2190,6 +2192,8 @@ class CachePanel extends StatefulWidget {
 
 class _CachePanelState extends State<CachePanel> {
   CacheInventory? _inventory;
+  int _imageCacheEntries = 0;
+  int _imageCacheBytes = 0;
   bool _busy = false;
 
   @override
@@ -2203,6 +2207,10 @@ class _CachePanelState extends State<CachePanel> {
     final inventory = await CacheMaintenance(
       downloadsDirectory: () async => scope.downloads.baseDir,
     ).inspect();
+    try {
+      _imageCacheEntries = await ImageCacheStore.instance.entryCount();
+      _imageCacheBytes = await ImageCacheStore.instance.totalBytes();
+    } catch (_) {}
     if (mounted) setState(() => _inventory = inventory);
   }
 
@@ -2217,6 +2225,10 @@ class _CachePanelState extends State<CachePanel> {
       ).cleanOrphans();
       try {
         await DefaultCacheManager().emptyCache();
+      } catch (_) {}
+      try {
+        // 封面/漫画页已迁到统一图片缓存仓，清缓存必须同步清它。
+        await ImageCacheStore.instance.clear();
       } catch (_) {}
       await _refresh();
       messenger.showSnackBar(SnackBar(
@@ -2256,6 +2268,7 @@ class _CachePanelState extends State<CachePanel> {
             ? '数据目录不可读'
             : '应用数据 ${_fmtBytes(inv.userDataBytes)} · '
                 '离线缓存 ${_fmtBytes(inv.downloadBytes)}'
+                ' · 图片 $_imageCacheEntries 张 ${_fmtBytes(_imageCacheBytes)}'
                 '${inv.orphanFiles > 0 ? ' · 可清理 ${_fmtBytes(inv.orphanBytes)}' : ''}';
     return Column(
       children: [

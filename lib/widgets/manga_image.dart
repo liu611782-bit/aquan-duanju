@@ -2,9 +2,9 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 
 import '../core/aqua_api.dart';
+import '../core/image_cache_store.dart';
 import 'common.dart';
 
 /// 漫画的一页：字节由 core 下载并按整话密钥解密，这里负责缓存与展示。
@@ -122,11 +122,10 @@ class MangaPageCache {
         return mem;
       }
       try {
-        final file = await DefaultCacheManager().getFileFromCache(cacheKey);
-        if (file != null) {
-          final bytes = await file.file.readAsBytes();
-          _put(cacheKey, bytes);
-          return bytes;
+        final disk = await ImageCacheStore.instance.get(cacheKey);
+        if (disk != null) {
+          _put(cacheKey, disk);
+          return disk;
         }
       } catch (_) {
         // 磁盘不可用时退化为纯内存。
@@ -134,7 +133,7 @@ class MangaPageCache {
       final image = await api.fetchMangaPage(url, key);
       _put(cacheKey, image.bytes);
       try {
-        await DefaultCacheManager().putFile(cacheKey, image.bytes);
+        await ImageCacheStore.instance.put(cacheKey, image.bytes);
       } catch (_) {}
       return image.bytes;
     } finally {
