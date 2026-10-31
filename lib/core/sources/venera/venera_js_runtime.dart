@@ -36,6 +36,9 @@ class VeneraJsRuntime {
   /// load_data/save_data 持久化壳（Phase 2 接 _JsonFileStore）。
   final Map<String, Map<String, dynamic>> _dataStore = {};
 
+  /// load_setting/save_setting 壳（Phase 2 接设置存储）。
+  final Map<String, dynamic> _settingsStore = {};
+
   Future<void> _ensure() async {
     if (_ready) return;
     final runtime = _runtime = QuickJsRuntime2(stackSize: 1024 * 1024 * 4);
@@ -49,7 +52,26 @@ globalThis.sendMessage = function (message) {
   return __nativeSend('venera', JSON.stringify(message));
 };
 ''');
-    runtime.evaluate(initJs);
+    // init.js 用 `let console` 顶层声明，与 fork 预定义的 var console 冲突
+    // （redeclaration）→ 包函数作用域求值，再把源码需要的全局显式导出。
+    const globals = [
+      'setTimeout', 'setInterval', 'Convert', 'createUuid', 'randomInt',
+      'randomDouble', 'Network', 'Cookie', 'HtmlDocument', 'HtmlElement',
+      'HtmlNode', 'log', 'console', 'Comic', 'ComicDetails', 'Comment',
+      'ImageLoadingConfig', 'ComicSource', 'Image',
+    ];
+    final export = globals
+        .map((g) => "globalThis.$g = $g;")
+        .join('\n');
+    final initResult = runtime.evaluate('''
+(function () {
+$initJs
+$export
+})();
+''');
+    if (initResult.isError) {
+      throw Exception('Venera init.js 加载失败: ${initResult.stringResult}');
+    }
     _ready = true;
   }
 
@@ -64,6 +86,14 @@ globalThis.sendMessage = function (message) {
         return _handleConvert(message);
       case 'html':
         return _handleHtml(message);
+      case 'load_setting':
+        // ignore: avoid_print
+        print('[VPDBG] load_setting ${message['key']}/${message['setting_key']} has=${_settingsStore.containsKey('${message['key']}/${message['setting_key']}')}');
+        return _settingsStore['${message['key']}/${message['setting_key']}'];
+      case 'save_setting':
+        _settingsStore['${message['key']}/${message['setting_key']}'] =
+            message['value'];
+        return null;
       case 'load_data':
         final key = '${message['key']}/${message['data_key']}';
         return _dataStore[key];
@@ -128,6 +158,8 @@ globalThis.sendMessage = function (message) {
   }
 
   Future<dynamic> _handleHttp(Map<String, dynamic> message) async {
+    // ignore: avoid_print
+    print('[VPDBG] http ${message['http_method']} ${message['url']}');
     // 动态 import 避免与 Venera 契约耦合：直接用 http 包。
     return _performHttp(
       method: (message['http_method']?.toString() ?? 'GET').toUpperCase(),
@@ -233,10 +265,15 @@ globalThis.sendMessage = function (message) {
     if (promised.stringResult != 'ok') {
       throw Exception('Venera source load failed: ${promised.stringResult}');
     }
+    final keyInfo = _runtime!.evaluate(
+        'String(globalThis.__veneraSources["$className"].key ?? "")');
+    // 按 key 归位（类名为加载暂存键）。
+    await _runtime!.evaluateAsync(
+        'globalThis.__veneraSources["$keyInfo"] = globalThis.__veneraSources["$className"]');
     final info = <String, dynamic>{};
     for (final field in ['name', 'key', 'version', 'minAppVersion', 'url']) {
       final v = _runtime!.evaluate(
-          'String(globalThis.__veneraSources["$className"].$field ?? "")');
+          'String(globalThis.__veneraSources["$keyInfo"].$field ?? "")');
       info[field] = v.stringResult;
     }
     final key = info['key']!.toString();
@@ -244,9 +281,16 @@ globalThis.sendMessage = function (message) {
       throw Exception('Venera source name/key required');
     }
     sources[key] = info;
-    // 按 key 归位（temp 是加载暂存）。
-    await _runtime!.evaluateAsync(
-        'globalThis.__veneraSources["$key"] = globalThis.__veneraSources["$className"]');
+    // 预置设置默认值（Venera 宿主行为：loadSetting 未设置时回落 default，
+    // 如 mh18 的 baseUrl 依赖 domains 设置）。
+    final settingsRaw = await _awaitJs(
+        'JSON.stringify(globalThis.__veneraSources["$key"].settings ?? {})');
+    if (settingsRaw is Map) {
+      settingsRaw.forEach((sk, sv) {
+        final def = sv is Map ? sv['default'] : null;
+        _settingsStore.putIfAbsent('$key/$sk', () => def);
+      });
+    }
     return info;
   }
 
