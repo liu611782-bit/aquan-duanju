@@ -225,8 +225,12 @@ var local = {
   /// 调用爬虫函数：[jsSource] 源码（按内容哈希只加载一次）、[fn] 入口名
   /// （homeContent/categoryContent/detailContent/searchContent/playerContent）、
   /// [args] 位置参数。返回 CatVod 结果对象（setResult 捕获优先于返回值）。
+  ///
+  /// [initCfg] 非空时在**加载后**调用一次 `init(cfg)`（CatVod 约定：
+  /// `{api, skey, ext}`，ext 为 sites[].ext 原文）；init 抛错按加载失败处理。
   Future<Map<String, dynamic>> call(
-      String jsSource, String fn, List<Object?> args) {
+      String jsSource, String fn, List<Object?> args,
+      {Object? initCfg}) {
     // 整个调用（含运行时初始化）串行执行：`_lastResult` 是全局槽位，
     // 并发调用会互相覆盖（多 spider 源并行搜索时串结果）。
     return _serial(() async {
@@ -257,6 +261,24 @@ globalThis.__sp["$key"] = ns;
               'spider 加载失败: ${loadResult.stringResult}');
         }
         _loadedKeys.add(key);
+        if (initCfg != null) {
+          // init 是模块内函数（经快照进 ns），须走 evaluateAsync + handlePromise
+          // 才能真正等到结果（同步 evaluate 只会拿到 '[object Promise]'）。
+          final initRes = await _runtime!.evaluateAsync('''
+(async () => {
+  var ns = (globalThis.__sp && globalThis.__sp["$key"]) || {};
+  var f = ns.init;
+  if (typeof f !== 'function') return 'skip';
+  await f(${jsonEncode(initCfg)});
+  return JSON.stringify({__ok: true});
+})().catch(e => JSON.stringify({__ok: false, __error: String(e)}));
+''');
+          final initPromised = await _runtime!.handlePromise(initRes);
+          if (initPromised.stringResult.contains('__error')) {
+            throw SpiderLoadException(
+                'spider init 失败: ${initPromised.stringResult}');
+          }
+        }
       }
       _lastResult = null;
       final argsJson = jsonEncode(args);

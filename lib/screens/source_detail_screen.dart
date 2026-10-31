@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../core/sources/source_adapter.dart';
+import '../core/sources/spider_js_adapter.dart';
 import '../widgets/common.dart';
 import '../core/bili/api.dart';
 import 'media_hub_screen.dart' show SourceCover;
@@ -257,10 +258,25 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
         line: line,
         startIndex: line.episodes.indexOf(ep).clamp(0, line.episodes.length - 1),
         adapter: widget.adapter,
-        resolvePlay: widget.resolvePlay,
+        resolvePlay: _resolverFor(line.name) ?? widget.resolvePlay,
         loadDanmaku: widget.loadDanmaku,
         onSendDanmaku: widget.onSendDanmaku,
       ),
     ));
+  }
+
+  /// spider 源播放二次解析（playerContent）：分集 url 常是令牌；解析失败
+  /// 回退直连 url，直连型 spider 不受影响。
+  EpisodePlayResolver? _resolverFor(String flag) {
+    if (widget.source.kind != SourceKind.spiderJs) return null;
+    final adapter = widget.adapter;
+    if (adapter is! SpiderJsAdapter) return null;
+    return (ep) async {
+      try {
+        final url = await adapter.resolvePlayUrl(flag: flag, id: ep.url);
+        if (url.isNotEmpty) return ResolvedPlay(videoUrl: url);
+      } catch (_) {}
+      return ResolvedPlay(videoUrl: ep.url);
+    };
   }
 }

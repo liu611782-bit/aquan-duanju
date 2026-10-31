@@ -23,6 +23,7 @@ class SourceConfig {
     this.pinned = false,
     this.shortDrama = false,
     this.note = '',
+    this.ext = '',
     DateTime? addedAt,
   })  : apis = List.of(apis),
         headers = Map.of(headers ?? const {}),
@@ -51,6 +52,10 @@ class SourceConfig {
   String note;
   DateTime addedAt;
 
+  /// spider 源的 sites[].ext 原文（TVBox 约定：字符串或已编码 JSON），
+  /// 运行时经 `init({ext})` 传给爬虫。
+  String ext;
+
   String get api => apis.first;
 
   Map<String, dynamic> toJson() => {
@@ -64,6 +69,7 @@ class SourceConfig {
         'pinned': pinned,
         'short_drama': shortDrama,
         if (note.isNotEmpty) 'note': note,
+        if (ext.isNotEmpty) 'ext': ext,
         'added_at': addedAt.toIso8601String(),
       };
 
@@ -87,6 +93,7 @@ class SourceConfig {
         pinned: json['pinned'] as bool? ?? false,
         shortDrama: json['short_drama'] as bool? ?? false,
         note: json['note'] as String? ?? '',
+        ext: json['ext'] as String? ?? '',
         addedAt:
             DateTime.tryParse(json['added_at'] as String? ?? '') ??
                 DateTime.now(),

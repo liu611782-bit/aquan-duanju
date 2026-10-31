@@ -2668,6 +2668,7 @@ class SourcesStore extends _JsonFileStore {
         spiderKey: c.spiderKey,
         headers: c.headers,
         note: c.note,
+        ext: c.ext,
       );
       added++;
     }

@@ -139,8 +139,11 @@ class SourceImporter {
     CancelToken? cancel,
     Map<String, String>? headers,
     Duration timeout = const Duration(seconds: 10),
+    bool enforceSsrf = true,
   }) async {
-    validateImportUrl(url);
+    // SSRF 守卫只针对导入期：已入库源的运行时取源（adapter/探测）按
+    // 用户主动添加处理，与 probeSource 的 enforceSsrf:false 同口径。
+    if (enforceSsrf) validateImportUrl(url);
     final client = HttpClient()
       ..connectionTimeout = timeout
       ..findProxy = HttpClient.findProxyFromEnvironment;

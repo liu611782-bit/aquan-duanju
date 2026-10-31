@@ -4,6 +4,8 @@ import 'package:http/http.dart' as http;
 
 import 'source_adapter.dart';
 import 'source_fetch.dart';
+import 'spider_js_adapter.dart';
+import 'spider_js_runtime.dart';
 
 /// 主动测速结论。
 enum ProbeState { ok, timeout, failed }
@@ -97,6 +99,38 @@ Future<ProbeOutcome> probeSource(
       state: ProbeState.failed,
       reason: '需要爬虫引擎',
     );
+  }
+  if (config.kind == SourceKind.spiderJs) {
+    // spider JS 源真探测：下载 JS + 跑 home（分类非空即存活）。
+    final sw = Stopwatch()..start();
+    try {
+      final adapter = SpiderJsAdapter(config);
+      final cats = await adapter.categories().timeout(timeout);
+      sw.stop();
+      if (cats.isEmpty) {
+        return ProbeOutcome(
+            sourceId: config.id, state: ProbeState.failed, reason: 'home 无分类');
+      }
+      return ProbeOutcome(
+        sourceId: config.id,
+        state: ProbeState.ok,
+        ttfbMs: sw.elapsedMilliseconds,
+        flags: <SecurityFlag>{
+          config.api.startsWith('https')
+              ? SecurityFlag.httpsSafe
+              : SecurityFlag.cleartextHttp,
+        },
+      );
+    } on SpiderLoadException catch (e) {
+      return ProbeOutcome(
+          sourceId: config.id, state: ProbeState.failed, reason: '$e');
+    } on TimeoutException {
+      return ProbeOutcome(
+          sourceId: config.id, state: ProbeState.timeout, reason: '探测超时');
+    } on Exception catch (e) {
+      return ProbeOutcome(
+          sourceId: config.id, state: ProbeState.failed, reason: '$e');
+    }
   }
   final url = probeUrlFor(config);
   final result = await fetchProbe(

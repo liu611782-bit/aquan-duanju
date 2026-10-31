@@ -30,7 +30,8 @@ class SpiderJsAdapter implements SourceAdapter {
     Object? lastError;
     for (final api in config.apis) {
       try {
-        final js = await SourceImporter.fetchConfigText(api);
+        // 已入库源按用户主动添加处理：运行时取源不过导入期 SSRF 守卫。
+        final js = await SourceImporter.fetchConfigText(api, enforceSsrf: false);
         if (js.trim().isEmpty) continue;
         _jsSource = js;
         return js;
@@ -42,6 +43,13 @@ class SpiderJsAdapter implements SourceAdapter {
         'JS 下载失败: $lastError');
   }
 
+  /// CatVod init(cfg)：`{api, skey, ext}`，ext 为 sites[].ext 原文。
+  Map<String, dynamic> get _initCfg => {
+        'api': config.api,
+        'skey': config.spiderKey ?? '',
+        'ext': config.ext,
+      };
+
   Future<Map<String, dynamic>> _call(
       List<String> fnNames, List<Object?> args) async {
     final js = await _source();
@@ -49,7 +57,8 @@ class SpiderJsAdapter implements SourceAdapter {
     var lastCode = SourceExceptionCode.searchInvalid;
     for (final fn in fnNames) {
       try {
-        final r = await SpiderJsRuntime.instance.call(js, fn, args);
+        final r = await SpiderJsRuntime.instance
+            .call(js, fn, args, initCfg: _initCfg);
         if (r.isNotEmpty) return r;
       } on SpiderLoadException catch (e) {
         // 脚本没加载起来：重试有意义，且不是「结果非法」。
@@ -157,6 +166,24 @@ class SpiderJsAdapter implements SourceAdapter {
     final line = series.defaultLine;
     return line == null || line.episodes.isEmpty ? '' : line.episodes.first.url;
   }
+
+  /// 播放二次解析（CatVod playerContent）：spider 源的分集 url 常是令牌，
+  /// 真实播放地址要经 `playerContent(flag, id, vipFlags)` 现解析。
+  /// 返回结果里的 `url`；无 url/失败抛 [SourceException]（调用方决定回退直连）。
+  Future<String> resolvePlayUrl({required String flag, required String id}) async {
+    final r = await _call(
+        ['playerContent', 'play'], [flag, id, const <String>[]]);
+    final url = r['url']?.toString() ?? '';
+    if (url.isEmpty) {
+      throw SourceException(
+          SourceExceptionCode.playFailed, 'playerContent 未返回地址');
+    }
+    return url;
+  }
+
+  /// 测试辅助：跑一次 home 并返回原始结果对象（验证 init 回显）。
+  Future<Map<String, dynamic>> homeRawForTest() =>
+      _call(['homeContent', 'home'], [false]);
 
   /// VodItem → UnifiedSeries：播放串解析复用 CMS 的 `$$$/#/$` 实现。
   UnifiedSeries _series(Map<String, dynamic> vod) {
