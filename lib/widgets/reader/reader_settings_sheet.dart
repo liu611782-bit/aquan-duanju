@@ -16,6 +16,7 @@ import 'reader_click_zone_editor.dart';
 Future<void> showReaderSettingsSheet(
   BuildContext context, {
   required ReaderSettingsStore store,
+  String? bookId,
   String previewText = '春江潮水连海平，海上明月共潮生。滟滟随波千万里，何处春江无月明。',
 }) {
   return showModalBottomSheet<void>(
@@ -25,7 +26,8 @@ Future<void> showReaderSettingsSheet(
     constraints: const BoxConstraints(maxWidth: 600),
     builder: (_) => FractionallySizedBox(
       heightFactor: 0.86,
-      child: ReaderSettingsSheet(store: store, previewText: previewText),
+      child: ReaderSettingsSheet(
+          store: store, bookId: bookId, previewText: previewText),
     ),
   );
 }
@@ -34,10 +36,14 @@ class ReaderSettingsSheet extends StatefulWidget {
   const ReaderSettingsSheet({
     super.key,
     required this.store,
+    this.bookId,
     this.previewText = '',
   });
 
   final ReaderSettingsStore store;
+
+  /// 非空时显示「本书单独设置」段（VenHM 分层语义：覆盖优先，清除回全局）。
+  final String? bookId;
   final String previewText;
 
   @override
@@ -105,6 +111,7 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
               ),
             ),
             const SizedBox(height: 6),
+            if (widget.bookId != null) _buildBookOverrideSection(theme),
             SizedBox(
               height: 40,
               child: ListView(
@@ -345,6 +352,127 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
       fontFamily: family,
       fontFilePath: file.path,
     ));
+  }
+
+
+  // ---------------- 本书单独设置 ----------------
+
+  /// 按书覆盖段：主题 / 模式 / 字号缩放；「跟随全局」= 清除覆盖。
+  Widget _buildBookOverrideSection(ThemeData theme) {
+    final bookId = widget.bookId!;
+    final settings = _settings;
+    final override = settings.bookOverrideOf(bookId) ?? const <String, Object?>{};
+    final hasOverride = override.isNotEmpty;
+    final themeIndex = settings.themeIndexFor(bookId);
+    final themes = settings.effectiveThemes;
+    final mode = settings.modeFor(bookId);
+    final scale = settings.fontScaleFor(bookId);
+    final baseFont = themes[themeIndex.clamp(0, themes.length - 1)].typography.fontSize;
+
+    Future<void> write(String field, Object? value) =>
+        widget.store.setBookOverride(bookId, field, value);
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.menu_book_rounded,
+                  size: 16, color: theme.colorScheme.primary),
+              const SizedBox(width: 6),
+              Text('本书单独设置',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w600)),
+              const Spacer(),
+              if (hasOverride)
+                TextButton(
+                  onPressed: () async {
+                    for (final field in [
+                      ReaderSettings.bookFieldTheme,
+                      ReaderSettings.bookFieldMode,
+                      ReaderSettings.bookFieldFontScale,
+                    ]) {
+                      await write(field, null);
+                    }
+                  },
+                  child: const Text('恢复跟随全局'),
+                ),
+            ],
+          ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              ChoiceChip(
+                label: const Text('主题跟随全局'),
+                selected: override[ReaderSettings.bookFieldTheme] == null,
+                onSelected: (_) =>
+                    write(ReaderSettings.bookFieldTheme, null),
+              ),
+              for (var i = 0; i < themes.length; i++)
+                ChoiceChip(
+                  label: Text(themes[i].name),
+                  selected: override[ReaderSettings.bookFieldTheme] != null &&
+                      themeIndex == i,
+                  onSelected: (_) =>
+                      write(ReaderSettings.bookFieldTheme, i),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              ChoiceChip(
+                label: const Text('模式跟随全局'),
+                selected: override[ReaderSettings.bookFieldMode] == null,
+                onSelected: (_) => write(ReaderSettings.bookFieldMode, null),
+              ),
+              for (final m in ReaderMode.values)
+                ChoiceChip(
+                  label: Text(m.label),
+                  selected: override[ReaderSettings.bookFieldMode] != null &&
+                      mode == m,
+                  onSelected: (_) =>
+                      write(ReaderSettings.bookFieldMode, m.name),
+                ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Text('字号 ${(baseFont * scale).round()}',
+                  style: theme.textTheme.bodySmall),
+              Expanded(
+                child: Slider(
+                  value: scale,
+                  min: ReaderSettings.minFontScale,
+                  max: ReaderSettings.maxFontScale,
+                  divisions: 14,
+                  label: '×${scale.toStringAsFixed(2)}',
+                  onChanged: (v) =>
+                      write(ReaderSettings.bookFieldFontScale, v),
+                ),
+              ),
+              TextButton(
+                onPressed: override[ReaderSettings.bookFieldFontScale] == null
+                    ? null
+                    : () => write(ReaderSettings.bookFieldFontScale, null),
+                child: const Text('跟随全局'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   // ---------------- 主题 ----------------

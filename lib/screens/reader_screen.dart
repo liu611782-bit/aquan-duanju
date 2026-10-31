@@ -518,14 +518,21 @@ class _ReaderScreenState extends State<ReaderScreen>
   /// 设置唯一来源。
   ReaderSettings get _settings => _settingsStore.value;
 
-  ReaderTypography get _type => _settings.activeThemeConfig.typography;
+  /// 本书生效的主题配置（按书覆盖，无覆盖回退全局活动主题）。
+  ReaderThemeConfig get _bookThemeConfig {
+    final list = _settings.effectiveThemes;
+    return list[_settings.themeIndexFor(widget.bookId).clamp(0, list.length - 1)];
+  }
+
+  ReaderTypography get _type =>
+      _bookThemeConfig.typography.scale(_settings.fontScaleFor(widget.bookId));
 
   double get _fontSize => _type.fontSize;
   double get _lineHeight => _type.lineHeight;
   bool get _autoTurn => _settings.autoTurn;
   int get _autoInterval => _settings.autoIntervalSec;
 
-  bool get _paged => _settings.mode == ReaderMode.paged;
+  bool get _paged => _settings.modeFor(widget.bookId) == ReaderMode.paged;
 
   /// 双页并排是否生效：翻页模式 + 开关打开 + 屏幕够宽（窄屏自动退回单页）。
   bool get _spreadEnabled =>
@@ -542,7 +549,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   BookChapter get _chapter => widget.chapters[_index];
 
   _ReaderTheme get _theme {
-    final config = _settings.activeThemeConfig;
+    final config = _bookThemeConfig;
     final night = _settings.nightMode;
     return _ReaderTheme(
       config.name,
@@ -1031,14 +1038,14 @@ class _ReaderScreenState extends State<ReaderScreen>
       ((_fontSize - 6).clamp(9.0, 14.0) * 1.2 + 8).clamp(18.0, 30.0);
 
   bool get _showHeaderTip {
-    final mode = _settings.activeThemeConfig.headerMode;
+    final mode = _bookThemeConfig.headerMode;
     if (mode == ReaderTipMode.never) return false;
     if (mode == ReaderTipMode.always) return true;
     return _chrome;
   }
 
   bool get _showFooterTip {
-    final mode = _settings.activeThemeConfig.footerMode;
+    final mode = _bookThemeConfig.footerMode;
     if (mode == ReaderTipMode.never) return false;
     if (mode == ReaderTipMode.always) return true;
     return _chrome;
@@ -1096,7 +1103,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     bool leftHalf = false,
     bool rightHalf = false,
   }) {
-    final config = _settings.activeThemeConfig;
+    final config = _bookThemeConfig;
     // 双页时把朝向中缝的一侧内边距减半，否则两页各自 22px 会拼出 44px 空隙。
     // 分页已按半屏宽（含两侧完整内边距）测量，这里只放宽 11px，行不会溢出。
     final type = leftHalf
@@ -1597,6 +1604,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     return showReaderSettingsSheet(
       context,
       store: _settingsStore,
+      bookId: widget.bookId,
       previewText: preview,
     );
   }

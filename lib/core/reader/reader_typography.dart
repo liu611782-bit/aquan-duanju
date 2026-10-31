@@ -102,6 +102,11 @@ class ReaderTypography {
         leadingDistribution: TextLeadingDistribution.even,
       );
 
+  /// 按书字号缩放（VenHM 分层设置语义）：只放大字号并钳到合法区间，
+  /// 行距系数/边距/字重不动——避免按书克隆整套主题。
+  ReaderTypography scale(double factor) =>
+      copyWith(fontSize: fontSize * factor);
+
   ReaderTypography copyWith({
     double? fontSize,
     int? fontWeight,

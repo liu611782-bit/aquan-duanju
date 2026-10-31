@@ -59,6 +59,10 @@ enum ChineseConvert {
 
 /// 阅读器全量设置。整体作为一个 JSON 落在 `aquan_reader_settings.json`，
 /// 与旧版散落在 SharedPreferences 的 `reader.*` 分键存储互不影响。
+///
+/// 按书覆盖（VenHM 分层设置语义，global→book 两层）：
+/// [bookOverrides] bookId → 字段 → 值；无覆盖的字段回退全局。
+/// 覆盖值必须能无损回写（false/0 也是合法值）；解析时未知字段/错型直接丢弃。
 class ReaderSettings {
   const ReaderSettings({
     this.schema = currentSchema,
@@ -82,9 +86,23 @@ class ReaderSettings {
     this.hapticOnTurn = true,
     this.soundOnTurn = false,
     this.doublePage = false,
+    this.bookOverrides = const <String, Map<String, Object?>>{},
   });
 
   static const int currentSchema = 2;
+
+  /// 按书覆盖字段名（bookOverrides 的内层键）。
+  static const String bookFieldTheme = 'theme';
+
+  /// 主题覆盖：有效主题列表的索引。
+  static const String bookFieldMode = 'mode';
+
+  /// 阅读模式覆盖：ReaderMode.name。
+  static const String bookFieldFontScale = 'font_scale';
+
+  /// 字号缩放覆盖：0.8..1.5，作用于主题 typography.fontSize（行距系数不动）。
+  static const double minFontScale = 0.8;
+  static const double maxFontScale = 1.5;
 
   /// 动画速度挡位（毫秒）。
   static const List<int> animDurationsMs = <int>[200, 280, 360, 480];
@@ -132,6 +150,55 @@ class ReaderSettings {
   /// 横屏/平板双页并排（宽度不足 600 时自动退回单页）。
   final bool doublePage;
 
+  /// 按书覆盖：bookId → {bookField*: value}；空 = 全部跟随全局。
+  final Map<String, Map<String, Object?>> bookOverrides;
+
+  Map<String, Object?>? bookOverrideOf(String bookId) => bookOverrides[bookId];
+
+  /// 该书生效的主题索引（无覆盖回退全局 [activeTheme]）。
+  int themeIndexFor(String bookId) {
+    final v = bookOverrides[bookId]?[bookFieldTheme];
+    if (v is! int) return activeTheme;
+    final count = effectiveThemes.length;
+    return v.clamp(0, count - 1);
+  }
+
+  /// 该书生效的阅读模式（无覆盖回退全局 [mode]）。
+  ReaderMode modeFor(String bookId) {
+    final v = bookOverrides[bookId]?[bookFieldMode];
+    if (v is! String) return mode;
+    return ReaderMode.fromName(v);
+  }
+
+  /// 该书生效的字号缩放（无覆盖 = 1.0；非法/越界回退）。
+  double fontScaleFor(String bookId) {
+    final v = bookOverrides[bookId]?[bookFieldFontScale];
+    if (v is! num || !v.isFinite) return 1.0;
+    return v.toDouble().clamp(minFontScale, maxFontScale);
+  }
+
+  /// 该书是否至少有一项覆盖（设置面板判断「本书单独设置」展示态）。
+  bool hasBookOverride(String bookId) =>
+      (bookOverrides[bookId] ?? const {}).isNotEmpty;
+
+  /// 返回覆盖更新后的设置；[value] 为 null 表示清除该书该字段（回跟随全局）。
+  ReaderSettings withBookOverride(
+      String bookId, String field, Object? value) {
+    final next = Map<String, Map<String, Object?>>.of(bookOverrides);
+    final fields = Map<String, Object?>.of(next[bookId] ?? const {});
+    if (value == null) {
+      fields.remove(field);
+    } else {
+      fields[field] = value;
+    }
+    if (fields.isEmpty) {
+      next.remove(bookId);
+    } else {
+      next[bookId] = fields;
+    }
+    return copyWith(bookOverrides: Map<String, Map<String, Object?>>.unmodifiable(next));
+  }
+
   List<ReaderThemeConfig> get effectiveThemes =>
       themes.isEmpty ? defaultReaderThemes() : themes;
 
@@ -169,6 +236,7 @@ class ReaderSettings {
     bool? hapticOnTurn,
     bool? soundOnTurn,
     bool? doublePage,
+    Map<String, Map<String, Object?>>? bookOverrides,
   }) =>
       ReaderSettings(
         themes: themes ?? this.themes,
@@ -192,6 +260,7 @@ class ReaderSettings {
         hapticOnTurn: hapticOnTurn ?? this.hapticOnTurn,
         soundOnTurn: soundOnTurn ?? this.soundOnTurn,
         doublePage: doublePage ?? this.doublePage,
+        bookOverrides: bookOverrides ?? this.bookOverrides,
         );
 
   /// 替换当前主题。索引越界时退化为「追加」。
@@ -226,6 +295,10 @@ class ReaderSettings {
         'haptic_on_turn': hapticOnTurn,
         'sound_on_turn': soundOnTurn,
         'double_page': doublePage,
+        if (bookOverrides.isNotEmpty)
+          'book_overrides': {
+            for (final e in bookOverrides.entries) e.key: e.value,
+          },
       };
 
   factory ReaderSettings.fromJson(Map<String, dynamic>? json) {
@@ -301,7 +374,32 @@ class ReaderSettings {
           : false,
       doublePage:
           json['double_page'] is bool ? json['double_page'] as bool : false,
+      bookOverrides: _parseBookOverrides(json['book_overrides']),
     );
+  }
+
+  /// 按书覆盖容错解析：只认已知字段、类型不符丢弃（false/0 是合法值）。
+  static Map<String, Map<String, Object?>> _parseBookOverrides(Object? raw) {
+    if (raw is! Map) return const <String, Map<String, Object?>>{};
+    final out = <String, Map<String, Object?>>{};
+    raw.forEach((bookId, fields) {
+      if (bookId is! String || bookId.isEmpty || fields is! Map) return;
+      final parsed = <String, Object?>{};
+      final theme = fields[bookFieldTheme];
+      if (theme is int && theme >= 0) parsed[bookFieldTheme] = theme;
+      final mode = fields[bookFieldMode];
+      if (mode is String &&
+          (mode == ReaderMode.scroll.name || mode == ReaderMode.paged.name)) {
+        parsed[bookFieldMode] = mode;
+      }
+      final scale = fields[bookFieldFontScale];
+      if (scale is num && scale.isFinite) {
+        parsed[bookFieldFontScale] =
+            scale.toDouble().clamp(minFontScale, maxFontScale);
+      }
+      if (parsed.isNotEmpty) out[bookId] = parsed;
+    });
+    return Map<String, Map<String, Object?>>.unmodifiable(out);
   }
 
   /// 长度补齐到 9 项：短了补默认动作，长了截断，杜绝越界点击。

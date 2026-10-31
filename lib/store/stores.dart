@@ -48,6 +48,11 @@ class SettingsStore extends ChangeNotifier {
   }
 
   /// 离线缓存清晰度：默认 540p 省空间（全剧缓存体积约为 1080p 的一半）。
+  /// Venera 漫画源 JS 地址（发现页漫画源入口）。
+  String get veneraSourceUrl => _prefs.getString('venera.sourceUrl') ?? '';
+
+  set veneraSourceUrl(String v) => _prefs.setString('venera.sourceUrl', v);
+
   String get cacheQuality => _prefs.getString('download.quality') ?? '540p';
   set cacheQuality(String v) {
     _prefs.setString('download.quality', v);
@@ -3465,6 +3470,14 @@ class ReaderSettingsStore extends _JsonFileStore {
     _value = next;
     notifyListeners();
     await _flush();
+  }
+
+  /// 按书覆盖（VenHM 分层设置）：value=null 清除该字段回跟随全局。
+  /// 字段取值见 [ReaderSettings.bookField*] 常量。
+  Future<void> setBookOverride(
+      String bookId, String field, Object? value) async {
+    await ensureLoaded();
+    await update(_value.withBookOverride(bookId, field, value));
   }
 
   Future<void> _flush() async {
