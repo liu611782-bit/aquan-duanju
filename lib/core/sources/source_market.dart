@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:meta/meta.dart';
 
@@ -9,6 +10,31 @@ import 'source_fetch.dart';
 import 'source_import.dart';
 import 'source_probe.dart';
 import 'source_seed.dart';
+
+/// 极简 worker 池：限制同时运行的异步任务数（IO 密集即可真并发，
+/// 不需要 Isolate）。任务完成按等待序放行下一个。
+class _Pool {
+  _Pool(this.size);
+
+  final int size;
+  var _active = 0;
+  final _waiters = <Completer<void>>[];
+
+  Future<T> run<T>(Future<T> Function() task) async {
+    if (_active >= size) {
+      final waiter = Completer<void>();
+      _waiters.add(waiter);
+      await waiter.future;
+    }
+    _active++;
+    try {
+      return await task();
+    } finally {
+      _active--;
+      if (_waiters.isNotEmpty) _waiters.removeAt(0).complete();
+    }
+  }
+}
 
 /// 扫描事件。
 sealed class MarketScanEvent {
@@ -266,6 +292,17 @@ class MarketScanner {
   final Map<String, Future<FetchResult>> _inFlight =
       <String, Future<FetchResult>>{};
 
+  /// 主流杀软报毒（Trojan/JS.Redirector 类）的地址：扫描过程中不去请求，
+  /// 避免用户杀软弹窗拦截应用流量。聚合页里提取到这类地址直接丢弃。
+  static const _blockedHosts = <String>{
+    'js.134584.xyz', // pp87.json，Trojan/JS.Redirector.bx
+  };
+
+  static bool _isBlockedUrl(String url) {
+    final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+    return _blockedHosts.contains(host);
+  }
+
   /// 扫描种子清单。
   Stream<MarketScanEvent> scanSeeds(
     List<SourceSeed> seeds, {
@@ -274,6 +311,7 @@ class MarketScanner {
     Duration connectTimeout = const Duration(milliseconds: 4500),
     Duration readTimeout = const Duration(milliseconds: 5500),
     int maxBytes = kMaxProbeBytes,
+    int concurrency = 12,
   }) {
     final controller = StreamController<MarketScanEvent>();
     unawaited(_run(
@@ -284,6 +322,7 @@ class MarketScanner {
       connectTimeout,
       readTimeout,
       maxBytes,
+      concurrency,
     ));
     return controller.stream;
   }
@@ -361,6 +400,7 @@ class MarketScanner {
     Duration connectTimeout,
     Duration readTimeout,
     int maxBytes,
+    int concurrency,
   ) async {
     final roots = <MarketNode>[];
     final parses = <ParseApi>[];
@@ -505,22 +545,25 @@ class MarketScanner {
       return node;
     }
 
-    var scannedSeeds = 0;
+    // 种子级并发（IO 密集，事件循环内 await 即可真并发）：顺序扫 60+ 种子
+    // 一次要十几分钟，池宽 12 缩到一分多钟。节点事件按完成序推送。
     final seedList = seeds;
-    for (final seed in seedList) {
-      if (cancel?.isCancelled ?? false) break;
+    var seedsDone = 0;
+    Future<void> runSeed(SourceSeed seed) async {
       controller.add(MarketSeedStarted(seed));
       var nodeCount = 0;
       String error = '';
       try {
-        if (seed.kind == SeedKind.line) {
+        if (_isBlockedUrl(seed.url)) {
+          error = '该地址被主流杀软报毒，已跳过';
+        } else if (seed.kind == SeedKind.line) {
           if (seenUrls.add(normalizeSeedUrl(seed.url))) {
             final node = await scanNode(seed.name, seed.url, 0, seed.kind);
             roots.add(node);
             nodeCount = 1;
             controller.add(MarketNodeScanned(
               node,
-              scannedSeeds + 1,
+              seedsDone,
               seedList.length,
             ));
           }
@@ -535,25 +578,32 @@ class MarketScanner {
                   ? kJsRendered
                   : '页面里没有配置地址';
             }
+            // 种子内的配置地址也并发，但宽度收敛为总并发的一部分，
+            // 避免一个大聚合页把整条扫描带宽吃光。
+            final nodePool = _Pool(max(1, concurrency ~/ 3));
+            final tasks = <Future<void>>[];
             for (final url in urls) {
               if (cancel?.isCancelled ?? false) break;
               if (!seenUrls.add(normalizeSeedUrl(url))) continue;
               if (roots.length > maxNodes) break;
-              final node = await scanNode('', url, 0, SeedKind.line);
-              roots.add(node);
-              nodeCount++;
-              controller.add(MarketNodeScanned(
-                node,
-                scannedSeeds + 1,
-                seedList.length,
-              ));
+              tasks.add(nodePool.run(() async {
+                final node = await scanNode('', url, 0, SeedKind.line);
+                roots.add(node);
+                nodeCount++;
+                controller.add(MarketNodeScanned(
+                  node,
+                  seedsDone,
+                  seedList.length,
+                ));
+              }));
             }
+            await Future.wait(tasks);
           }
         }
       } catch (e) {
         error = friendlyFetchError(e);
       }
-      scannedSeeds++;
+      seedsDone++;
       controller.add(MarketSeedDone(
         seed: seed,
         nodeCount: nodeCount,
@@ -561,11 +611,13 @@ class MarketScanner {
       ));
     }
 
-    if (cancel?.isCancelled ?? false) {
-      controller.add(const MarketScanDone(<MarketCandidateResult>[]));
-      await controller.close();
-      return;
-    }
+    final seedPool = _Pool(max(1, concurrency));
+    await Future.wait([
+      for (final seed in seedList) seedPool.run(() => runSeed(seed)),
+    ]);
+
+    // 取消不再清空结果：已扫到的节点照常汇总，勾选导入照常可用
+    // （「停止后扫到的信息全没了」就是这条提前返回干的）。
 
     roots.sort(_compareNodes);
 
@@ -605,7 +657,7 @@ class MarketScanner {
     ];
     final stats = MarketStats(
       seeds: seeds.length,
-      scannedSeeds: scannedSeeds,
+      scannedSeeds: seedsDone,
       nodes: flat.length,
       available: availableLeaves.length,
       singles: availableLeaves.where((n) => !n.isMulti).length,
@@ -653,6 +705,7 @@ class MarketScanner {
       if (url.isEmpty) continue;
       if (_junkExtension.hasMatch(url)) continue;
       if (url.contains('beian.') || url.contains('analytics')) continue;
+      if (_isBlockedUrl(url)) continue;
       if (!seen.add(url)) continue;
       // 只收看起来像配置的地址；纯导航链接会把候选池冲爆。
       if (!_lineKeyword.hasMatch(url) && !url.contains('raw')) continue;

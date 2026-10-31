@@ -97,7 +97,12 @@ class _SourceMarketScreenState extends State<SourceMarketScreen> {
     });
     await _sub?.cancel();
     _sub = _scanner
-        .scanSeeds(seeds, cancel: cancel, samples: _samples)
+        .scanSeeds(
+          seeds,
+          cancel: cancel,
+          samples: _samples,
+          concurrency: scope.settings.scanConcurrency,
+        )
         .listen((event) {
       if (!mounted) return;
       setState(() {
@@ -350,6 +355,23 @@ class _SourceMarketScreenState extends State<SourceMarketScreen> {
             onChanged: _scanning
                 ? null
                 : (v) => setState(() => _samples = v ?? 1),
+          ),
+          const SizedBox(width: 8),
+          DropdownButton<int>(
+            value: scope.settings.scanConcurrency,
+            underline: const SizedBox.shrink(),
+            items: const [
+              DropdownMenuItem(value: 4, child: Text('并发 4')),
+              DropdownMenuItem(value: 8, child: Text('并发 8')),
+              DropdownMenuItem(value: 12, child: Text('并发 12')),
+              DropdownMenuItem(value: 24, child: Text('并发 24')),
+              DropdownMenuItem(value: 32, child: Text('并发 32')),
+            ],
+            onChanged: _scanning
+                ? null
+                : (v) => setState(() {
+                      if (v != null) scope.settings.scanConcurrency = v;
+                    }),
           ),
         ],
       ),

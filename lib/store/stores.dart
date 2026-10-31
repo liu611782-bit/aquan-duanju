@@ -53,6 +53,13 @@ class SettingsStore extends ChangeNotifier {
 
   set veneraSourceUrl(String v) => _prefs.setString('venera.sourceUrl', v);
 
+  /// 源市场扫描并发度（种子级 worker 池宽）。默认 12：IO 密集，
+  /// 顺序扫十几分钟的活并发下缩到一分多钟；源站不稳时可调低。
+  int get scanConcurrency => _prefs.getInt('market.scanConcurrency') ?? 12;
+
+  set scanConcurrency(int v) =>
+      _prefs.setInt('market.scanConcurrency', v.clamp(1, 64));
+
   String get cacheQuality => _prefs.getString('download.quality') ?? '540p';
   set cacheQuality(String v) {
     _prefs.setString('download.quality', v);
