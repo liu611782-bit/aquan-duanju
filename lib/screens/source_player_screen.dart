@@ -9,6 +9,7 @@ import '../core/cast/cast_controller.dart';
 import '../core/aqua_api.dart';
 import '../core/bili/api.dart';
 import '../core/error_log.dart';
+import '../core/next_episode_prompt.dart';
 import '../core/sources/media_proxy.dart';
 import '../core/sources/parse_engine.dart';
 import '../core/sources/source_adapter.dart';
@@ -104,6 +105,13 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   StreamSubscription<bool>? _completedSub;
   StreamSubscription<bool>? _bufferingSub;
 
+  /// 下一集提示条（播完前引导；本播放器由 completed 无条件推进，
+  /// 提示条取消后拦截该推进，避免「点了取消还自动跳集」）。
+  final Set<String> _nextPromptConsumed = {};
+  bool _nextPromptVisible = false;
+  int _nextPromptRemainingMs = 0;
+  Timer? _nextPromptTimer;
+
   @override
   void initState() {
     super.initState();
@@ -135,6 +143,7 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
     unawaited(_releaseProxy());
     _historyTimer?.cancel();
     _hideTimer?.cancel();
+    _nextPromptTimer?.cancel();
     _posSub?.cancel();
     _durSub?.cancel();
     _playingSub?.cancel();
@@ -149,6 +158,9 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
 
   Future<void> _open({bool forceDirect = false}) async {
     final epoch = ++_openEpoch;
+    _nextPromptConsumed.clear();
+    _cancelNextPromptTimer();
+    _nextPromptVisible = false;
     final ep = _line.episodes[_index];
     // async 间隙不再读 context：开头一次性取好。
     final jxParses = AppScope.read(context).marketSites.parses;
@@ -285,6 +297,7 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
     _posSub = _engine.stream.position.listen((p) {
       if (!mounted) return;
       setState(() => _position = p);
+      _maybeUpdateNextPrompt(p);
     });
     _durSub = _engine.stream.duration.listen((d) {
       if (!mounted) return;
@@ -302,10 +315,82 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
       if (!mounted || !completed) return;
       _recordHistory(finished: true);
       if (_index < _line.episodes.length - 1) {
+        // 提示条被用户取消：本集停在片尾，不再自动跳集。
+        if (_nextPromptConsumed.contains('next')) return;
         setState(() => _index++);
         _open();
       }
     });
+  }
+
+  /// 下一集提示条：位置事件驱动（出现 / 倒计时 / seek 回退收起）。
+  /// 本播放器没有片尾配置，outroConfigured 恒为 false。
+  void _maybeUpdateNextPrompt(Duration position) {
+    if (!mounted) return;
+    if (_nextPromptVisible) {
+      final remaining = _duration - position;
+      if (remaining <= Duration.zero) return; // 自然播完交给 completed
+      if (shouldHideNextPromptOnSeek(
+        position: position,
+        duration: _duration,
+        outroConfigured: false,
+      )) {
+        _hideNextPrompt(release: true);
+      } else {
+        setState(() => _nextPromptRemainingMs = remaining.inMilliseconds);
+      }
+      return;
+    }
+    final prompt = nextEpisodePrompt(
+      position: position,
+      duration: _duration,
+      hasNext: _index < _line.episodes.length - 1,
+      // 本播放器由 completed 无条件推进；提示条仅引导，取消可拦截推进。
+      autoNext: false,
+      outroConfigured: false,
+      consumed: _nextPromptConsumed,
+    );
+    if (prompt == null) return;
+    setState(() {
+      _nextPromptVisible = true;
+      _nextPromptRemainingMs = prompt.remainingMs;
+    });
+    _nextPromptTimer = Timer(
+      Duration(milliseconds: prompt.remainingMs),
+      () {
+        if (mounted) _hideNextPrompt();
+      },
+    );
+  }
+
+  void _cancelNextPromptTimer() {
+    _nextPromptTimer?.cancel();
+    _nextPromptTimer = null;
+  }
+
+  void _hideNextPrompt({bool release = false}) {
+    _cancelNextPromptTimer();
+    if (release) releasePrompt(_nextPromptConsumed);
+    _nextPromptVisible = false;
+    if (mounted) setState(() {});
+  }
+
+  /// 提示条「立即播放」：直接切下一集。
+  void _confirmNextPrompt() {
+    _cancelNextPromptTimer();
+    _nextPromptVisible = false;
+    consumePrompt(_nextPromptConsumed);
+    _recordHistory(finished: true);
+    if (_index < _line.episodes.length - 1) {
+      setState(() => _index++);
+      _open();
+    }
+  }
+
+  /// 提示条「取消」：本集不再出现，且自然播完后不再自动跳集。
+  void _dismissNextPrompt() {
+    consumePrompt(_nextPromptConsumed);
+    _hideNextPrompt();
   }
 
   Future<void> _recordHistory({required bool finished}) async {
@@ -321,6 +406,48 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
       position: _position.inMilliseconds / 1000.0,
       finished: finished,
       sourceKey: widget.source.id,
+    );
+  }
+
+  /// 下一集提示条（底部居中；倒计时 + 立即播放 / 取消）。
+  Widget _buildNextPromptBar(BuildContext context) {
+    final remaining = Duration(milliseconds: _nextPromptRemainingMs);
+    final mm = remaining.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final ss = remaining.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final nextNo = (_index + 2).clamp(1, _line.episodes.length);
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 96,
+      child: Center(
+        child: Material(
+          color: Colors.black.withValues(alpha: 0.74),
+          borderRadius: BorderRadius.circular(24),
+          child: Padding(
+            padding: const EdgeInsets.only(left: 14, right: 4),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.skip_next_rounded,
+                    color: Colors.white, size: 18),
+                const SizedBox(width: 8),
+                Text('即将播放：第 $nextNo 集 · $mm:$ss',
+                    style: const TextStyle(color: Colors.white, fontSize: 13)),
+                TextButton(
+                  onPressed: _confirmNextPrompt,
+                  child: const Text('立即播放',
+                      style: TextStyle(color: Colors.amberAccent)),
+                ),
+                TextButton(
+                  onPressed: _dismissNextPrompt,
+                  child: const Text('取消',
+                      style: TextStyle(color: Colors.white70)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -571,6 +698,7 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
                   ],
                 ),
               ),
+            if (_nextPromptVisible) _buildNextPromptBar(context),
             if (_showControls) ...[
               Positioned(
                 left: 0,

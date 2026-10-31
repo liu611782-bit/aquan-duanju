@@ -19,6 +19,7 @@ import '../cli/player_bus.dart';
 import '../core/aqua_error.dart';
 import '../core/cast/cast_controller.dart';
 import '../core/muted_hint.dart';
+import '../core/next_episode_prompt.dart';
 import '../core/playback_diagnostics.dart';
 import '../core/player/playback_buffer_monitor.dart';
 import '../core/player/playback_health.dart';
@@ -140,6 +141,12 @@ class _PlayerScreenState extends State<PlayerScreen>
   static final MutedPlaybackHintRegistry _mutedHints =
       MutedPlaybackHintRegistry();
   bool _mutedHintVisible = false;
+
+  /// 下一集提示条（播完前引导；与片尾跳过互斥，见 next_episode_prompt.dart）。
+  final Set<String> _nextPromptConsumed = {};
+  bool _nextPromptVisible = false;
+  int _nextPromptRemainingMs = 0;
+  Timer? _nextPromptTimer;
   Timer? _mutedHintTimer;
 
   /// 播放器 OSD。
@@ -379,6 +386,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _sleepTimer?.cancel();
     _hideTimer?.cancel();
     _fallbackTimer?.cancel();
+    _nextPromptTimer?.cancel();
     _osdTimer?.cancel();
     _mutedHintTimer?.cancel();
     _posSub?.cancel();
@@ -648,6 +656,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     final scope = AppScope.read(context);
     _playSkip = scope.playSkip.entryFor(widget.series.id);
     _endingHandled = false;
+    _nextPromptConsumed.clear();
+    _cancelNextPromptTimer();
+    _nextPromptVisible = false;
     _openingNoticePending = false;
     _playbackFailure = null;
     _rawPlaybackError = null;
@@ -900,6 +911,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _flushHistory();
     }
     _maybeSkipEnding(previous, position);
+    _maybeUpdateNextPrompt(position);
   }
 
   /// 播放器报错：按错误类型分级 + 多候选自动换线。
@@ -1110,6 +1122,90 @@ class _PlayerScreenState extends State<PlayerScreen>
       _engine.seek(threshold);
       _showOsd(Icons.skip_next_rounded, '已跳过片尾');
     }
+  }
+
+  /// 本集是否走片尾跳过路径（下一集提示条与之互斥）。
+  bool get _outroConfigured {
+    final settings = AppScope.read(context).settings;
+    return settings.skipIntroOutro && (_playSkip?.endingMs ?? 0) > 0;
+  }
+
+  /// 下一集提示条：位置事件驱动（出现 / 倒计时 / seek 回退收起）。
+  void _maybeUpdateNextPrompt(Duration position) {
+    if (_disposed || !mounted || _episodeEnded) return;
+    final outro = _outroConfigured;
+    if (_nextPromptVisible) {
+      final remaining = _duration - position;
+      if (remaining <= Duration.zero) return; // 自然播完交给 _onEnded
+      if (shouldHideNextPromptOnSeek(
+        position: position,
+        duration: _duration,
+        outroConfigured: outro,
+      )) {
+        _hideNextPrompt(release: true);
+      } else if (!_nextPromptConsumed.contains('next')) {
+        setState(() => _nextPromptRemainingMs = remaining.inMilliseconds);
+      }
+      return;
+    }
+    final prompt = nextEpisodePrompt(
+      position: position,
+      duration: _duration,
+      hasNext: _index < widget.episodes.length - 1,
+      autoNext: AppScope.read(context).settings.autoNext,
+      outroConfigured: outro,
+      consumed: _nextPromptConsumed,
+    );
+    if (prompt == null) return;
+    setState(() {
+      _nextPromptVisible = true;
+      _nextPromptRemainingMs = prompt.remainingMs;
+    });
+    final remaining = Duration(milliseconds: prompt.remainingMs);
+    if (prompt.autoAdvance) {
+      // 倒计时到点自动切集；用户取消/换集/播完都会先撤销本定时器或被守卫拦下。
+      _nextPromptTimer = Timer(remaining, () {
+        if (_disposed || !mounted || _episodeEnded) return;
+        _nextPromptVisible = false;
+        consumePrompt(_nextPromptConsumed);
+        _episodeEnded = true;
+        _recordHistory(finished: true);
+        _goNext();
+      });
+    } else {
+      // 非自动连播：提示条到自然播完自动消失（不暂停，保持现状语义）。
+      _nextPromptTimer = Timer(remaining, () {
+        if (mounted && !_disposed) _hideNextPrompt();
+      });
+    }
+  }
+
+  void _cancelNextPromptTimer() {
+    _nextPromptTimer?.cancel();
+    _nextPromptTimer = null;
+  }
+
+  void _hideNextPrompt({bool release = false}) {
+    _cancelNextPromptTimer();
+    if (release) releasePrompt(_nextPromptConsumed);
+    _nextPromptVisible = false;
+    if (mounted) setState(() {});
+  }
+
+  /// 提示条「立即播放」。
+  void _confirmNextPrompt() {
+    _cancelNextPromptTimer();
+    _nextPromptVisible = false;
+    consumePrompt(_nextPromptConsumed);
+    _episodeEnded = true;
+    _recordHistory(finished: true);
+    _goNext();
+  }
+
+  /// 提示条「取消」：本集不再出现。
+  void _dismissNextPrompt() {
+    consumePrompt(_nextPromptConsumed);
+    _hideNextPrompt();
   }
 
   Future<void> _flushHistory() async {
@@ -2057,6 +2153,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             if (_playbackFailure != null) _buildPlaybackErrorPanel(context),
             if (_osdText != null) _buildOsdOverlay(context),
             if (_mutedHintVisible) _buildMutedHint(context),
+            if (_nextPromptVisible) _buildNextPromptBar(context),
             if (_buffering &&
                 _prepared &&
                 !_loadingStream &&
@@ -2287,6 +2384,52 @@ class _PlayerScreenState extends State<PlayerScreen>
                     style: TextStyle(color: Colors.amberAccent)),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 下一集提示条（底部居中；倒计时 + 立即播放 / 取消）。
+  Widget _buildNextPromptBar(BuildContext context) {
+    final remaining = Duration(milliseconds: _nextPromptRemainingMs);
+    final mm = remaining.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final ss = remaining.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final nextNo = (_index + 2).clamp(1, widget.episodes.length);
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 96,
+      child: IgnorePointer(
+        ignoring: false,
+        child: Center(
+          child: Material(
+            color: Colors.black.withValues(alpha: 0.74),
+            borderRadius: BorderRadius.circular(24),
+            child: Padding(
+              padding: const EdgeInsets.only(left: 14, right: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.skip_next_rounded,
+                      color: Colors.white, size: 18),
+                  const SizedBox(width: 8),
+                  Text('即将播放：第 $nextNo 集 · $mm:$ss',
+                      style: const TextStyle(
+                          color: Colors.white, fontSize: 13)),
+                  TextButton(
+                    onPressed: _confirmNextPrompt,
+                    child: const Text('立即播放',
+                        style: TextStyle(color: Colors.amberAccent)),
+                  ),
+                  TextButton(
+                    onPressed: _dismissNextPrompt,
+                    child: const Text('取消',
+                        style: TextStyle(color: Colors.white70)),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
