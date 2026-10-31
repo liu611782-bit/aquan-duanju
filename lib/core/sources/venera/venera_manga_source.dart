@@ -83,6 +83,23 @@ class VeneraMangaSource {
     );
   }
 
+  /// 设置声明（`settings` 对象：key → {title, type, default, options...}）。
+  Future<Map<String, dynamic>> settingsSchema() async {
+    final raw = await VeneraJsRuntime.instance.evalJson(
+        'JSON.stringify(globalThis.__veneraSources["$key"].settings ?? {})');
+    if (raw is! Map) return const {};
+    return raw.map((k, v) => MapEntry(k.toString(),
+        v is Map ? Map<String, dynamic>.from(v) : <String, dynamic>{}));
+  }
+
+  /// 读当前设置值（源 loadSetting → 宿主 store，含默认值回退）。
+  Future<dynamic> loadSettingValue(String settingKey) =>
+      VeneraJsRuntime.instance.callMethod(key, 'loadSetting', [settingKey]);
+
+  /// 写设置值（宿主职责：直接落 VeneraStore；源经 loadSetting 读回）。
+  Future<void> saveSettingValue(String settingKey, dynamic value) =>
+      VeneraJsRuntime.instance.saveSetting(key, settingKey, value);
+
   /// 源是否声明账号功能（`account` 对象）。
   Future<bool> hasAccount() async => (await VeneraJsRuntime.instance.evalJson(
           '!!globalThis.__veneraSources["$key"].account')) ==

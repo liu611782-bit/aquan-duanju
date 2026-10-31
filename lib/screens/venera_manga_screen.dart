@@ -1,9 +1,9 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 
 import '../core/sources/source_import.dart';
+import '../core/sources/venera/venera_js_runtime.dart';
 import '../core/sources/venera/venera_manga_source.dart';
 import '../models/book.dart';
 import '../models/manga.dart';
@@ -34,6 +34,7 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
   bool _comicsLoading = false;
   bool _hasAccount = false;
   bool _logged = false;
+  Map<String, dynamic> _settingsSchema = const {};
 
   @override
   void initState() {
@@ -56,6 +57,7 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
       final titles = await source.exploreTitles();
       _hasAccount = await source.hasAccount();
       _logged = await source.isLogged();
+      _settingsSchema = await source.settingsSchema();
       if (!mounted) return;
       setState(() {
         _source = source;
@@ -147,6 +149,12 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
               onPressed: _showAccountAction,
               tooltip: _logged ? '账号（已登录）' : '登录',
             ),
+          if (_settingsSchema.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.tune),
+              onPressed: _showSettingsSheet,
+              tooltip: '源设置',
+            ),
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _loadSource,
@@ -226,6 +234,36 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
         ),
       ],
     );
+  }
+
+  /// 源设置表单：按 settings 声明渲染（input/select/switch/callback），
+  /// 保存经 saveSetting → VeneraStore 落盘；baseUrl 等 getter 实时读取。
+  Future<void> _showSettingsSheet() async {
+    final source = _source;
+    if (source == null) return;
+    final current = <String, dynamic>{};
+    for (final key in _settingsSchema.keys) {
+      current[key] = await source.loadSettingValue(key);
+    }
+    if (!mounted) return;
+    final changed = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => Padding(
+        padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom),
+        child: _SourceSettingsForm(
+          schema: _settingsSchema,
+          current: current,
+          source: source,
+        ),
+      ),
+    );
+    if (changed == true && mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('源设置已保存')));
+      await _loadExplore(_exploreIndex);
+    }
   }
 
   /// 账号动作：已登录 → 确认登出；未登录 → 登录对话框。
@@ -487,6 +525,154 @@ class _ComicCard extends StatelessWidget {
   }
 }
 
-/// 把源 JSON 解出来（设置存储用）。
-Map<String, dynamic> decodeSourceJson(String raw) =>
-    raw.isEmpty ? const {} : jsonDecode(raw) as Map<String, dynamic>;
+/// 源设置表单：按声明渲染（input/select/switch/callback），确认时批量保存。
+class _SourceSettingsForm extends StatefulWidget {
+  const _SourceSettingsForm({
+    required this.schema,
+    required this.current,
+    required this.source,
+  });
+
+  final Map<String, dynamic> schema;
+  final Map<String, dynamic> current;
+  final VeneraMangaSource source;
+
+  @override
+  State<_SourceSettingsForm> createState() => _SourceSettingsFormState();
+}
+
+class _SourceSettingsFormState extends State<_SourceSettingsForm> {
+  final _controllers = <String, TextEditingController>{};
+  final _changed = <String, dynamic>{};
+
+  @override
+  void initState() {
+    super.initState();
+    widget.schema.forEach((key, entry) {
+      final type = entry['type']?.toString() ?? 'input';
+      if (type == 'input') {
+        _controllers[key] = TextEditingController(
+            text: widget.current[key]?.toString() ?? '');
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    for (final c in _controllers.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 560),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('源设置', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 8),
+          Flexible(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final entry in widget.schema.entries)
+                  _fieldFor(entry.key, entry.value),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消'),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(
+                onPressed: () async {
+                  for (final e in _changed.entries) {
+                    await widget.source.saveSettingValue(e.key, e.value);
+                  }
+                  if (context.mounted) Navigator.pop(context, true);
+                },
+                child: const Text('保存'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _fieldFor(String key, dynamic entry) {
+    if (entry is! Map) return const SizedBox.shrink();
+    final spec = Map<String, dynamic>.from(entry);
+    final title = spec['title']?.toString() ?? key;
+    final type = spec['type']?.toString() ?? 'input';
+    switch (type) {
+      case 'select':
+        final options = (spec['options'] as List? ?? const [])
+            .whereType<Map>()
+            .map((o) => MapEntry(
+                o['value']?.toString() ?? '', o['text']?.toString() ?? ''))
+            .toList();
+        final value = (_changed[key] ?? widget.current[key])?.toString() ??
+            (spec['default']?.toString() ?? '');
+        return ListTile(
+          title: Text(title),
+          subtitle: options.isEmpty
+              ? null
+              : Wrap(
+                  spacing: 8,
+                  children: [
+                    for (final o in options)
+                      ChoiceChip(
+                        label: Text(o.value),
+                        selected: value == o.key,
+                        onSelected: (_) => setState(() => _changed[key] = o.key),
+                      ),
+                  ],
+                ),
+        );
+      case 'switch':
+        final value = (_changed[key] ?? widget.current[key]) == true ||
+            (widget.current[key] == null && spec['default'] == true);
+        return SwitchListTile(
+          title: Text(title),
+          value: value,
+          onChanged: (v) => setState(() => _changed[key] = v),
+        );
+      case 'callback':
+        return ListTile(
+          title: Text(title),
+          trailing: OutlinedButton(
+            onPressed: () {
+              final messenger = ScaffoldMessenger.of(context);
+              VeneraJsRuntime.instance
+                  .callMethod(widget.source.key, 'settings.$key.callback', [])
+                  .catchError((Object e) {
+                messenger.showSnackBar(SnackBar(content: Text('$e')));
+              });
+            },
+            child: Text(spec['buttonText']?.toString() ?? '执行'),
+          ),
+        );
+      default:
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: TextField(
+            controller: _controllers[key],
+            decoration: InputDecoration(labelText: title),
+            onChanged: (v) => _changed[key] = v,
+          ),
+        );
+    }
+  }
+}

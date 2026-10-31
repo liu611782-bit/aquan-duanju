@@ -392,6 +392,10 @@ $export
     return info;
   }
 
+  /// 宿主侧设置保存（Venera 契约：设置写入是宿主职责，源只 loadSetting 读）。
+  Future<void> saveSetting(String sourceKey, String settingKey, dynamic value) =>
+      store.setValue('setting/$sourceKey/$settingKey', value);
+
   /// 求值一个表达式并 JSON 解析（读取实例字段/元数据用）。
   Future<dynamic> evalJson(String expr) => _awaitJs(expr);
 
@@ -406,7 +410,9 @@ $export
   var f = s;
   for (var p of ${jsonEncode(path.split('.'))}) { f = f ? f[p] : undefined; }
   if (typeof f !== 'function') throw new Error('方法不存在: $path');
-  var r = await f(...$argsJson);
+  // 官方语义：源方法内 this = 源实例（copy_manga 的 comic.loadInfo 引用
+  // this.apiUrl/this.getReqID 等源级字段）。
+  var r = await f.bind(s)(...$argsJson);
   return JSON.stringify({__ok: true, __data: r === undefined ? null : r});
 })().catch(e => JSON.stringify({__ok: false, __error: String(e)}));
 ''');
