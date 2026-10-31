@@ -156,6 +156,11 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
               tooltip: '源设置',
             ),
           IconButton(
+            icon: const Icon(Icons.swap_horizontal_circle_outlined),
+            onPressed: _showSourceSwitcher,
+            tooltip: '换源',
+          ),
+          IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _loadSource,
             tooltip: '重载源',
@@ -234,6 +239,47 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
         ),
       ],
     );
+  }
+
+  /// 换源：输入任意 Venera 源 JS URL（venera-configs 全部源适用），
+  /// 持久化到设置后重载。
+  Future<void> _showSourceSwitcher() async {
+    final controller = TextEditingController(
+        text: AppScope.read(context).settings.veneraSourceUrl);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('换源'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                labelText: '源 JS 地址',
+                hintText: _defaultUrl,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text('venera-configs 仓库内任意源 .js 的 raw 地址均可',
+                style: Theme.of(context).textTheme.bodySmall),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('切换')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final url = controller.text.trim();
+    if (!mounted) return;
+    AppScope.read(context).settings.veneraSourceUrl = url;
+    _loadSource();
   }
 
   /// 源设置表单：按 settings 声明渲染（input/select/switch/callback），

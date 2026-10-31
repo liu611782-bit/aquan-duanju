@@ -35,6 +35,8 @@ Apache-2.0）的 Flutter 短剧播放器，支持 **Windows / Android / Linux / 
 | 语音 | 搜索框语音输入：Android 系统识别；桌面 OpenAI 兼容端点（自备 key，设置里配置与自检） |
 | 去广告 | CMS 源播放经本地回环代理重写 m3u8（关键字表剔广告分片），失败自动回退直链 |
 | 扫码导入 | 源管理页生成一次性二维码，手机浏览器粘贴配置提交导入 |
+| JS 爬虫源 | 影视聚合支持 .js 爬虫源双口味自动识别（CatVod 长名 / FongMi 短名同步 req），ES 模块加载器 + 打包 lib（cheerio/crypto-js/gbk），播放二次解析 |
+| 漫画源 | 发现页（小说频道）漫画源入口：Venera 契约第三方漫画源（探索/搜索/详情/阅读/收藏/源设置/换源，账号登录持久化） |
 
 架构：Flutter UI → Dart FFI → Go 核心（`native/bridge`，c-shared 动态库）→
 openhongguo SDK（请求签名、匿名设备注册、播放地址与内容密钥）。
