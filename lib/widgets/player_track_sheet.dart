@@ -2,8 +2,11 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 
+import 'dart:async';
+
 import '../core/player/player_engine.dart';
 import '../core/player/subtitle_delay.dart';
+import '../core/player/track_preference.dart';
 
 /// 音轨 / 字幕轨选择面板。
 ///
@@ -18,6 +21,8 @@ Future<void> showPlayerTracksSheet(
     BuildContext context, PlayerEngine engine, {
   double initialSubtitleDelay = 0,
   Future<void> Function(double delayMs)? onSubtitleDelayChanged,
+  Future<void> Function(int trackIndex)? onAudioTrackSelected,
+  Future<void> Function(int trackIndex)? onSubtitleTrackSelected,
 }) async {
   final tracks = engine.state.tracks;
   final audioTracks =
@@ -61,6 +66,10 @@ Future<void> showPlayerTracksSheet(
                       : null,
                   onTap: () {
                     engine.setAudioTrack(track);
+                    final idx = audioTracks.indexOf(track);
+                    if (idx >= 0) {
+                      unawaited(onAudioTrackSelected?.call(idx));
+                    }
                     Navigator.pop(sheetContext);
                   },
                 ),
@@ -97,6 +106,10 @@ Future<void> showPlayerTracksSheet(
                       : null,
                   onTap: () {
                     engine.setSubtitleTrack(track);
+                    final idx = subtitleTracks.indexOf(track);
+                    if (idx >= 0) {
+                      unawaited(onSubtitleTrackSelected?.call(idx));
+                    }
                     Navigator.pop(sheetContext);
                   },
                 ),
@@ -106,6 +119,8 @@ Future<void> showPlayerTracksSheet(
                     currentSubtitle == 'no' ? const Icon(Icons.check) : null,
                 onTap: () {
                   engine.setSubtitleTrack(SubtitleTrack.no());
+                  unawaited(onSubtitleTrackSelected
+                      ?.call(TrackPreference.subtitleOff));
                   Navigator.pop(sheetContext);
                 },
               ),

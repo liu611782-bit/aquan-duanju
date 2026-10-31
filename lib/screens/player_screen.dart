@@ -28,6 +28,7 @@ import '../core/playback_fallback.dart';
 import '../core/playback_recovery.dart';
 import '../core/playback_utils.dart';
 import '../core/player/player_engine.dart';
+import '../core/player/track_preference.dart';
 import '../core/progress_throttle.dart';
 import '../models/models.dart';
 import '../models/play_skip.dart';
@@ -77,6 +78,12 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// 字幕时差（秒；mpv sub-delay，正=延后）。按剧记忆，开播时注入。
   double _subDelay = 0;
+
+  /// 音轨/字幕选择按剧记忆（面板展示序；字幕 -1=关闭）。
+  int? _prefAudioIndex;
+  int? _prefSubtitleIndex;
+  bool _trackPrefApplied = false;
+  StreamSubscription? _tracksSub;
 
   /// 这部剧的清晰度偏好：初始化自该剧本的历史，跟随用户切换而更新。
   String _quality = '';
@@ -218,7 +225,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         ? prefs.quality
         : scope.settings.defaultQuality;
     _subDelay = (prefs?.subtitleDelayMs ?? 0) / 1000.0;
+    _prefAudioIndex = prefs?.audioTrackIndex;
+    _prefSubtitleIndex = prefs?.subtitleTrackIndex;
     _engine = MpvPlayerEngine();
+    // 轨道就绪事件驱动：每集只应用一次偏好（换集重置标记）。
+    _tracksSub = _engine.stream.tracks.listen((_) => _applyTrackPreference());
     // 投屏：电视端主动停止时按设置回本地续播（M1：加密分集不可投，入口处拦截）。
     castController.onRemoteStopped = (device, position) {
       if (!mounted) return;
@@ -395,6 +406,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _nextPromptTimer?.cancel();
     _osdTimer?.cancel();
     _mutedHintTimer?.cancel();
+    _tracksSub?.cancel();
     _posSub?.cancel();
     _durSub?.cancel();
     _completedSub?.cancel();
@@ -653,6 +665,37 @@ class _PlayerScreenState extends State<PlayerScreen>
     } catch (_) {}
   }
 
+  /// 应用按剧轨道偏好（stream.tracks 驱动，每集一次）。
+  ///
+  /// 等待轨道就绪：偏好存在但对应列表还空 → 不置标记，等下一次事件。
+  void _applyTrackPreference() {
+    if (_trackPrefApplied || _disposed || !mounted) return;
+    final tracks = _engine.state.tracks;
+    final audio =
+        tracks.audio.where((t) => t.id != 'auto' && t.id != 'no').toList();
+    final subs =
+        tracks.subtitle.where((t) => t.id != 'auto' && t.id != 'no').toList();
+    if (_prefAudioIndex == null && _prefSubtitleIndex == null) {
+      _trackPrefApplied = true;
+      return;
+    }
+    final wantAudio = _prefAudioIndex != null && _prefAudioIndex! >= 0;
+    final wantSub = _prefSubtitleIndex != null && _prefSubtitleIndex! >= 0;
+    if (wantAudio && audio.isEmpty) return;
+    if (wantSub && subs.isEmpty) return;
+    _trackPrefApplied = true;
+    if (wantAudio && _prefAudioIndex! < audio.length) {
+      unawaited(_engine.setAudioTrack(audio[_prefAudioIndex!]));
+    }
+    if (_prefSubtitleIndex != null) {
+      if (_prefSubtitleIndex == TrackPreference.subtitleOff) {
+        unawaited(_engine.setSubtitleTrack(SubtitleTrack.no()));
+      } else if (_prefSubtitleIndex! >= 0 && _prefSubtitleIndex! < subs.length) {
+        unawaited(_engine.setSubtitleTrack(subs[_prefSubtitleIndex!]));
+      }
+    }
+  }
+
   Future<void> _openEpisode(int index, Duration startAt) async {
     _bufferMonitor.reset();
     _bufferMonitor.onOpen();
@@ -671,6 +714,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _reResolved = false;
     _reResolving = false;
     _recoveryBudget.attempts = 0;
+    _trackPrefApplied = false;
     _fallbackTimer?.cancel();
     _fallbackTimer = null;
     _fallbackInFlight = false;
@@ -2652,6 +2696,28 @@ class _PlayerScreenState extends State<PlayerScreen>
                             case 'tracks':
                               showPlayerTracksSheet(context, _engine,
                                 initialSubtitleDelay: _subDelay,
+                                onAudioTrackSelected: (idx) async {
+                                  setState(() => _prefAudioIndex = idx);
+                                  try {
+                                    await AppScope.read(context)
+                                        .history
+                                        .setPlaybackPrefs(
+                                      seriesId: widget.series.id,
+                                      audioTrackIndex: idx,
+                                    );
+                                  } catch (_) {}
+                                },
+                                onSubtitleTrackSelected: (idx) async {
+                                  setState(() => _prefSubtitleIndex = idx);
+                                  try {
+                                    await AppScope.read(context)
+                                        .history
+                                        .setPlaybackPrefs(
+                                      seriesId: widget.series.id,
+                                      subtitleTrackIndex: idx,
+                                    );
+                                  } catch (_) {}
+                                },
                                 onSubtitleDelayChanged: (delayMs) async {
                                   setState(
                                       () => _subDelay = delayMs / 1000.0);

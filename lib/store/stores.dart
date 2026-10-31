@@ -527,6 +527,8 @@ class HistoryEntry {
     this.quality = '',
     this.sourceKey = '',
     this.subtitleDelayMs,
+    this.audioTrackIndex,
+    this.subtitleTrackIndex,
     DateTime? updatedAt,
   }) : updatedAt = updatedAt ?? DateTime.now();
 
@@ -545,6 +547,11 @@ class HistoryEntry {
 
   /// 字幕时差按剧记忆（毫秒；null = 未设置）。mpv sub-delay 语义。
   final int? subtitleDelayMs;
+
+  /// 轨道选择按剧记忆（Pathfin ContinuousTrackSelection）：
+  /// 面板展示序的同类下标；字幕 -1 = 关闭字幕；null = 未设置。
+  final int? audioTrackIndex;
+  final int? subtitleTrackIndex;
 
   /// 内容来源：空 = 红果（旧数据兼容）；否则为源 id 或 'bili'。
   final String sourceKey;
@@ -580,6 +587,8 @@ class HistoryEntry {
         if (quality.isNotEmpty) 'quality': quality,
         if (sourceKey.isNotEmpty) 'source_key': sourceKey,
         if (subtitleDelayMs != null) 'subtitle_delay_ms': subtitleDelayMs,
+        if (audioTrackIndex != null) 'audio_track_index': audioTrackIndex,
+        if (subtitleTrackIndex != null) 'subtitle_track_index': subtitleTrackIndex,
         'updated_at': updatedAt.toIso8601String(),
       };
 
@@ -596,6 +605,8 @@ class HistoryEntry {
         quality: json['quality'] as String? ?? '',
         sourceKey: json['source_key'] as String? ?? '',
         subtitleDelayMs: (json['subtitle_delay_ms'] as num?)?.toInt(),
+        audioTrackIndex: (json['audio_track_index'] as num?)?.toInt(),
+        subtitleTrackIndex: (json['subtitle_track_index'] as num?)?.toInt(),
         updatedAt:
             DateTime.tryParse(json['updated_at'] as String? ?? '') ??
                 DateTime.now(),
@@ -843,6 +854,8 @@ class HistoryStore extends _JsonFileStore {
       speed: speed > 0 ? speed : (existing?.speed ?? 0),
       quality: quality.isNotEmpty ? quality : (existing?.quality ?? ''),
       subtitleDelayMs: existing?.subtitleDelayMs,
+      audioTrackIndex: existing?.audioTrackIndex,
+      subtitleTrackIndex: existing?.subtitleTrackIndex,
       sourceKey: sourceKey.isNotEmpty ? sourceKey : (existing?.sourceKey ?? ''),
     );
     _prune();
@@ -859,6 +872,8 @@ class HistoryStore extends _JsonFileStore {
     double? speed,
     String? quality,
     int? subtitleDelayMs,
+    int? audioTrackIndex,
+    int? subtitleTrackIndex,
   }) async {
     await ensureLoaded();
     final e = _entries[seriesId];
@@ -874,6 +889,8 @@ class HistoryStore extends _JsonFileStore {
       speed: speed ?? e?.speed ?? 0,
       quality: quality ?? e?.quality ?? '',
       subtitleDelayMs: subtitleDelayMs ?? e?.subtitleDelayMs,
+      audioTrackIndex: audioTrackIndex ?? e?.audioTrackIndex,
+      subtitleTrackIndex: subtitleTrackIndex ?? e?.subtitleTrackIndex,
       updatedAt: e?.updatedAt,
     );
     await _writeJson({
