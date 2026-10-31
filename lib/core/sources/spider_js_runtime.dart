@@ -322,6 +322,17 @@ globalThis.__sp["$key"] = ns;
       if (data is Map) {
         return data.map((k, v) => MapEntry(k.toString(), v));
       }
+      // 返回值风格：源方法直接 return JSON 字符串（非 setResult 捕获）。
+      if (data is String && data.isNotEmpty) {
+        try {
+          final inner = jsonDecode(data);
+          if (inner is Map) {
+            return inner.map((k, v) => MapEntry(k.toString(), v));
+          }
+        } on FormatException {
+          // 非 JSON 字符串：走兜底。
+        }
+      }
       return decoded.map((k, v) => MapEntry(k.toString(), v));
     } on FormatException {
       return {};

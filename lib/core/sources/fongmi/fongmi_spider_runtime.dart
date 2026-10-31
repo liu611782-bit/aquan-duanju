@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:isolate';
 
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_qjs/flutter_qjs.dart';
 
 import '../../ffi_bridge.dart';
@@ -34,6 +35,8 @@ class FongmiSpiderRuntime {
     Map<String, String> libSources = const {},
     String? sourceUrl,
   }) async {
+    // 默认内置宿主 http.js（req/_http 语义）——调用方未传时读资产。
+    httpJs ??= await rootBundle.loadString('assets/fongmi/http.js');
     final resultJson = await Isolate.run(() => _runInIsolate(
           jsSource: jsSource,
           method: method,
