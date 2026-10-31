@@ -330,9 +330,9 @@ class _PlayerScreenState extends State<PlayerScreen>
           case PressedButton.pause:
             _engine.pause();
           case PressedButton.next:
-            _goNext();
+            _goNext(manual: true);
           case PressedButton.previous:
-            _goPrev();
+            _goPrev(manual: true);
           case PressedButton.fastForward:
             _engine.seek(_position + const Duration(seconds: 10));
           case PressedButton.rewind:
@@ -624,11 +624,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.pageDown) {
-      _goNext();
+      _goNext(manual: true);
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.pageUp) {
-      _goPrev();
+      _goPrev(manual: true);
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.escape) {
@@ -733,13 +733,29 @@ class _PlayerScreenState extends State<PlayerScreen>
     return null;
   }
 
-  Future<void> _openEpisode(int index, Duration startAt) async {
+  Future<void> _openEpisode(
+    int index,
+    Duration startAt, {
+    bool manual = false,
+  }) async {
     _bufferMonitor.reset();
     _bufferMonitor.onOpen();
     _startBufferMonitor();
     final epoch = ++_openEpoch;
     final ep = widget.episodes[index];
     final scope = AppScope.read(context);
+    // 用户显式选集：立刻把「想去第 N 集」写进历史。原先只有起播成功且播过
+    // 5 秒才落盘，点开失败/秒退就退出的话历史还停在旧集（用户的断点意图丢了）。
+    // 自动连播不提前记：起播失败不该挪断点，播起来后节流器照常写。
+    if (manual) {
+      _position = startAt;
+      await _recordHistory(
+        finished: false,
+        force: true,
+        episodeIndex: index,
+      );
+      if (_disposed || epoch != _openEpoch) return;
+    }
     _playSkip = scope.playSkip.entryFor(widget.series.id);
     _endingHandled = false;
     _nextPromptConsumed.clear();
@@ -1425,17 +1441,17 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
-  void _goNext() {
+  void _goNext({bool manual = false}) {
     if (_index < widget.episodes.length - 1) {
-      _openEpisode(_index + 1, Duration.zero);
+      _openEpisode(_index + 1, Duration.zero, manual: manual);
     } else {
       _showToast('已经是最后一集了');
     }
   }
 
-  void _goPrev() {
+  void _goPrev({bool manual = false}) {
     if (_index > 0) {
-      _openEpisode(_index - 1, Duration.zero);
+      _openEpisode(_index - 1, Duration.zero, manual: manual);
     } else {
       _showToast('已经是第一集了');
     }
@@ -1459,10 +1475,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         _engine.playOrPause();
         return {'ok': true, 'playing': _engine.state.playing};
       case 'next':
-        _goNext();
+        _goNext(manual: true);
         return {'ok': true};
       case 'prev':
-        _goPrev();
+        _goPrev(manual: true);
         return {'ok': true};
       case 'status':
         return _statusPayload();
@@ -1671,7 +1687,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       currentIndex: _index,
       onSelect: (i) {
         if (_disposed || i == _index) return;
-        _openEpisode(i, Duration.zero);
+        _openEpisode(i, Duration.zero, manual: true);
       },
       isDownloaded: (ep) => downloads.store.has(ep.id),
       onDownload: () {
@@ -1949,12 +1965,18 @@ class _PlayerScreenState extends State<PlayerScreen>
     return rest == 0 ? '$minutes 分钟' : '$minutes 分 $rest 秒';
   }
 
-  Future<void> _recordHistory({required bool finished}) async {
+  Future<void> _recordHistory({
+    required bool finished,
+    bool force = false,
+    int? episodeIndex,
+  }) async {
     if (widget.series.id.isEmpty) return;
-    final ep = widget.episodes[_index.clamp(0, widget.episodes.length - 1)];
+    final ep = widget
+        .episodes[(episodeIndex ?? _index).clamp(0, widget.episodes.length - 1)];
     final position = finished ? 0.0 : _position.inSeconds.toDouble();
-    // 没真正播起来（起播失败 / 秒退 / 缓冲中退出）时不要用 0 覆盖已有断点。
-    if (!finished && position <= 0) return;
+    // 没真正播起来（起播失败 / 秒退 / 缓冲中退出）时不要用 0 覆盖已有断点；
+    // 用户显式选集的「意图记录」（force）除外——那一步就是要挪断点。
+    if (!finished && position <= 0 && !force) return;
     await _history.record(
       seriesId: widget.series.id,
       title: widget.series.title,

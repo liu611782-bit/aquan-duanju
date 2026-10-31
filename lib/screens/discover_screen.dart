@@ -707,8 +707,10 @@ class _ContinueRail extends StatelessWidget {
     return ListenableBuilder(
       listenable: scope.history,
       builder: (context, _) {
+        // position==0 也算：用户显式跳集的「意图记录」（history-jump-episode）
+        // 落盘时就在 0 秒，过滤掉会让这部剧从「继续观看」里整个消失。
         final entries = scope.history.entries
-            .where((e) => !e.finished && e.position > 5)
+            .where((e) => !e.finished)
             .take(10)
             .toList();
         if (entries.isEmpty) return const SizedBox.shrink();

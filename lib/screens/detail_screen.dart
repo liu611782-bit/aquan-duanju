@@ -143,17 +143,23 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   /// 从哪一集开始播：有历史且未看完则续播。
+  ///
+  /// 集数一律跟历史走（含 position==0 的「用户显式跳集」意图记录）；
+  /// 位置太小时从该集开头，而不是退回第 1 集。
   (Episode, Duration) _resumeTarget() {
     final scope = AppScope.read(context);
     final h = scope.history.get(widget.seriesId);
-    if (h != null && !h.finished && h.position > 5) {
+    if (h != null && !h.finished) {
       Episode target;
       try {
         target = _episodes.firstWhere((e) => e.number == h.episode);
       } catch (_) {
         target = _episodes.first;
       }
-      return (target, Duration(seconds: h.position.floor()));
+      if (h.position > 5) {
+        return (target, Duration(seconds: h.position.floor()));
+      }
+      return (target, Duration.zero);
     }
     return (_episodes.first, Duration.zero);
   }
@@ -210,7 +216,9 @@ class _DetailScreenState extends State<DetailScreen> {
               label: Builder(builder: (context) {
                 final scope = AppScope.read(context);
                 final h = scope.history.get(widget.seriesId);
-                final ep = (h != null && h.position > 5 && !h.finished)
+                // 有未看完记录就报集数（含 position==0 的跳集意图记录），
+                // 跟 _resumeTarget 的选集逻辑保持同一个真相。
+                final ep = (h != null && !h.finished)
                     ? '继续播放 第${h.episode}集'
                     : '立即播放';
                 return Text(ep);
