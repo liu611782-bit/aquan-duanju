@@ -90,6 +90,20 @@ class DownloadMigrationResult {
 
 enum DownloadState { queued, running, paused, done, failed, cancelled }
 
+/// 完整性复核失败：实际字节数与预期不符。
+///
+/// 少字节（流被服务端提前掐断）保留 `.part` 续传；多字节说明前缀已脏，
+/// 调用方丢弃重下。两者都**不计 completed**、不写下载记录。
+class _IncompleteDownload implements Exception {
+  _IncompleteDownload(this.received, this.expected);
+
+  final int received;
+  final int expected;
+
+  @override
+  String toString() => '下载不完整：$received/$expected 字节';
+}
+
 /// 一集的下载任务状态（UI 订阅服务刷新）。
 class DownloadTask {
   DownloadTask(this.episode, this.seriesTitle, this.coverUrl);
@@ -508,7 +522,20 @@ class DownloadService extends ChangeNotifier {
       if (_cancelledSeries.contains(ep.seriesId)) {
         task.state = DownloadState.cancelled;
         await _deletePart(path);
+      } else if (task.state == DownloadState.cancelled) {
+        // ensureCurrent 守卫：单集删除已把任务标记取消（不进 _cancelledSeries），
+        // 不得落盘或写下载记录，否则留下指向已删文件的孤儿记录。
+        await _deletePart(path);
       } else {
+        // 完整性复核：预期大小已知且不符 → 不改名不记录。
+        final expected = resolved.expectedBytes;
+        if (expected > 0 && size < expected) {
+          throw _IncompleteDownload(size, expected);
+        }
+        if (expected > 0 && size > expected) {
+          await _deletePart(path);
+          throw _IncompleteDownload(size, expected);
+        }
         // 下载已完整结束：即使暂停标记恰好在此刻到达也直接落盘。
         _pausedEpisodes.remove(ep.id);
         await File('$path.part').rename(path);
@@ -542,6 +569,26 @@ class DownloadService extends ChangeNotifier {
         // 用户已点继续：保留 .part，由调度器重新拉起续传。
       } else if (task.state == DownloadState.cancelled) {
         await _deletePart(path);
+      } else if (e is _IncompleteDownload) {
+        // 少字节：保留 .part 续传重试（多字节已在落地前删除 .part）。
+        task.error = e;
+        if (task.retries < maxRetries) {
+          task.retries++;
+          task.state = DownloadState.queued;
+          notifyListeners();
+          await Future<void>.delayed(retryDelay * task.retries);
+          if (_cancelledSeries.contains(ep.seriesId)) {
+            task.state = DownloadState.cancelled;
+            await _deletePart(path);
+          } else if (_pausedEpisodes.contains(ep.id)) {
+            task.state = DownloadState.paused;
+          } else {
+            _queue.add(ep);
+          }
+        } else {
+          // 重试预算耗尽：标记失败但保留 .part，用户「重试失败」时续传。
+          task.state = DownloadState.failed;
+        }
       } else {
         await _deletePart(path);
         if (task.retries < maxRetries) {
@@ -601,6 +648,25 @@ Future<int> defaultDownloader(
         } catch (_) {}
         start = 0;
         continue;
+      }
+      if (start > 0 && response.statusCode == 206) {
+        // 续传对齐校验：Content-Range 起点必须等于续传起点，否则源文件
+        // 已变（换源/热更新），续传会拼出损坏文件 → 丢弃 .part 重下。
+        // 无可解析 Content-Range 的 206 按现状容错（无法校验则信任）。
+        String? contentRange;
+        response.headers.forEach((k, v) {
+          if (k.toLowerCase() == 'content-range') contentRange = v;
+        });
+        final m =
+            RegExp(r'bytes\s+(\d+)').firstMatch(contentRange ?? '');
+        final rangeStart = m == null ? null : int.tryParse(m.group(1)!);
+        if (rangeStart != null && rangeStart != start) {
+          try {
+            await part.delete();
+          } catch (_) {}
+          start = 0;
+          continue;
+        }
       }
       break;
     }
