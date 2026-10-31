@@ -18,6 +18,60 @@ class BookshelfScreen extends StatefulWidget {
 class _BookshelfScreenState extends State<BookshelfScreen> {
   ReadingSort _sort = ReadingSort.recent;
 
+  /// 多选模式（Pathfin LibrarySelection 同语义）：长按进入，批量移除。
+  bool _selectionMode = false;
+  final Set<String> _selectedBookIds = {};
+
+  void _enterSelection(String bookId) {
+    setState(() {
+      _selectionMode = true;
+      _selectedBookIds
+        ..clear()
+        ..add(bookId);
+    });
+  }
+
+  void _exitSelection() {
+    setState(() {
+      _selectionMode = false;
+      _selectedBookIds.clear();
+    });
+  }
+
+  void _toggleSelected(String bookId) {
+    setState(() {
+      if (!_selectedBookIds.remove(bookId)) _selectedBookIds.add(bookId);
+      if (_selectedBookIds.isEmpty) _selectionMode = false;
+    });
+  }
+
+  Future<void> _removeSelected() async {
+    if (_selectedBookIds.isEmpty) return;
+    final scope = AppScope.read(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('移除选中的 ${_selectedBookIds.length} 本？'),
+        content: const Text('会移除这些书的阅读记录，离线缓存不受影响。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('移除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    for (final bookId in List<String>.of(_selectedBookIds)) {
+      await scope.reading.remove(bookId);
+    }
+    _exitSelection();
+  }
+
   Future<void> _clearAll(BuildContext context) async {
     final scope = AppScope.read(context);
     final confirmed = await showDialog<bool>(
@@ -123,37 +177,72 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
   Widget build(BuildContext context) {
     final scope = AppScope.read(context);
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('书架'),
-        actions: [
-          PopupMenuButton<ReadingSort>(
-            tooltip: '排序',
-            icon: const Icon(Icons.sort),
-            onSelected: (sort) => setState(() => _sort = sort),
-            itemBuilder: (context) => [
-              for (final sort in ReadingSort.values)
-                PopupMenuItem(
-                  value: sort,
-                  child: Row(
-                    children: [
-                      if (sort == _sort)
-                        const Icon(Icons.check, size: 16)
-                      else
-                        const SizedBox(width: 16),
-                      const SizedBox(width: 8),
-                      Text(readingSortLabel(sort)),
-                    ],
-                  ),
+      appBar: _selectionMode
+          ? AppBar(
+              leading: IconButton(
+                icon: const Icon(Icons.close),
+                tooltip: '退出多选',
+                onPressed: _exitSelection,
+              ),
+              title: Text('已选 ${_selectedBookIds.length} 本'),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    final entries = sortReadingEntries(
+                        scope.reading.entries, _sort);
+                    final allSelected = entries.isNotEmpty &&
+                        entries.every((e) => _selectedBookIds.contains(e.bookId));
+                    setState(() {
+                      if (allSelected) {
+                        _selectedBookIds.clear();
+                      } else {
+                        _selectedBookIds
+                          ..clear()
+                          ..addAll(entries.map((e) => e.bookId));
+                      }
+                    });
+                  },
+                  child: const Text('全选'),
                 ),
-            ],
-          ),
-          IconButton(
-            tooltip: '清空',
-            icon: const Icon(Icons.delete_sweep_outlined),
-            onPressed: () => _clearAll(context),
-          ),
-        ],
-      ),
+                IconButton(
+                  tooltip: '移除选中',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed:
+                      _selectedBookIds.isEmpty ? null : _removeSelected,
+                ),
+              ],
+            )
+          : AppBar(
+              title: const Text('书架'),
+              actions: [
+                PopupMenuButton<ReadingSort>(
+                  tooltip: '排序',
+                  icon: const Icon(Icons.sort),
+                  onSelected: (sort) => setState(() => _sort = sort),
+                  itemBuilder: (context) => [
+                    for (final sort in ReadingSort.values)
+                      PopupMenuItem(
+                        value: sort,
+                        child: Row(
+                          children: [
+                            if (sort == _sort)
+                              const Icon(Icons.check, size: 16)
+                            else
+                              const SizedBox(width: 16),
+                            const SizedBox(width: 8),
+                            Text(readingSortLabel(sort)),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+                IconButton(
+                  tooltip: '清空',
+                  icon: const Icon(Icons.delete_sweep_outlined),
+                  onPressed: () => _clearAll(context),
+                ),
+              ],
+            ),
       body: ListenableBuilder(
         // 阅读与听书两个 store 任一变都要重画（听书记录会带来「继续听」卡片）。
         listenable: Listenable.merge(<Listenable>[
@@ -192,16 +281,22 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                 return _buildContinueListen(listen);
               }
               final entry = entries[i - (hasListen ? 1 : 0)];
+              final selected = _selectedBookIds.contains(entry.bookId);
               return ListTile(
                 contentPadding: const EdgeInsets.symmetric(vertical: 6),
-                leading: SizedBox(
-                  width: 52,
-                  height: 70,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: CoverImage(url: entry.coverUrl),
-                  ),
-                ),
+                leading: _selectionMode
+                    ? Checkbox(
+                        value: selected,
+                        onChanged: (_) => _toggleSelected(entry.bookId),
+                      )
+                    : SizedBox(
+                        width: 52,
+                        height: 70,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: CoverImage(url: entry.coverUrl),
+                        ),
+                      ),
                 title: Text(entry.title,
                     maxLines: 1, overflow: TextOverflow.ellipsis),
                 subtitle: Column(
@@ -216,18 +311,28 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                     LinearProgressIndicator(value: entry.percent),
                   ],
                 ),
-                trailing: IconButton(
-                  icon: const Icon(Icons.close, size: 18),
-                  onPressed: () => scope.reading.remove(entry.bookId),
-                ),
-                onTap: () => Navigator.of(context).push(MaterialPageRoute(
-                  builder: (_) => BookDetailScreen(
-                    bookId: entry.bookId,
-                    title: entry.title,
-                    coverUrl: entry.coverUrl,
-                    manga: entry.manga,
-                  ),
-                )),
+                trailing: _selectionMode
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () => scope.reading.remove(entry.bookId),
+                      ),
+                onLongPress:
+                    _selectionMode ? null : () => _enterSelection(entry.bookId),
+                onTap: () {
+                  if (_selectionMode) {
+                    _toggleSelected(entry.bookId);
+                    return;
+                  }
+                  Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => BookDetailScreen(
+                      bookId: entry.bookId,
+                      title: entry.title,
+                      coverUrl: entry.coverUrl,
+                      manga: entry.manga,
+                    ),
+                  ));
+                },
               );
             },
           );
