@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/aqua_error.dart';
 import '../core/manga_layout.dart';
+import '../core/reader/manga_tap_zones.dart';
 import '../models/book.dart';
 import '../models/manga.dart';
 import '../store/stores.dart';
@@ -56,10 +57,13 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
   MangaChapterPages? _pages;
   Object? _error;
   bool _loading = true;
-  bool _chrome = true;
-  bool _restored = false;
+
+  /// 控制条显隐（Legado 语义：进入正文默认隐藏，中心格唤出，外点只关闭）。
+  bool _chrome = false;
   bool _spread = false;
   Timer? _saveTimer;
+  late final MangaTapArbiter _tapArbiter =
+      MangaTapArbiter(onAction: _onGridAction);
   SharedPreferences? _prefs;
 
   int get _maxIndex => widget.chapters.isEmpty ? 0 : widget.chapters.length - 1;
@@ -77,7 +81,7 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
     super.initState();
     _scroll.addListener(_onScroll);
     _loadPrefs();
-    _load(_index, restore: widget.restoreOffset > 0);
+    _load(_index, restoreAt: widget.restoreOffset > 0 ? widget.restoreOffset : -1);
   }
 
   Future<void> _loadPrefs() async {
@@ -148,6 +152,7 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
   @override
   void dispose() {
     _saveTimer?.cancel();
+    _tapArbiter.dispose();
     _scroll.removeListener(_onScroll);
     _scroll.dispose();
     _spreadController.dispose();
@@ -156,8 +161,11 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
     super.dispose();
   }
 
-  Future<void> _load(int index, {bool restore = false}) async {
+  /// [restoreAt]：0..1 表示本话内还原比例（-1 = 从头看）。
+  /// 页级跨章复用它：上一话末屏传 1.0。
+  Future<void> _load(int index, {double restoreAt = -1}) async {
     if (widget.chapters.isEmpty) return;
+    _tapArbiter.cancel(MangaTapCancelReason.contentNotReady);
     final chapter = widget.chapters[index];
     final cached = _cache[chapter.id];
     setState(() {
@@ -167,7 +175,7 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
       _loading = cached == null;
     });
     if (cached != null) {
-      _afterLoad(restore: restore);
+      _afterLoad(restoreAt: restoreAt);
       _prefetchPages(cached, index);
       return;
     }
@@ -180,7 +188,7 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
         _pages = pages;
         _loading = false;
       });
-      _afterLoad(restore: restore);
+      _afterLoad(restoreAt: restoreAt);
       _prefetchPages(pages, index);
     } catch (e) {
       if (!mounted || _index != index) return;
@@ -191,17 +199,13 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
     }
   }
 
-  void _afterLoad({required bool restore}) {
+  void _afterLoad({required double restoreAt}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final groups = _spreadGroups;
       if (groups != null) {
-        var target = 0;
-        if (restore && !_restored) {
-          _restored = true;
-          target = (widget.restoreOffset * groups.length)
-              .floor()
-              .clamp(0, groups.length - 1);
-        }
+        final target = restoreAt >= 0
+            ? (restoreAt * groups.length).floor().clamp(0, groups.length - 1)
+            : 0;
         _spreadIndex = target;
         if (_spreadController.hasClients) {
           _spreadController.jumpToPage(target);
@@ -210,12 +214,7 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
       }
       if (!_scroll.hasClients) return;
       final max = _scroll.position.maxScrollExtent;
-      if (restore && !_restored) {
-        _restored = true;
-        _scroll.jumpTo((max * widget.restoreOffset).clamp(0.0, max));
-      } else {
-        _scroll.jumpTo(0);
-      }
+      _scroll.jumpTo(restoreAt >= 0 ? (max * restoreAt).clamp(0.0, max) : 0);
     });
   }
 
@@ -263,12 +262,12 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
     );
   }
 
-  Future<void> _go(int delta) async {
+  Future<void> _go(int delta, {double restoreAt = -1}) async {
     final next = (_index + delta).clamp(0, _maxIndex);
     if (next == _index) return;
     await _persist();
     if (!mounted) return;
-    await _load(next);
+    await _load(next, restoreAt: restoreAt);
   }
 
   Future<void> _openDirectory() async {
@@ -288,37 +287,122 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF111111),
-      body: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() => _chrome = !_chrome),
-        child: Stack(
-          children: [
-            // 键盘翻组：← / →（仅横屏双页模式生效）。
-            Focus(
-              autofocus: true,
-              onKeyEvent: _onKey,
-              child: const SizedBox.shrink(),
+      body: Stack(
+        children: [
+          // 键盘翻组：← / →（仅横屏双页模式生效）。
+          Focus(
+            autofocus: true,
+            onKeyEvent: _onKey,
+            child: const SizedBox.shrink(),
+          ),
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTapDown: (d) => _tapArbiter.onTapDown(_normalized(d.localPosition)),
+              onTapUp: (d) {
+                if (_chrome) {
+                  // Legado：菜单打开时正文点击只关菜单，不翻页。
+                  setState(() => _chrome = false);
+                  return;
+                }
+                _tapArbiter.onTapUp();
+              },
+              onTapCancel: _tapArbiter.onTapCancel,
+              child: _buildBody(),
             ),
-            Positioned.fill(child: _buildBody()),
-            AnimatedPositioned(
-              duration: const Duration(milliseconds: 180),
-              curve: Curves.easeOut,
-              left: 0,
-              right: 0,
-              top: _chrome ? 0 : -110,
+          ),
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            left: 0,
+            right: 0,
+            top: _chrome ? 0 : -110,
+            child: GestureDetector(
+              // 菜单本体吸收点击：背景不关菜单、不翻页。
+              onTap: () {},
               child: _buildTopBar(),
             ),
-            AnimatedPositioned(
-              duration: const Duration(milliseconds: 180),
-              curve: Curves.easeOut,
-              left: 0,
-              right: 0,
-              bottom: _chrome ? 0 : -140,
+          ),
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            left: 0,
+            right: 0,
+            bottom: _chrome ? 0 : -140,
+            child: GestureDetector(
+              onTap: () {},
               child: _buildBottomBar(),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
+    );
+  }
+
+  /// 窗口归一化坐标（九宫格按整个窗口 0.33/0.66 分界）。
+  Offset _normalized(Offset local) {
+    final size = MediaQuery.sizeOf(context);
+    if (size.width <= 0 || size.height <= 0) return Offset.zero;
+    return Offset(local.dx / size.width, local.dy / size.height);
+  }
+
+  /// 九宫格动作（菜单关闭时才会到达这里；菜单开时正文点击只关菜单）。
+  void _onGridAction(MangaTapAction action) {
+    if (!mounted || _loading || _error != null) return;
+    final pages = _pages;
+    if (pages == null || pages.isEmpty) return;
+    switch (action) {
+      case MangaTapAction.menu:
+        setState(() => _chrome = true);
+      case MangaTapAction.prev:
+        _turnScreen(-1);
+      case MangaTapAction.next:
+        _turnScreen(1);
+    }
+  }
+
+  /// 翻一屏：双页模式翻组；连续滚动按视口高度翻屏。
+  /// 页级跨章（VenHM 合同）：末屏向前 → 下一话首屏；首屏向后 → 上一话末屏。
+  void _turnScreen(int delta) {
+    final groups = _spreadGroups;
+    if (groups != null) {
+      if (delta > 0 && _spreadIndex >= groups.length - 1) {
+        _go(1);
+        return;
+      }
+      if (delta < 0 && _spreadIndex <= 0) {
+        _go(-1, restoreAt: 1.0);
+        return;
+      }
+      if (delta > 0) {
+        _spreadController.nextPage(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+        );
+      } else {
+        _spreadController.previousPage(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+        );
+      }
+      return;
+    }
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    if (delta > 0 && pos.pixels >= pos.maxScrollExtent - 1) {
+      _go(1);
+      return;
+    }
+    if (delta < 0 && pos.pixels <= 1) {
+      _go(-1, restoreAt: 1.0);
+      return;
+    }
+    final vh = pos.viewportDimension;
+    final target = (pos.pixels + delta * vh).clamp(0.0, pos.maxScrollExtent);
+    _scroll.animateTo(
+      target,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
     );
   }
 
@@ -566,6 +650,8 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
       controller: _spreadController,
       itemCount: groups.length,
       onPageChanged: (i) {
+        // 翻页动画中取消待定单击（取消矩阵：pageTurn）。
+        _tapArbiter.cancel(MangaTapCancelReason.pageTurn);
         setState(() => _spreadIndex = i);
         // ignore: discarded_futures
         _persist();
@@ -623,11 +709,14 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
     ));
   }
 
-  /// 一页；双击进入全屏缩放。
+  /// 一页；双击进入全屏缩放（缩放优先，取消待定单击）。
   Widget _pageWidget(MangaChapterPages pages, int index) {
     final page = pages.pages[index];
     return GestureDetector(
-      onDoubleTap: () => _openZoom(index),
+      onDoubleTap: () {
+        _tapArbiter.cancel(MangaTapCancelReason.doubleTap);
+        _openZoom(index);
+      },
       child: MangaPageImage(
         url: page.url,
         keyHex: pages.key,
