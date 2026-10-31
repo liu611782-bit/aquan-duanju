@@ -123,6 +123,7 @@ flutter:
   assets:
     - assets/reader/backgrounds/
     - assets/venera/init.js
+    - assets/fongmi/http.js
 
   fonts:
     - family: LXGWWenKai
