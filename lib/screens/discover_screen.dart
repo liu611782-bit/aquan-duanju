@@ -13,6 +13,7 @@ import 'detail_screen.dart';
 import 'media_hub_screen.dart';
 import 'releases_screen.dart';
 import 'search_screen.dart';
+import 'source_manage_screen.dart';
 import 'venera_manga_screen.dart';
 
 /// 发现页：内容类型条 + 类型内频道条 + 多列网格（分页加载）。
@@ -320,6 +321,9 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                   slivers: [
                     // 影视聚合入口（TVBox / CMS 源 + 后续 B 站）。
                     const SliverToBoxAdapter(child: _MediaHubEntry()),
+                    // 扫完源"去哪选源看视频"的显眼入口（原先只在聚合页 AppBar）。
+                    if (_type.name == '短剧')
+                      const SliverToBoxAdapter(child: _SourceManageEntry()),
                     // 漫画源入口归位漫画 tab（原先挂在小说 tab 下，语义错位）。
                     if (_type.name == '漫画')
                       const SliverToBoxAdapter(child: _VeneraMangaEntry()),
@@ -396,6 +400,52 @@ class _MediaHubEntry extends StatelessWidget {
                           style: theme.textTheme.titleMedium),
                       Text(
                         '导入 TVBox / 采集站源，聚合搜索与大屏观看（源由你自行导入）',
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: theme.colorScheme.outline),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 影视源管理入口卡：扫描/启用/禁用影视源的显眼入口。
+/// 原先只藏在聚合页 AppBar 的小图标里，扫完源的用户找不到"去哪选源看视频"。
+class _SourceManageEntry extends StatelessWidget {
+  const _SourceManageEntry();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      child: Card(
+        margin: EdgeInsets.zero,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const SourceManageScreen()),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Row(
+              children: [
+                Icon(Icons.tune, color: theme.colorScheme.primary),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('影视源管理', style: theme.textTheme.titleMedium),
+                      Text(
+                        '扫描源库并勾选启用；启用后即可在聚合里搜片观看',
                         style: theme.textTheme.bodySmall
                             ?.copyWith(color: theme.colorScheme.outline),
                       ),

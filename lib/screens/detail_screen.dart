@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/aqua_api.dart';
@@ -45,6 +47,13 @@ class _DetailScreenState extends State<DetailScreen> {
   Album? _album;
   bool _didAutoplay = false;
 
+  /// 同名搜索结果（标题去自身去重后的条目）；null = 未加载/加载中。
+  List<SeriesSummary>? _sameName;
+
+  /// 标题含「第X季/部」「合集」记号的结果 → 同名系列；其余 → 同名单剧。
+  static final RegExp _seasonMark =
+      RegExp(r'第\s*[0-9一二三四五六七八九十]+\s*[季部]|[（(]\s*第?[0-9一二三四五六七八九十]+\s*[季部]\s*[)）]|合集');
+
   @override
   void initState() {
     super.initState();
@@ -87,6 +96,8 @@ class _DetailScreenState extends State<DetailScreen> {
         _album = album;
         _loading = false;
       });
+      // 同名系列不阻塞详情首帧：失败静默（入口随之隐藏）。
+      unawaited(_loadSameName(series.title));
       if (widget.autoplay && !_didAutoplay && _episodes.isNotEmpty) {
         _didAutoplay = true;
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -181,6 +192,7 @@ class _DetailScreenState extends State<DetailScreen> {
                       SliverToBoxAdapter(child: _episodeSection(context)),
                       if (_album != null && _album!.seasons.length > 1)
                         SliverToBoxAdapter(child: _seasonsSection(context)),
+                      SliverToBoxAdapter(child: _sameNameSection(context)),
                       if (_recommend != null && _recommend!.items.isNotEmpty)
                         SliverToBoxAdapter(child: _recommendSection(context)),
                       const SliverToBoxAdapter(
@@ -213,6 +225,101 @@ class _DetailScreenState extends State<DetailScreen> {
         for (final r in series.rows)
           if (r.kind == 3 && r.text.isNotEmpty) r.text,
       ];
+
+  /// 同名搜索：以当前标题为关键词取一页结果，去掉自身后归两组
+  /// （标题带季/部/合集记号 → 系列；其余 → 单剧）。
+  Future<void> _loadSameName(String title) async {
+    try {
+      final page = await AppScope.read(context)
+          .api
+          .search(title, pageSize: 30);
+      if (!mounted) return;
+      final selfId = widget.seriesId;
+      final items = page.items
+          .where((s) => s.id != selfId && s.title.trim().isNotEmpty)
+          .toList();
+      setState(() => _sameName = items);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _sameName = const []);
+    }
+  }
+
+  /// 「同名系列」分区：季与合集 / 同名系列 / 同名单剧三组。
+  Widget _sameNameSection(BuildContext context) {
+    final theme = Theme.of(context);
+    final items = _sameName;
+    if (items == null) return const SizedBox.shrink();
+    final seasons = _album?.seasons ?? const <Series>[];
+    final series = [
+      for (final s in items)
+        if (_seasonMark.hasMatch(s.title) || _seasonMark.hasMatch(s.description))
+          s,
+    ];
+    final singles = [
+      for (final s in items)
+        if (!_seasonMark.hasMatch(s.title) &&
+            !_seasonMark.hasMatch(s.description))
+          s,
+    ];
+    if (seasons.isEmpty && series.isEmpty && singles.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    Widget group(String label, List<Widget> tiles) => tiles.isEmpty
+        ? const SizedBox.shrink()
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 8),
+              Text(label, style: theme.textTheme.titleSmall),
+              ...tiles,
+            ],
+          );
+
+    List<Widget> tileList(List<SeriesSummary> list) => [
+          for (final s in list)
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: SizedBox(
+                width: 44,
+                height: 60,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: CoverImage(url: s.coverUrl),
+                ),
+              ),
+              title: Text(s.title,
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle: Text(
+                  s.id == widget.seriesId
+                      ? '当前'
+                      : s.episodeCount > 0
+                          ? '共${s.episodeCount}集'
+                          : s.category,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+              onTap: s.id == widget.seriesId
+                  ? null
+                  : () => openDetail(context, s.id, s.title),
+            ),
+        ];
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('同名系列',
+              style: theme.textTheme.titleMedium
+                  ?.copyWith(fontWeight: FontWeight.bold)),
+          group('季与合集', tileList(seasons.cast<SeriesSummary>())),
+          group('同名系列', tileList(series)),
+          group('同名单剧', tileList(singles)),
+        ],
+      ),
+    );
+  }
 
   Widget _header(BuildContext context) {    final theme = Theme.of(context);
     final series = _series!;
