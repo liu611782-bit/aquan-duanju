@@ -1271,7 +1271,16 @@ class _ListenSettingsGroupState extends State<ListenSettingsGroup> {
               : (_voices.isEmpty ? '音色列表加载中' : null),
           value: tts.ttsVoiceId,
           items: _voiceItems(tts.ttsVoiceId),
-          onChanged: (v) => tts.setTtsVoiceId(v),
+          onChanged: (v) async {
+            // 先快照控制器：await 后不得再摸 context。
+            final speech = AppScope.read(context).speech;
+            await tts.setTtsVoiceId(v);
+            // 朗读进行中热切换：从当前段继续，不再等下次重开才生效。
+            try {
+              await speech.setTtsVoice(v);
+            } catch (_) {}
+            if (mounted) setState(() {});
+          },
         ),
         // 静音裁剪：逐段合成自带的首尾空白，按帧边界裁掉（时间点同步平移）。
         // 开关状态会进缓存键，切换后首次播放会重合成一次。

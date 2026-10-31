@@ -594,6 +594,38 @@ class ReaderSpeechController extends ChangeNotifier {
     }
   }
 
+  /// 切 TTS 合成音色（设置页改 `listen.tts.voice` 时调用）。
+  ///
+  /// 之前设置页只写 prefs、控制器内存值不动：进行中的会话纹丝不动，
+  /// 下次重开才生效，体验成「切了没反应」或「重开后从头读」。这里做成
+  /// 热切换：音色进缓存键 → 当前章按新键取缓存/重合成，用「段 + 段内比例」
+  /// 锚点续读（与 [setPreferredPath] 同口径；不同音色的音频时长不同，毫秒不可靠）。
+  Future<void> setTtsVoice(String voiceId) async {
+    if (_ttsVoiceId == voiceId) return;
+    _ttsVoiceId = voiceId;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (voiceId.isEmpty) {
+        await prefs.remove(ttsVoiceKey);
+      } else {
+        await prefs.setString(ttsVoiceKey, voiceId);
+      }
+    } catch (_) {}
+    if (!isActive) {
+      notify();
+      return;
+    }
+    // 换音色 = 合成产物键全变：预取去重集同步失效（与 setTone 同一口径）。
+    _prefetcher.invalidate();
+    final anchor = _currentAnchor();
+    await _openChapter(
+      _chapterIndex,
+      startParagraph: anchor.$1,
+      startRatio: anchor.$2,
+      explicitStart: true,
+    );
+  }
+
   /// 同书在「平台音轨」与「自建合成」之间切换朗读路径，**不停下、不丢位置**。
   ///
   /// 保位规则（design.md §6）：当前位置 → 「段落下标 + 段内比例」→ 落到新表的段起点

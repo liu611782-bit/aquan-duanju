@@ -545,11 +545,16 @@ class CategoryTile {
   final String name;
   final String picUrl;
 
-  factory CategoryTile.fromJson(Map<String, dynamic> json) => CategoryTile(
-        categoryId: json['category_id'] as String? ?? '',
-        name: json['name'] as String? ?? '',
-        picUrl: json['pic_url'] as String? ?? '',
-      );
+  factory CategoryTile.fromJson(Map<String, dynamic> json) {
+    var picUrl = json['pic_url'] as String? ?? '';
+    // 服务端偶发协议相对路径（`//host/...`），直接喂给图片组件会当相对路径失败。
+    if (picUrl.startsWith('//')) picUrl = 'https:$picUrl';
+    return CategoryTile(
+      categoryId: json['category_id'] as String? ?? '',
+      name: json['name'] as String? ?? '',
+      picUrl: picUrl,
+    );
+  }
 }
 
 /// 分类落地页及其筛选项。

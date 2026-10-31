@@ -322,7 +322,12 @@ func contentSecretKey(ctx context.Context, c *sdk.Client) (string, error) {
 func decryptedChapter(ctx context.Context, c *sdk.Client, itemID string) (string, error) {
 	cipherText, err := c.ChapterText(ctx, itemID)
 	if err != nil {
-		return "", err
+		// 首次进书的第一击经常撞上设备冷启动/风控预热，第二击就能过
+		//（实测：手动点重试必成功）。这里立即重试一次，省掉用户手动点。
+		cipherText, err = c.ChapterText(ctx, itemID)
+		if err != nil {
+			return "", err
+		}
 	}
 	if strings.TrimSpace(cipherText) == "" {
 		return "", nil
