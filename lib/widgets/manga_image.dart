@@ -35,8 +35,20 @@ class MangaPageImage extends StatelessWidget {
         gaplessPlayback: true,
         frameBuilder: (context, child, frame, wasSync) {
           if (wasSync) return child;
+          // 加载中给可见占位：黑底阅读器里透明占位=整页黑，用户会以为死了。
+          if (frame == null) {
+            return Container(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              alignment: Alignment.center,
+              child: const SizedBox(
+                width: 26,
+                height: 26,
+                child: CircularProgressIndicator(strokeWidth: 2.4),
+              ),
+            );
+          }
           return AnimatedOpacity(
-            opacity: frame == null ? 0 : 1,
+            opacity: 1,
             duration: const Duration(milliseconds: 160),
             child: child,
           );

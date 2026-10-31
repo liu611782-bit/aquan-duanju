@@ -320,7 +320,8 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                   slivers: [
                     // 影视聚合入口（TVBox / CMS 源 + 后续 B 站）。
                     const SliverToBoxAdapter(child: _MediaHubEntry()),
-                    if (_type.name == '小说')
+                    // 漫画源入口归位漫画 tab（原先挂在小说 tab 下，语义错位）。
+                    if (_type.name == '漫画')
                       const SliverToBoxAdapter(child: _VeneraMangaEntry()),
                     if (_type.name == '小说')
                       SliverToBoxAdapter(

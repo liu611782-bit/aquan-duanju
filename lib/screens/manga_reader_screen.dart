@@ -62,8 +62,9 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
   Object? _error;
   bool _loading = true;
 
-  /// 控制条显隐（Legado 语义：进入正文默认隐藏，中心格唤出，外点只关闭）。
-  bool _chrome = false;
+  /// 控制条显隐。首次进入先亮出菜单（返回按钮在顶栏）：黑屏 + 菜单收起 +
+  /// 无键盘出口，用户就是「一片黑还退不出来」；点正文即收起。
+  bool _chrome = true;
   bool _spread = false;
   Timer? _saveTimer;
   late final MangaTapArbiter _tapArbiter =
@@ -684,9 +685,14 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
   /// 键盘翻组：双页模式下 ← / → 翻上一页组 / 下一页组。
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final key = event.logicalKey;
+    // Esc 退出阅读器：菜单收起时这是唯一的键盘出口，不能被翻组分支挡掉。
+    if (key == LogicalKeyboardKey.escape) {
+      Navigator.of(context).maybePop();
+      return KeyEventResult.handled;
+    }
     final groups = _spreadGroups;
     if (groups == null || groups.isEmpty) return KeyEventResult.ignored;
-    final key = event.logicalKey;
     if (key == LogicalKeyboardKey.arrowRight) {
       _spreadController.nextPage(
         duration: const Duration(milliseconds: 220),

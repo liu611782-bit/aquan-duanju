@@ -25,6 +25,13 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
   static const _defaultUrl =
       'https://raw.githubusercontent.com/venera-app/venera-configs@master/copy_manga.js';
 
+  /// GitHub raw 在国内网络经常整页失败（用户看到的就是兜底文案
+  /// 「出了点小问题」）：镜像逐个回退，命中一个即写缓存离线可用。
+  static const _fallbackUrls = [
+    'https://cdn.jsdelivr.net/gh/venera-app/venera-configs@master/copy_manga.js',
+    'https://fastly.jsdelivr.net/gh/venera-app/venera-configs@master/copy_manga.js',
+  ];
+
   VeneraMangaSource? _source;
   Object? _error;
   bool _loading = true;
@@ -48,10 +55,22 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
       _error = null;
     });
     try {
-      final url = AppScope.read(context).settings.veneraSourceUrl.isNotEmpty
-          ? AppScope.read(context).settings.veneraSourceUrl
-          : _defaultUrl;
-      final js = await _fetchJs(url);
+      final custom = AppScope.read(context).settings.veneraSourceUrl;
+      // 自定义源优先；默认源在 GitHub raw 与镜像间回退。
+      final candidates = custom.isNotEmpty
+          ? [custom]
+          : [_defaultUrl, ..._fallbackUrls];
+      Object? lastError;
+      String? js;
+      for (final url in candidates) {
+        try {
+          js = await _fetchJs(url);
+          break;
+        } catch (e) {
+          lastError = e;
+        }
+      }
+      if (js == null) throw lastError ?? '源脚本下载失败';
       final source = VeneraMangaSource(js);
       await source.load();
       final titles = await source.exploreTitles();
