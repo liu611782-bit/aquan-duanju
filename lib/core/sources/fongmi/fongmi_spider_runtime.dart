@@ -71,16 +71,20 @@ class FongmiSpiderRuntime {
   }
 
   /// 模块解析：打包 lib 资产 → 相对 base 的网络模块（阻塞 FFI 抓取）。
+  ///
+  /// `assets://js/lib/cat.js` 等 FongMi 配置协议直接命中打包 lib
+  /// （剥前缀后按文件名匹配）。
   static String _moduleSource(
     String moduleName, {
     required String base,
     required Map<String, String> libSources,
     required String Function(String url) fetcher,
   }) {
+    final stripped = moduleName.replaceFirst('assets://', '');
     for (final entry in libSources.entries) {
-      if (moduleName == entry.key ||
-          moduleName.endsWith('/${entry.key}') ||
-          moduleName.endsWith(entry.key)) {
+      if (stripped == entry.key ||
+          stripped.endsWith('/${entry.key}') ||
+          stripped.endsWith(entry.key)) {
         return entry.value;
       }
     }
