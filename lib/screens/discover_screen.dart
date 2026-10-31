@@ -13,6 +13,7 @@ import 'detail_screen.dart';
 import 'media_hub_screen.dart';
 import 'releases_screen.dart';
 import 'search_screen.dart';
+import 'venera_manga_screen.dart';
 
 /// 发现页：内容类型条 + 类型内频道条 + 多列网格（分页加载）。
 ///
@@ -320,6 +321,8 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                     // 影视聚合入口（TVBox / CMS 源 + 后续 B 站）。
                     const SliverToBoxAdapter(child: _MediaHubEntry()),
                     if (_type.name == '小说')
+                      const SliverToBoxAdapter(child: _VeneraMangaEntry()),
+                    if (_type.name == '小说')
                       SliverToBoxAdapter(
                         child: _CategoryEntry(
                           onTap: () => Navigator.of(context).push(
@@ -598,6 +601,51 @@ class _ChannelPage {
 }
 
 /// 「继续观看」：最近没看完的剧横排，点了直接续播到上次那一集那一秒。
+/// 「漫画源」入口卡：Venera 契约第三方漫画源（copy_manga 等）。
+class _VeneraMangaEntry extends StatelessWidget {
+  const _VeneraMangaEntry();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      child: Card(
+        margin: EdgeInsets.zero,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const VeneraMangaScreen()),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Row(
+              children: [
+                Icon(Icons.auto_stories, color: theme.colorScheme.primary),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('漫画源', style: theme.textTheme.titleMedium),
+                      Text(
+                        'Venera 契约第三方漫画源（源 JS 由你自行导入）',
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: theme.colorScheme.outline),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// 看完的（finished）不出现；看完入口在「我的 → 观看历史」。
 class _ContinueRail extends StatelessWidget {
   const _ContinueRail();

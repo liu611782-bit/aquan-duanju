@@ -1,0 +1,163 @@
+import 'venera_js_runtime.dart';
+
+/// Venera 漫画源的结构化封装：explore/search/loadInfo/loadEp → 漫画数据。
+///
+/// Venera 契约：`explore = [{title, load: async () => {title, comics}}]`、
+/// `search = {load: async (kw, options, page)}`、
+/// `comic = {loadInfo: async (id) → ComicDetails{chapters:[{id,title,episodes}]},
+/// loadEp: async (comicId, epId) → {images, maxPage}}`。
+class VeneraMangaSource {
+  VeneraMangaSource(this.jsSource);
+
+  final String jsSource;
+
+  Map<String, dynamic> info = const {};
+  String get key => info['key']?.toString() ?? '';
+  String get name => info['name']?.toString() ?? '';
+
+  Future<void> load() async {
+    info = await VeneraJsRuntime.instance.loadSource(jsSource);
+  }
+
+  /// 探索页标题列表（`explore[i].title`）。
+  Future<List<String>> exploreTitles() async {
+    final raw = await VeneraJsRuntime.instance.evalJson(
+        'JSON.stringify((globalThis.__veneraSources["$key"].explore ?? [])'
+        '.map(e => ({title: e.title})))');
+    if (raw is! List) return const [];
+    return [
+      for (final e in raw)
+        if (e is Map) e['title']?.toString() ?? '',
+    ];
+  }
+
+  /// 探索页内容：返回漫画列表（`explore[i].load()` → {title, comics} 或数组）。
+  Future<List<VeneraComic>> exploreLoad(int index) async {
+    final result =
+        await VeneraJsRuntime.instance.callMethod(key, 'explore.$index.load', []);
+    return _comicsOf(result);
+  }
+
+  /// 搜索（`search.load(kw, options, page)`）。
+  Future<List<VeneraComic>> search(String keyword, int page) async {
+    final result = await VeneraJsRuntime.instance
+        .callMethod(key, 'search.load', [keyword, <String, dynamic>{}, page]);
+    return _comicsOf(result);
+  }
+
+  /// 详情：`comic.loadInfo(id)` → ComicDetails。
+  Future<VeneraComicDetail> loadInfo(String comicId) async {
+    final result =
+        await VeneraJsRuntime.instance.callMethod(key, 'comic.loadInfo', [comicId]);
+    if (result is! Map) {
+      throw Exception('Venera loadInfo 返回异常: $result');
+    }
+    final groups = <VeneraChapterGroup>[];
+    final chapters = result['chapters'];
+    if (chapters is List) {
+      for (final g in chapters) {
+        if (g is! Map) continue;
+        final eps = <VeneraEpisode>[];
+        final episodeList = g['episodes'];
+        if (episodeList is List) {
+          for (final e in episodeList) {
+            if (e is! Map) continue;
+            eps.add(VeneraEpisode(
+              id: e['id']?.toString() ?? '',
+              title: e['title']?.toString() ?? '',
+            ));
+          }
+        }
+        groups.add(VeneraChapterGroup(
+          id: g['id']?.toString() ?? '',
+          title: g['title']?.toString() ?? '',
+          episodes: eps,
+        ));
+      }
+    }
+    return VeneraComicDetail(
+      title: result['title']?.toString() ?? '',
+      cover: result['cover']?.toString() ?? '',
+      description: result['description']?.toString() ?? '',
+      chapters: groups,
+    );
+  }
+
+  /// 章节图片：`comic.loadEp(comicId, epId)` → {images}。
+  Future<List<String>> loadEpImages(String comicId, String epId) async {
+    final result = await VeneraJsRuntime.instance
+        .callMethod(key, 'comic.loadEp', [comicId, epId]);
+    if (result is Map) {
+      final images = result['images'];
+      if (images is List) {
+        return [for (final u in images) u?.toString() ?? ''].where((u) => u.isNotEmpty).toList();
+      }
+    }
+    return const [];
+  }
+}
+
+class VeneraComic {
+  const VeneraComic({required this.id, required this.title, required this.cover});
+
+  final String id;
+  final String title;
+  final String cover;
+}
+
+class VeneraEpisode {
+  const VeneraEpisode({required this.id, required this.title});
+
+  final String id;
+  final String title;
+}
+
+class VeneraChapterGroup {
+  const VeneraChapterGroup({
+    required this.id,
+    required this.title,
+    required this.episodes,
+  });
+
+  final String id;
+  final String title;
+  final List<VeneraEpisode> episodes;
+}
+
+class VeneraComicDetail {
+  const VeneraComicDetail({
+    required this.title,
+    required this.cover,
+    required this.description,
+    required this.chapters,
+  });
+
+  final String title;
+  final String cover;
+  final String description;
+  final List<VeneraChapterGroup> chapters;
+
+  /// 展平的章节（组标题作卷名）。
+  List<({String id, String title, String volume})> get flatEpisodes => [
+        for (final g in chapters)
+          for (final e in g.episodes) (id: e.id, title: e.title, volume: g.title),
+      ];
+}
+
+/// Venera 结果的宽容取漫画列表：数组本体 / {comics} / {list}。
+List<VeneraComic> _comicsOf(dynamic result) {
+  dynamic list = result;
+  if (list is Map) {
+    list = list['comics'] ?? list['list'];
+  }
+  if (list is! List) return const [];
+  return [
+    for (final c in list)
+      if (c is Map)
+        VeneraComic(
+          id: c['id']?.toString() ?? '',
+          title: (c['title'] ?? c['name'])?.toString() ?? '',
+          cover: c['cover']?.toString() ?? '',
+        ),
+  ].where((c) => c.id.isNotEmpty).toList();
+}

@@ -23,6 +23,7 @@ class MangaReaderScreen extends StatefulWidget {
     required this.bookId,
     required this.bookTitle,
     required this.chapters,
+    this.pageLoader,
     this.coverUrl = '',
     this.initialIndex = 0,
     this.restoreOffset = 0,
@@ -32,6 +33,9 @@ class MangaReaderScreen extends StatefulWidget {
   final String bookTitle;
   final String coverUrl;
   final List<BookChapter> chapters;
+
+  /// 第三方漫画源的页加载器（Venera 等）：提供时不再走 Go 核心桥。
+  final Future<MangaChapterPages> Function(BookChapter chapter)? pageLoader;
   final int initialIndex;
 
   /// 首次进入时还原到该话内的相对位置（0..1）。
@@ -180,8 +184,9 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
       return;
     }
     try {
-      final pages =
-          await AppScope.read(context).api.chapterPages(chapter.id);
+      final pages = widget.pageLoader != null
+          ? await widget.pageLoader!(chapter)
+          : await AppScope.read(context).api.chapterPages(chapter.id);
       _cache[chapter.id] = pages;
       if (!mounted || _index != index) return;
       setState(() {

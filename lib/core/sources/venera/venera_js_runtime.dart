@@ -2,6 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
+
+import 'package:crypto/crypto.dart';
 
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:fast_gbk/fast_gbk.dart' as gbk;
@@ -34,7 +37,7 @@ class VeneraJsRuntime {
   var _domSeq = 0;
 
   /// load_data/save_data 持久化壳（Phase 2 接 _JsonFileStore）。
-  final Map<String, Map<String, dynamic>> _dataStore = {};
+  final Map<String, dynamic> _dataStore = {};
 
   /// load_setting/save_setting 壳（Phase 2 接设置存储）。
   final Map<String, dynamic> _settingsStore = {};
@@ -141,20 +144,76 @@ $export
     }
   }
 
+  /// Convert 全面（utf8/gbk/base64/md5/sha1/sha256/sha512/hmac/hex）。
+  /// 值宽容：String（含 ArrayBuffer 桥接形态）与 bytes 均可。
   dynamic _handleConvert(dynamic message) {
     final type = message['type']?.toString() ?? 'utf8';
     final isEncode = message['isEncode'] == true;
-    if (isEncode) {
-      final str = message['value']?.toString() ?? '';
-      final bytes =
-          type == 'gbk' ? gbk.gbk.encode(str) : utf8.encode(str);
-      return bytes;
+    final value = message['value'];
+
+    String strOf(dynamic v) {
+      if (v is String) return v;
+      if (v is Uint8List) return utf8.decode(v, allowMalformed: true);
+      if (v is List) {
+        return utf8.decode(v.map((e) => (e as num).toInt()).toList(),
+            allowMalformed: true);
+      }
+      return '$v';
     }
-    final list = (message['value'] as List?)?.map((e) => (e as num).toInt()).toList() ??
-        const <int>[];
-    return type == 'gbk'
-        ? gbk.gbk.decode(list)
-        : utf8.decode(list, allowMalformed: true);
+
+    List<int> bytesOf(dynamic v) {
+      if (v is Uint8List) return v;
+      if (v is List) return v.map((e) => (e as num).toInt()).toList();
+      if (v is String) return utf8.encode(v);
+      return utf8.encode('$v');
+    }
+
+    Digest hashOf(String algo, List<int> data) => switch (algo) {
+          'md5' => md5.convert(data),
+          'sha1' => sha1.convert(data),
+          'sha512' => sha512.convert(data),
+          _ => sha256.convert(data),
+        };
+
+    switch (type) {
+      case 'utf8':
+        return isEncode ? utf8.encode(strOf(value)) : utf8.decode(bytesOf(value), allowMalformed: true);
+      case 'gbk':
+        return isEncode
+            ? gbk.gbk.encode(strOf(value))
+            : gbk.gbk.decode(bytesOf(value));
+      case 'base64':
+        return isEncode ? base64.encode(bytesOf(value)) : base64.decode(strOf(value));
+      case 'hex':
+        if (isEncode) {
+          return bytesOf(value)
+              .map((b) => b.toRadixString(16).padLeft(2, '0'))
+              .join();
+        }
+        final hexStr = strOf(value).replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+        return [
+          for (var i = 0; i + 1 < hexStr.length; i += 2)
+            int.parse(hexStr.substring(i, i + 2), radix: 16),
+        ];
+      case 'md5':
+      case 'sha1':
+      case 'sha256':
+      case 'sha512':
+        return hashOf(type, bytesOf(value)).toString();
+      case 'hmac':
+        final hash = message['hash']?.toString() ?? 'sha256';
+        final key = bytesOf(message['key']);
+        final data = bytesOf(value);
+        final digest = switch (hash) {
+          'md5' => Hmac(md5, key),
+          'sha1' => Hmac(sha1, key),
+          'sha512' => Hmac(sha512, key),
+          _ => Hmac(sha256, key),
+        }.convert(data).toString();
+        return digest;
+      default:
+        throw Exception('Unknown convert type: $type');
+    }
   }
 
   Future<dynamic> _handleHttp(Map<String, dynamic> message) async {
@@ -294,6 +353,9 @@ $export
     return info;
   }
 
+  /// 求值一个表达式并 JSON 解析（读取实例字段/元数据用）。
+  Future<dynamic> evalJson(String expr) => _awaitJs(expr);
+
   /// 调用源方法：[path] 如 `search.load` / `comic.loadEp` / `explore.<i>.load`。
   Future<dynamic> callMethod(String key, String path, List<Object?> args) {
     final argsJson = jsonEncode(args);
@@ -357,7 +419,9 @@ Future<Map<String, dynamic>> _performHttp({
         res.headers.forEach((k, v) => h[k] = v.join(', '));
         return h;
       }(),
-      if (bytes) 'bytes': body else 'text': utf8.decode(body, allowMalformed: true),
+      // Network 契约：{status, headers, body}（fetchBytes 为 ArrayBuffer、
+      // sendRequest 为字符串——Array 形态的 bytes 亦兼容索引/length 用法）。
+      'body': bytes ? body : utf8.decode(body, allowMalformed: true),
     };
   } finally {
     client.close();
