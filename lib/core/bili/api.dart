@@ -4,6 +4,14 @@ import 'dart:typed_data';
 import 'session.dart';
 import 'wbi.dart';
 
+/// B 站封面字段（pic/cover）多为协议相对路径（`//i0.hdslb.com/...`），
+/// 直接塞给 Image.network 会当相对路径加载失败 → 全部显示占位图。
+String _biliCover(Object? raw) {
+  final url = raw?.toString() ?? '';
+  if (url.startsWith('//')) return 'https:$url';
+  return url;
+}
+
 /// B 站 web API 客户端（搜索/推荐/详情/番剧/playurl/弹幕）。
 ///
 /// 风控要点（两个参考项目均缺失、此处补齐）：所有请求带 buvid3 + bili_ticket；
@@ -242,7 +250,7 @@ class BiliSearchItem {
         kind: BiliItemKind.season,
         id: json['season_id']?.toString() ?? '',
         title: title,
-        coverUrl: json['cover']?.toString() ?? '',
+        coverUrl: _biliCover(json['cover']),
         subTitle: (json['desc']?.toString() ?? '').replaceAll('\n', ' '),
         epId: json['eps_id']?.toString() ?? '',
       );
@@ -251,7 +259,7 @@ class BiliSearchItem {
       kind: BiliItemKind.video,
       id: json['bvid']?.toString() ?? '',
       title: title,
-      coverUrl: json['pic']?.toString() ?? '',
+      coverUrl: _biliCover(json['pic']),
       subTitle:
           'UP：${json['author']?.toString() ?? ''} · ${json['duration']?.toString() ?? ''}',
     );
@@ -284,7 +292,7 @@ class BiliVideoCard {
         title: (json['title']?.toString() ?? '')
             .replaceAll('<em class="keyword">', '')
             .replaceAll('</em>', ''),
-        coverUrl: json['pic']?.toString() ?? '',
+        coverUrl: _biliCover(json['pic']),
         upName: json['owner'] is Map
             ? ((json['owner'] as Map)['name']?.toString() ?? '')
             : '',
@@ -323,7 +331,7 @@ class BiliVideoDetail {
     return BiliVideoDetail(
       bvid: json['bvid']?.toString() ?? '',
       title: json['title']?.toString() ?? '',
-      coverUrl: json['pic']?.toString() ?? '',
+      coverUrl: _biliCover(json['pic']),
       description: json['desc']?.toString() ?? '',
       upName: owner is Map ? owner['name']?.toString() ?? '' : '',
       pages: [
@@ -367,7 +375,7 @@ class BiliSeason {
   factory BiliSeason.fromJson(Map<String, dynamic> json) => BiliSeason(
         seasonId: json['season_id']?.toString() ?? '',
         title: json['title']?.toString() ?? '',
-        coverUrl: json['cover']?.toString() ?? '',
+        coverUrl: _biliCover(json['cover']),
         description: (json['evaluate']?.toString() ?? '')
             .replaceAll(RegExp(r'<[^>]+>'), ''),
         episodes: [

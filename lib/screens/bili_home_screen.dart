@@ -194,6 +194,29 @@ class _BiliHomeScreenState extends State<BiliHomeScreen> {
                     style: theme.textTheme.bodySmall
                         ?.copyWith(color: theme.colorScheme.outline)),
               ),
+            )
+          else
+            // 未登录：推荐 feed 注定为空，给显眼引导而不是只报"推荐加载为空"。
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline_rounded,
+                      size: 18, color: theme.colorScheme.outline),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                        '未登录：推荐不可用，可先搜索；登录后可看推荐与发弹幕',
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: theme.colorScheme.outline)),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: _showLoginSheet,
+                    icon: const Icon(Icons.qr_code_scanner, size: 18),
+                    label: const Text('扫码登录'),
+                  ),
+                ],
+              ),
             ),
           Expanded(
             child: LoadView(

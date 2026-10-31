@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
@@ -735,7 +736,20 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   @override
   Widget build(BuildContext context) {
     final ep = _line.episodes[_index];
-    return Scaffold(
+    // 桌面端 Esc/Backspace 返回：AppBar 只在控件条显示时可见，
+    // 没有键盘出口的话全屏播 B 站视频就"退不出来"。
+    return Focus(
+      autofocus: true,
+      onKeyEvent: (node, event) {
+        if (event is KeyDownEvent &&
+            (event.logicalKey == LogicalKeyboardKey.escape ||
+                event.logicalKey == LogicalKeyboardKey.backspace)) {
+          Navigator.maybePop(context);
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: Scaffold(
       backgroundColor: Colors.black,
       appBar: _showControls
           ? AppBar(
@@ -971,6 +985,7 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
             ],
           ],
         ),
+      ),
       ),
     );
   }

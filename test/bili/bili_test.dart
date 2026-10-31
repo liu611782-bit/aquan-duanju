@@ -111,6 +111,21 @@ void main() {
       expect(season.description, '简介加粗');
     });
 
+    test('封面协议相对路径（//host）补全为 https（搜索结果全部无封面的根因）', () {
+      final video = BiliSearchItem.fromJson(
+          {'bvid': 'BV1', 'title': 't', 'pic': '//i0.hdslb.com/bfs/x.jpg'},
+          'video');
+      expect(video.coverUrl, 'https://i0.hdslb.com/bfs/x.jpg');
+      final bangumi = BiliSearchItem.fromJson(
+          {'season_id': 1, 'title': 't', 'cover': '//i0.hdslb.com/bfs/y.jpg'},
+          'media_bangumi');
+      expect(bangumi.coverUrl, 'https://i0.hdslb.com/bfs/y.jpg');
+      // 已带协议的 URL 原样保留。
+      final kept = BiliSearchItem.fromJson(
+          {'bvid': 'BV1', 'title': 't', 'pic': 'http://i/cover.jpg'}, 'video');
+      expect(kept.coverUrl, 'http://i/cover.jpg');
+    });
+
     test('BiliStream.fromJson 取 baseUrl，缺失时回退 backupUrl', () {
       final s1 = BiliStream.fromJson({
         'baseUrl': 'http://a/main.m4s',
