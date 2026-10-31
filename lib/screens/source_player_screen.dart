@@ -16,6 +16,7 @@ import '../core/sources/source_adapter.dart';
 import '../core/sources/source_import.dart';
 import '../store/stores.dart';
 import '../widgets/cast_panel.dart';
+import '../widgets/player_track_sheet.dart';
 import '../widgets/common.dart';
 import '../widgets/danmaku_overlay.dart';
 
@@ -99,6 +100,9 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   Timer? _hideTimer;
   Timer? _historyTimer;
 
+  /// 字幕时差（秒）。按剧记忆（historyKey），面板调整后持久化。
+  double _subDelay = 0;
+
   StreamSubscription<Duration>? _posSub;
   StreamSubscription<Duration>? _durSub;
   StreamSubscription<bool>? _playingSub;
@@ -119,6 +123,18 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
     if (_lineIndex < 0) _lineIndex = 0;
     _index = widget.startIndex.clamp(0, _line.episodes.length - 1);
     _engine = MpvPlayerEngine();
+    // 字幕时差按剧记忆：开播即注入（面板调整会实时覆盖）。
+    _subDelay = (_history
+                .entries
+                .where((h) => h.seriesId == widget.series.historyKey)
+                .firstOrNull
+                ?.subtitleDelayMs ??
+            0) /
+        1000.0;
+    if (_subDelay != 0) {
+      // ignore: discarded_futures
+      _engine.setProperty('sub-delay', '$_subDelay');
+    }
     castController.onRemoteStopped = (device, position) {
       if (!mounted) return;
       final behavior =
@@ -653,6 +669,23 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
               title: Text('${widget.series.title} · ${ep.title}',
                   style: const TextStyle(fontSize: 16)),
               actions: [
+                IconButton(
+                  tooltip: '音轨 / 字幕',
+                  icon: const Icon(Icons.subtitles_outlined),
+                  onPressed: () {
+                    showPlayerTracksSheet(context, _engine,
+                      initialSubtitleDelay: _subDelay,
+                      onSubtitleDelayChanged: (delayMs) async {
+                        setState(() => _subDelay = delayMs / 1000.0);
+                        try {
+                          await _history.setPlaybackPrefs(
+                            seriesId: widget.series.historyKey,
+                            subtitleDelayMs: delayMs.round(),
+                          );
+                        } catch (_) {}
+                      });
+                  },
+                ),
                 ListenableBuilder(
                   listenable: castController,
                   builder: (context, _) => IconButton(

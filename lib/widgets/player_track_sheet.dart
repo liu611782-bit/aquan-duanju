@@ -3,14 +3,22 @@ import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 
 import '../core/player/player_engine.dart';
+import '../core/player/subtitle_delay.dart';
 
 /// 音轨 / 字幕轨选择面板。
 ///
 /// 支持内嵌音轨、内嵌字幕、关闭字幕，以及从本地加载外挂字幕
 /// （SRT / ASS / SSA / VTT / SUB）。外挂字幕在下次打开媒体时自动卸载，
 /// 与 media_kit 的语义一致。
+///
+/// 字幕同步：[initialSubtitleDelay]（秒）为当前时差；用户调整时面板实时
+/// 写引擎 `sub-delay`，并回调 [onSubtitleDelayChanged]（毫秒）由调用方
+/// 按剧持久化；不传回调则仅实时生效（向后兼容）。
 Future<void> showPlayerTracksSheet(
-    BuildContext context, PlayerEngine engine) async {
+    BuildContext context, PlayerEngine engine, {
+  double initialSubtitleDelay = 0,
+  Future<void> Function(double delayMs)? onSubtitleDelayChanged,
+}) async {
   final tracks = engine.state.tracks;
   final audioTracks =
       tracks.audio.where((t) => t.id != 'auto' && t.id != 'no').toList();
@@ -59,6 +67,12 @@ Future<void> showPlayerTracksSheet(
             ],
             const Divider(height: 1),
             const _SheetHeader('字幕'),
+            _SubtitleSyncSection(
+              engine: engine,
+              initialDelay:
+                  SubtitleDelay.clamp(initialSubtitleDelay),
+              onPersist: onSubtitleDelayChanged,
+            ),
             if (subtitleTracks.isEmpty)
               const ListTile(title: Text('当前视频没有内嵌字幕'))
             else ...[
@@ -162,6 +176,69 @@ class _SheetHeader extends StatelessWidget {
               color: Theme.of(context).colorScheme.outline,
               fontWeight: FontWeight.w600,
             ),
+      ),
+    );
+  }
+}
+
+/// 字幕同步段：±0.5s 步进实时写引擎，重置回 0；调整经 [onPersist] 落盘。
+class _SubtitleSyncSection extends StatefulWidget {
+  const _SubtitleSyncSection({
+    required this.engine,
+    required this.initialDelay,
+    this.onPersist,
+  });
+
+  final PlayerEngine engine;
+  final double initialDelay;
+  final Future<void> Function(double delayMs)? onPersist;
+
+  @override
+  State<_SubtitleSyncSection> createState() => _SubtitleSyncSectionState();
+}
+
+class _SubtitleSyncSectionState extends State<_SubtitleSyncSection> {
+  late double _delay = widget.initialDelay;
+
+  Future<void> _set(double value) async {
+    final v = SubtitleDelay.clamp(value);
+    setState(() => _delay = v);
+    try {
+      await widget.engine.setProperty('sub-delay', '$v');
+    } catch (_) {}
+    final persist = widget.onPersist;
+    if (persist != null) {
+      try {
+        await persist((v * 1000).roundToDouble());
+      } catch (_) {}
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      dense: true,
+      leading: const Icon(Icons.schedule_outlined),
+      title: Text('字幕同步 · ${SubtitleDelay.label(_delay)}'),
+      subtitle: const Text('字幕比声音慢就提前（−），快了就延后（+）'),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: '提前 0.5s',
+            icon: const Icon(Icons.remove_circle_outline),
+            onPressed: () => _set(SubtitleDelay.step(_delay, -1)),
+          ),
+          TextButton(
+            onPressed: _delay == 0 ? null : () => _set(0),
+            child: const Text('重置'),
+          ),
+          IconButton(
+            tooltip: '延后 0.5s',
+            icon: const Icon(Icons.add_circle_outline),
+            onPressed: () => _set(SubtitleDelay.step(_delay, 1)),
+          ),
+        ],
       ),
     );
   }

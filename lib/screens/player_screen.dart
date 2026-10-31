@@ -75,6 +75,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   List<String> _definitions = const [];
   double _speed = 1.0;
 
+  /// 字幕时差（秒；mpv sub-delay，正=延后）。按剧记忆，开播时注入。
+  double _subDelay = 0;
+
   /// 这部剧的清晰度偏好：初始化自该剧本的历史，跟随用户切换而更新。
   String _quality = '';
 
@@ -214,6 +217,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _quality = (prefs != null && prefs.quality.isNotEmpty)
         ? prefs.quality
         : scope.settings.defaultQuality;
+    _subDelay = (prefs?.subtitleDelayMs ?? 0) / 1000.0;
     _engine = MpvPlayerEngine();
     // 投屏：电视端主动停止时按设置回本地续播（M1：加密分集不可投，入口处拦截）。
     castController.onRemoteStopped = (device, position) {
@@ -368,6 +372,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         'sub-border-size', settings.subtitleBorder ? '3' : '0');
     await _engine.setProperty('sub-back-color',
         settings.subtitleBackground ? '#80000000' : '#00000000');
+    // 字幕时差按剧记忆（每次开播注入，换剧即切换）。
+    await _engine.setProperty('sub-delay', '$_subDelay');
   }
 
 
@@ -2644,7 +2650,20 @@ class _PlayerScreenState extends State<PlayerScreen>
                               _openSkipSettings();
                               break;
                             case 'tracks':
-                              showPlayerTracksSheet(context, _engine);
+                              showPlayerTracksSheet(context, _engine,
+                                initialSubtitleDelay: _subDelay,
+                                onSubtitleDelayChanged: (delayMs) async {
+                                  setState(
+                                      () => _subDelay = delayMs / 1000.0);
+                                  try {
+                                    await AppScope.read(context)
+                                        .history
+                                        .setPlaybackPrefs(
+                                      seriesId: widget.series.id,
+                                      subtitleDelayMs: delayMs.round(),
+                                    );
+                                  } catch (_) {}
+                                });
                               break;
                             case 'quality':
                               _openQualitySheet();

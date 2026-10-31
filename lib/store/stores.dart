@@ -526,6 +526,7 @@ class HistoryEntry {
     this.speed = 0,
     this.quality = '',
     this.sourceKey = '',
+    this.subtitleDelayMs,
     DateTime? updatedAt,
   }) : updatedAt = updatedAt ?? DateTime.now();
 
@@ -541,6 +542,9 @@ class HistoryEntry {
   /// 这部剧的播放偏好：speed 为 0 表示没改过倍速；quality 为空表示用全局默认。
   final double speed;
   final String quality;
+
+  /// 字幕时差按剧记忆（毫秒；null = 未设置）。mpv sub-delay 语义。
+  final int? subtitleDelayMs;
 
   /// 内容来源：空 = 红果（旧数据兼容）；否则为源 id 或 'bili'。
   final String sourceKey;
@@ -575,6 +579,7 @@ class HistoryEntry {
         if (speed > 0) 'speed': speed,
         if (quality.isNotEmpty) 'quality': quality,
         if (sourceKey.isNotEmpty) 'source_key': sourceKey,
+        if (subtitleDelayMs != null) 'subtitle_delay_ms': subtitleDelayMs,
         'updated_at': updatedAt.toIso8601String(),
       };
 
@@ -590,6 +595,7 @@ class HistoryEntry {
         speed: (json['speed'] as num?)?.toDouble() ?? 0,
         quality: json['quality'] as String? ?? '',
         sourceKey: json['source_key'] as String? ?? '',
+        subtitleDelayMs: (json['subtitle_delay_ms'] as num?)?.toInt(),
         updatedAt:
             DateTime.tryParse(json['updated_at'] as String? ?? '') ??
                 DateTime.now(),
@@ -836,6 +842,7 @@ class HistoryStore extends _JsonFileStore {
       // 否则自动换线选到的低清晰度会把「最高」偏好覆盖掉。
       speed: speed > 0 ? speed : (existing?.speed ?? 0),
       quality: quality.isNotEmpty ? quality : (existing?.quality ?? ''),
+      subtitleDelayMs: existing?.subtitleDelayMs,
       sourceKey: sourceKey.isNotEmpty ? sourceKey : (existing?.sourceKey ?? ''),
     );
     _prune();
@@ -851,6 +858,7 @@ class HistoryStore extends _JsonFileStore {
     required String seriesId,
     double? speed,
     String? quality,
+    int? subtitleDelayMs,
   }) async {
     await ensureLoaded();
     final e = _entries[seriesId];
@@ -865,6 +873,7 @@ class HistoryStore extends _JsonFileStore {
       finished: e?.finished ?? false,
       speed: speed ?? e?.speed ?? 0,
       quality: quality ?? e?.quality ?? '',
+      subtitleDelayMs: subtitleDelayMs ?? e?.subtitleDelayMs,
       updatedAt: e?.updatedAt,
     );
     await _writeJson({
