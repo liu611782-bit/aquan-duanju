@@ -47,12 +47,47 @@ class VeneraJsRuntime {
     final runtime = _runtime = QuickJsRuntime2(stackSize: 1024 * 1024 * 4);
     runtime.enableHandlePromises();
     // fork 的双参 sendMessage → __nativeSend；Venera 形态的单参全局重新定义。
-    runtime.onMessage('venera', (args) => _dispatch(args));
+    // 双通道：Venera 源在同步 getter 里调 loadSetting/convert（不能等
+    // Promise），http/delay 则必须异步——按方法面拆分同步/异步两条路。
+    runtime.onMessage('venera_sync', (args) {
+      try {
+        // 同步回传也必须 JSON 字符串：sync _dartToJs 对 Map 会转 JS 对象，
+        // 但信封统一让 JS 包装层 JSON.parse，形态一致。
+        return jsonEncode(_dispatchSync(Map<String, dynamic>.from(args as Map)));
+      } catch (e) {
+        return jsonEncode({'__veneraError': '$e'});
+      }
+    });
+    runtime.onMessage('venera', (args) async {
+      try {
+        final result = await _dispatchAsync(Map<String, dynamic>.from(args as Map));
+        // 异步回传必须 JSON 字符串：fork 的 Future 分支用 "$res" 插值，
+        // Map 会变成 Dart toString；字符串插值则无损。
+        return jsonEncode(result);
+      } catch (e) {
+        return jsonEncode({'__veneraError': '$e'});
+      }
+    });
     final initJs = await rootBundle.loadString('assets/venera/init.js');
     runtime.evaluate('''
 globalThis.__nativeSend = sendMessage;
+var __VENERA_ASYNC = {http: 1, delay: 1, compute: 1, image: 1, UI: 1,
+  getClipboard: 1, setClipboard: 1};
 globalThis.sendMessage = function (message) {
-  return __nativeSend('venera', JSON.stringify(message));
+  if (__VENERA_ASYNC[message.method]) {
+    // 异步方法：返回 Promise（源码/库均以 await 消费）。
+    return __nativeSend('venera', JSON.stringify(message)).then(function (raw) {
+      var v = JSON.parse(raw);
+      if (v && v.__veneraError) throw new Error(v.__veneraError);
+      return v;
+    });
+  }
+  // 同步方法（convert/load_setting/load_data/...）：立即返回值——
+  // Venera 源在同步 getter 里调它们（https://\${this.loadSetting(..)}）。
+  var raw = __nativeSend('venera_sync', JSON.stringify(message));
+  var v = JSON.parse(raw);
+  if (v && v.__veneraError) throw new Error(v.__veneraError);
+  return v;
 };
 ''');
     // init.js 用 `let console` 顶层声明，与 fork 预定义的 var console 冲突
@@ -78,20 +113,29 @@ $export
     _ready = true;
   }
 
-  /// 宿主方法分发（sendMessage.method）。
-  dynamic _dispatch(dynamic args) {
-    final message = args is Map ? args : <String, dynamic>{};
+  /// 异步方法分发（http/delay/compute/image/UI/剪贴板）。
+  Future<dynamic> _dispatchAsync(Map<String, dynamic> message) async {
     switch (message['method']?.toString()) {
       case 'http':
-        // async handler：Future → C-capability promise（fork 真桥唯一可靠路径）。
-        return _handleHttp(Map<String, dynamic>.from(message));
+        return _handleHttp(message);
+      case 'delay':
+        final ms = (message['time'] as num?)?.toInt() ?? 0;
+        await Future<void>.delayed(Duration(milliseconds: ms));
+        return null;
+      default:
+        throw Exception('Unknown async Venera method: ${message['method']}');
+    }
+  }
+
+  /// 同步方法分发（convert/存储/设置/工具——Venera 源同步 getter 依赖）。
+  dynamic _dispatchSync(dynamic args) {
+    final message = args is Map ? args : <String, dynamic>{};
+    switch (message['method']?.toString()) {
       case 'convert':
-        return _handleConvert(message);
+        return _handleConvert(Map<String, dynamic>.from(message));
       case 'html':
         return _handleHtml(message);
       case 'load_setting':
-        // ignore: avoid_print
-        print('[VPDBG] load_setting ${message['key']}/${message['setting_key']} has=${_settingsStore.containsKey('${message['key']}/${message['setting_key']}')}');
         return _settingsStore['${message['key']}/${message['setting_key']}'];
       case 'save_setting':
         _settingsStore['${message['key']}/${message['setting_key']}'] =
@@ -110,9 +154,6 @@ $export
       case 'delete_data':
         _dataStore.remove('${message['key']}/${message['data_key']}');
         return null;
-      case 'delay':
-        final ms = (message['time'] as num?)?.toInt() ?? 0;
-        return Future<dynamic>.delayed(Duration(milliseconds: ms));
       case 'log':
         return null;
       case 'uuid':
@@ -217,8 +258,6 @@ $export
   }
 
   Future<dynamic> _handleHttp(Map<String, dynamic> message) async {
-    // ignore: avoid_print
-    print('[VPDBG] http ${message['http_method']} ${message['url']}');
     // 动态 import 避免与 Venera 契约耦合：直接用 http 包。
     return _performHttp(
       method: (message['http_method']?.toString() ?? 'GET').toUpperCase(),
@@ -359,14 +398,18 @@ $export
   /// 调用源方法：[path] 如 `search.load` / `comic.loadEp` / `explore.<i>.load`。
   Future<dynamic> callMethod(String key, String path, List<Object?> args) {
     final argsJson = jsonEncode(args);
+    // 结果在 **JS 内部** JSON.stringify 后回传（spider 同款往返）：fork 的
+    // promise 管线曾把 Dart 对象插值成 toString 形态，字符串则无损。
     return _awaitJs('''
-(() => {
+(async () => {
   var s = globalThis.__veneraSources["$key"];
   var f = s;
   for (var p of ${jsonEncode(path.split('.'))}) { f = f ? f[p] : undefined; }
   if (typeof f !== 'function') throw new Error('方法不存在: $path');
-  return f(...$argsJson);
-})()''');
+  var r = await f(...$argsJson);
+  return JSON.stringify({__ok: true, __data: r === undefined ? null : r});
+})().catch(e => JSON.stringify({__ok: false, __error: String(e)}));
+''');
   }
 
   /// evaluateAsync + handlePromise 封装（fork 真桥）。
@@ -376,7 +419,14 @@ $export
     final raw = promised.stringResult;
     if (raw.isEmpty || raw == 'undefined' || raw == 'null') return null;
     try {
-      return jsonDecode(raw);
+      final decoded = jsonDecode(raw);
+      if (decoded is Map && decoded.containsKey('__ok')) {
+        if (decoded['__ok'] == false) {
+          throw Exception('Venera 调用失败: ${decoded['__error']}');
+        }
+        return decoded['__data'];
+      }
+      return decoded;
     } on FormatException {
       return raw;
     }

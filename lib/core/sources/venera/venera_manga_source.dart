@@ -35,14 +35,14 @@ class VeneraMangaSource {
   Future<List<VeneraComic>> exploreLoad(int index) async {
     final result =
         await VeneraJsRuntime.instance.callMethod(key, 'explore.$index.load', []);
-    return _comicsOf(result);
+    return VeneraComic.comicsOf(result);
   }
 
   /// 搜索（`search.load(kw, options, page)`）。
   Future<List<VeneraComic>> search(String keyword, int page) async {
     final result = await VeneraJsRuntime.instance
         .callMethod(key, 'search.load', [keyword, <String, dynamic>{}, page]);
-    return _comicsOf(result);
+    return VeneraComic.comicsOf(result);
   }
 
   /// 详情：`comic.loadInfo(id)` → ComicDetails。
@@ -103,6 +103,36 @@ class VeneraComic {
   final String id;
   final String title;
   final String cover;
+
+  /// Venera 结果的宽容取漫画列表，三形态：
+  /// ① 数组本体；② {comics|list: [...]}；③ **分节键值**（键=栏目名、值=数组，
+  /// 如 `{推荐: [...], 编辑推荐: [...]}`——explore 最常见返回）。
+  static List<VeneraComic> comicsOf(dynamic result) {
+    // ignore: avoid_print
+    print('[VPDBG3] comicsOf type=${result.runtimeType} '
+        'head=${result is Map ? result.keys.toList() : result.toString().substring(0, result.toString().length.clamp(0, 60))}');
+    if (result is List) return _fromList(result);
+    if (result is Map) {
+      final named = result['comics'] ?? result['list'];
+      if (named is List) return _fromList(named);
+      final out = <VeneraComic>[];
+      for (final v in result.values) {
+        if (v is List) out.addAll(_fromList(v));
+      }
+      return out;
+    }
+    return const [];
+  }
+
+  static List<VeneraComic> _fromList(List list) => [
+        for (final c in list)
+          if (c is Map)
+            VeneraComic(
+              id: c['id']?.toString() ?? '',
+              title: (c['title'] ?? c['name'])?.toString() ?? '',
+              cover: c['cover']?.toString() ?? '',
+            ),
+      ].where((c) => c.id.isNotEmpty).toList();
 }
 
 class VeneraEpisode {
@@ -142,22 +172,4 @@ class VeneraComicDetail {
         for (final g in chapters)
           for (final e in g.episodes) (id: e.id, title: e.title, volume: g.title),
       ];
-}
-
-/// Venera 结果的宽容取漫画列表：数组本体 / {comics} / {list}。
-List<VeneraComic> _comicsOf(dynamic result) {
-  dynamic list = result;
-  if (list is Map) {
-    list = list['comics'] ?? list['list'];
-  }
-  if (list is! List) return const [];
-  return [
-    for (final c in list)
-      if (c is Map)
-        VeneraComic(
-          id: c['id']?.toString() ?? '',
-          title: (c['title'] ?? c['name'])?.toString() ?? '',
-          cover: c['cover']?.toString() ?? '',
-        ),
-  ].where((c) => c.id.isNotEmpty).toList();
 }
