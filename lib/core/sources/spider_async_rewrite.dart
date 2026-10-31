@@ -6,8 +6,8 @@
 /// IIFE。`await` 任意值透传，因此对非 Promise 调用无副作用。
 ///
 /// 关键实现：**平衡括号扫描**。`await req(...).body` 的 await 会错误地只作用于
-/// `.body`（优先级），因此必须把「标识符调用 + 后续成员链（`.x`/`[…]`/`(…)`）」
-/// 整体包成 `(await ident(...).chain)`。
+/// `.body`（优先级），因此「标识符调用 + 后续成员链（`.x`/`[…]`/`(…)`）」必须
+/// 包成 `(await ident(...)).chain`——await 打在调用上，成员链留在 await 外。
 ///
 /// 已知限制（语法错误由 evaluate 抛出并归为「该源不支持」）：
 /// - 只改写**裸标识符**调用（`req(...)`）；`x.req(...)` 等成员调用不改写；
@@ -165,12 +165,16 @@ class SpiderAsyncRewrite {
           final close = _matchParen(source, j);
           if (close > 0) {
             final chainEnd = _extendChain(source, close + 1);
-            // 拆分：头部（标识符+'('）+ 递归改写的参数 + 闭合与成员链后缀。
+            // 拆分：头部（标识符+'('）+ 递归改写的参数 + 闭合 + 成员链后缀。
+            // await 必须打在**调用**上：`(await req(...)).body`——包成
+            // `(await req(...).body)` 会 await 属性访问（Promise.body =
+            // undefined），这是首次端到端联调抓出的括号位置 bug。
             out.write('(await ');
             out.write(source.substring(start, j + 1));
             out.write(_insertAwaits(source.substring(j + 1, close)));
-            out.write(source.substring(close, chainEnd));
+            out.write(source.substring(close, close + 1));
             out.write(')');
+            out.write(source.substring(close + 1, chainEnd));
             i = chainEnd;
             prev = ')';
             continue;

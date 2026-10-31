@@ -52,7 +52,7 @@ void main() {
   test('合成爬虫全链路：home → category(req+pdfa) → detail → search(req+pdfh)',
       () async {
     // 没有 QuickJS 原生桥就跳过（flutter test 是纯 Dart VM，加载不了插件原生库）。
-    if (!ensureQuickJsLibrary()) return;
+    if (!ensureFlutterQjsLibrary()) return;
     // 本地夹具服务器。
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     addTearDown(() => server.close(force: true));
@@ -70,8 +70,9 @@ void main() {
 <div class="item"><span>影片$tid-C</span></div>
 </body></html>''');
       } else if (path == '/search') {
-        final wd = Uri.decodeQueryComponent(
-            req.uri.queryParameters['wd'] ?? '');
+        // queryParameters 已解码；再 decodeQueryComponent 会把正常中文
+        // 判成非法百分号（双重解码，本次端到端联调抓出）。
+        final wd = req.uri.queryParameters['wd'] ?? '';
         req.response.write(
             '<html><body><div class="hit"><p class="title">$wd 的结果</p></div></body></html>');
       } else {

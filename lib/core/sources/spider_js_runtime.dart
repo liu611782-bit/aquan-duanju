@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
-import 'package:flutter_js/flutter_js.dart';
+import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
 
@@ -10,9 +10,12 @@ import 'spider_async_rewrite.dart';
 
 /// CatVod JS 爬虫运行时：QuickJS 内嵌 + 宿主 API 桥接。
 ///
-/// 核心约束：QuickJS 执行阻塞 Dart 事件循环，纯 Dart 无法同步等 IO——
-/// 因此对爬虫源码做 async 改写（`SpiderAsyncRewrite.rewriteModule`），宿主
-/// API 全部返回 Promise，配合 evaluateAsync 让 `await req(...)` 自然衔接。
+/// 引擎用 flutter_qjs（kodjodevf fork，mangayomi 生产同款）：flutter_js 兼容
+/// API **且桥接 Promise**——`onMessage` 的 async Dart 处理器在 JS 侧是可
+/// await 的 Promise，`evaluateAsync + handlePromise` 泵 QuickJS 微任务直到
+/// 结果落定。早期 flutter_js 方案因 evaluateAsync 不桥 Promise 而失效。
+/// 注意通道返回值**不做 JSON 自动解码**（Dart 字符串 → JS 字符串），
+/// 宿主垫片统一走 `spNormalize`（typeof string → JSON.parse）。
 ///
 /// 每个爬虫源 eval 进**独立命名空间**（按内容哈希键控，多源同名函数互不干扰），
 /// 调用时按 `key:fn` 从命名空间取 async 函数执行。
@@ -55,64 +58,59 @@ class SpiderJsRuntime {
 
   Future<void> _ensure() async {
     if (_ready) return;
-    final runtime = _runtime = getJavascriptRuntime();
-    // ignore: invalid_use_of_protected_member
-    runtime.init(); // console/setTimeout 桥接。
-    // ignore: invalid_use_of_protected_member
-    runtime.initChannelFunctions(); // 注入 sendMessage（必须先于 onMessage）。
+    // 4MB 栈 = mangayomi 生产同款（防深递归源）；构造器已自动 init
+    // （console/setTimeout/sendMessage 通道）。
+    final runtime = _runtime = QuickJsRuntime2(stackSize: 1024 * 1024 * 4);
+    runtime.enableHandlePromises(); // handlePromise 轮询用的可查询 Promise 登记表。
 
-    // spReq：异步 HTTP（回调 async → JS 侧 Promise）。
-    runtime.onMessage('spReq', (args) async {
+    // spReq/spReqWait 两段式：`spReq` 同步受理（校验 + 启动 HTTP，返回 id），
+    // `spReqWait` **async** handler 用 Completer 等结果——JS 侧 await 到的是
+    // C-capability promise（fork 桥），这是端到端验证过的唯一可靠路径
+    // （mangayomi 生产同款）。教训：native `new Promise` 后置 resolve、以及
+    // 绕开 async handler 的花活，都会踩 fork 引用管理的坑（await 提前返回
+    // 垃圾值 / `InternalError: JSValue released`）。
+    runtime.onMessage('spReq', (args) {
       final opts = args is Map ? args : <String, dynamic>{};
+      final id = 'r${_reqSeq++}';
       final url = opts['url']?.toString() ?? '';
-      if (url.isEmpty) return jsonEncode({'body': '', 'statusCode': 0});
-      try {
-        final method = (opts['method']?.toString() ?? 'GET').toUpperCase();
-        final headers = <String, String>{
-          if (opts['headers'] is Map)
-            for (final e in (opts['headers'] as Map).entries)
-              e.key.toString(): e.value.toString(),
-        };
-        final body = opts['body']?.toString();
-        final client = http.Client();
-        try {
-          late final http.Response res;
-          if (method == 'POST') {
-            res = await client
-                .post(Uri.parse(url), headers: headers, body: body ?? '')
-                .timeout(const Duration(seconds: 15));
-          } else {
-            res = await client
-                .get(Uri.parse(url), headers: headers)
-                .timeout(const Duration(seconds: 15));
-          }
-          return jsonEncode({
-            'body': utf8.decode(res.bodyBytes, allowMalformed: true),
-            'statusCode': res.statusCode,
-          });
-        } finally {
-          client.close();
-        }
-      } catch (e) {
-        return jsonEncode({'body': '', 'statusCode': 0, 'error': '$e'});
+      final method = (opts['method']?.toString() ?? 'GET').toUpperCase();
+      final headers = <String, String>{
+        if (opts['headers'] is Map)
+          for (final e in (opts['headers'] as Map).entries)
+            e.key.toString(): e.value.toString(),
+      };
+      final body = opts['body']?.toString();
+      final completer = Completer<Map<String, dynamic>>();
+      _pendingReqs[id] = completer;
+      unawaited(_performRequest(id, url, method, headers, body));
+      return id;
+    });
+    runtime.onMessage('spReqWait', (args) async {
+      final map = args is Map ? args : <String, dynamic>{};
+      final id = map['id']?.toString() ?? '';
+      final completer = _pendingReqs.remove(id);
+      if (completer == null) {
+        return jsonEncode({'body': '', 'statusCode': 0, 'error': '无此请求 $id'});
       }
+      final result = await completer.future
+          .timeout(const Duration(seconds: 20));
+      return jsonEncode(result);
     });
 
-    // spPdfa：列表提取（每项一个字符串，JSON 数组回流）。
+    // spPdfa：列表提取（JSON 数组字符串回流，spNormalize 解出数组本体）。
+    // 注意**不能**包 {v: …} 再由垫片解包以外的形态：模块拿到的必须是数组
+    // 本体（`names.length` 直接用），包装层曾经让 for 循环静默零迭代。
     runtime.onMessage('spPdfa', (args) {
-      return jsonEncode(
-          {'v': pdfa(_arg(args, 'html'), _arg(args, 'rule'))});
+      return jsonEncode(pdfa(_arg(args, 'html'), _arg(args, 'rule')));
     });
 
     // spPdfh / spPd：CatVod $$ 规则常用子集（Dart html 包 DOM 解析）。
     runtime.onMessage('spPdfh', (args) {
-      return jsonEncode(
-          {'v': pdfh(_arg(args, 'html'), _arg(args, 'rule'))});
+      return jsonEncode(pdfh(_arg(args, 'html'), _arg(args, 'rule')));
     });
     runtime.onMessage('spPd', (args) {
-      return jsonEncode({
-        'v': pd(_arg(args, 'html'), _arg(args, 'rule'), _arg(args, 'baseUrl'))
-      });
+      return jsonEncode(
+          pd(_arg(args, 'html'), _arg(args, 'rule'), _arg(args, 'baseUrl')));
     });
 
     // spSetResult：捕获爬虫结果。
@@ -138,45 +136,55 @@ class SpiderJsRuntime {
     _ready = true;
   }
 
-  /// 泵 QuickJS 微任务队列直到 [value] 完成（宿主 await 依赖 pending job 推进）。
-  Future<String> _pumpUntil(Future value) async {
-    var completed = false;
-    String result = '';
-    Object? error;
-    value.then((v) {
-      result = v?.toString() ?? '';
-    }, onError: (Object e) {
-      error = e;
-    }).whenComplete(() {
-      completed = true;
-    });
-    final deadline = DateTime.now().add(_callTimeout);
-    while (!completed && DateTime.now().isBefore(deadline)) {
-      _runtime!.executePendingJob();
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-    }
-    if (error != null) {
-      throw Exception('spider 执行异常: $error');
-    }
-    if (!completed) {
-      // 超时必须显式失败：静默返回空串会被上层当成「没有结果」。
-      throw SpiderTimeoutException(
-          'spider 调用超时（${_callTimeout.inSeconds}s）');
-    }
-    return result;
-  }
-
   static String _arg(dynamic args, String key) =>
       args is Map ? args[key]?.toString() ?? '' : '';
 
+  int _reqSeq = 0;
+  final Map<String, Completer<Map<String, dynamic>>> _pendingReqs = {};
+
+  /// 执行 spReq 受理的 HTTP，完成时灌入对应 Completer（spReqWait 消费）。
+  Future<void> _performRequest(String id, String url, String method,
+      Map<String, String> headers, String? body) async {
+    final completer = _pendingReqs[id];
+    if (completer == null) return;
+    try {
+      final client = http.Client();
+      late final http.Response res;
+      try {
+        if (method == 'POST') {
+          res = await client
+              .post(Uri.parse(url), headers: headers, body: body ?? '')
+              .timeout(const Duration(seconds: 15));
+        } else {
+          res = await client
+              .get(Uri.parse(url), headers: headers)
+              .timeout(const Duration(seconds: 15));
+        }
+      } finally {
+        client.close();
+      }
+      completer.complete({
+        'body': utf8.decode(res.bodyBytes, allowMalformed: true),
+        'statusCode': res.statusCode,
+      });
+    } catch (e) {
+      completer.complete({'body': '', 'statusCode': 0, 'error': '$e'});
+    }
+  }
+
   /// 宿主 API 垫片：req/pdfh/pd/setResult/local 全部经 sendMessage 通道。
+  ///
+  /// `req` = 受理（spReq）+ 等待（spReqWait，async handler → C-capability
+  /// promise）两段式，见 spReq 处理器注释。pdfh/pdfa/pd 纯同步通道 +
+  /// `spNormalize` 归一化（通道返回值不做 JSON 自动解码）。
   static final _hostShim = '''
 function spNormalize(v) { return typeof v === 'string' ? JSON.parse(v) : v; }
 async function req(options) {
   if (typeof options === 'string') options = {url: options};
-  return spNormalize(await sendMessage('spReq', JSON.stringify(options)));
+  var id = sendMessage('spReq', JSON.stringify(options));
+  return spNormalize(await sendMessage('spReqWait', JSON.stringify({id: id})));
 }
-async function getHtml(options) { return (await req(options)).body; }
+function getHtml(options) { return req(options).then(function(r) { return r.body; }); }
 async function pdfh(html, rule) {
   return spNormalize(await sendMessage('spPdfh', JSON.stringify({html, rule})));
 }
@@ -226,6 +234,9 @@ var local = {
       final key =
           'sp${md5.convert(utf8.encode(jsSource)).toString().substring(0, 12)}';
       if (!_loadedKeys.contains(key)) {
+        // 改写仍然必要：CatVod 源大量是**同步风格**（`req(...).body` 裸调用），
+        // 改写器把裸调用包成 `(await req(...))` 并给函数声明补 async——真桥
+        // 负责执行 async，改写负责把同步源变成 async，两者正交。
         final module = SpiderAsyncRewrite.rewriteModule(jsSource);
         final snapshot = _entryFns
             .map((n) => "try { if (typeof $n === 'function') ns['$n'] = $n; } catch(e) {}")
@@ -249,7 +260,7 @@ globalThis.__sp["$key"] = ns;
       }
       _lastResult = null;
       final argsJson = jsonEncode(args);
-      final res = _runtime!.evaluate('''
+      final res = await _runtime!.evaluateAsync('''
 (async () => {
   var ns = (globalThis.__sp && globalThis.__sp["$key"]) || {};
   var f = ns["$fn"];
@@ -262,12 +273,16 @@ globalThis.__sp["$key"] = ns;
 ''');
 
       String raw;
-      final rawResult = res.rawResult;
-      if (rawResult is Future) {
-        // Promise → Dart Future：必须手动泵 QuickJS 微任务队列才算推进。
-        raw = await _pumpUntil(rawResult);
-      } else {
-        raw = res.stringResult;
+      try {
+        // 桥接 Promise：泵微任务直到落定（fork 的 handlePromise）。
+        final promised = await _runtime!.handlePromise(res).timeout(_callTimeout);
+        raw = promised.stringResult;
+      } on TimeoutException {
+        // 超时必须显式失败：静默返回空串会被上层当成「没有结果」。
+        throw SpiderTimeoutException(
+            'spider 调用超时（${_callTimeout.inSeconds}s）');
+      } on Object catch (e) {
+        throw Exception('spider 执行异常: $e');
       }
       return _parseResult(_lastResult ?? raw);
     });
@@ -323,6 +338,9 @@ globalThis.__sp["$key"] = ns;
   }
 
   /// CatVod pdfa：列表提取。规则末段为属性关键字时逐元素提取，否则取文本。
+  ///
+  /// 中间选择器**逐层展开取全部匹配**（CatVod 语义：`.item&&span&&Text`
+  /// 收集所有 `.item` 下的 span，而不是第一个 `.item` 的）。
   static List<String> pdfa(String htmlText, String rule) {
     if (htmlText.isEmpty || rule.isEmpty) return const [];
     final doc = html_parser.parse(htmlText);
@@ -336,19 +354,19 @@ globalThis.__sp["$key"] = ns;
     final isAttr = attrKeys.contains(last) || last.startsWith('data-');
     final selectors = isAttr ? parts.sublist(0, parts.length - 1) : parts;
     if (selectors.isEmpty) return const [];
-    dynamic scope = doc;
-    for (var i = 0; i < selectors.length - 1; i++) {
-      scope = _query(scope, selectors[i]);
-      if (scope == null) return const [];
-    }
-    List<dynamic> elements;
-    try {
-      elements = scope.querySelectorAll(selectors.last).toList();
-    } catch (_) {
-      return const [];
+    List<dynamic> scopes = [doc];
+    for (final sel in selectors) {
+      final next = <dynamic>[];
+      for (final scope in scopes) {
+        try {
+          next.addAll(scope.querySelectorAll(sel));
+        } catch (_) {}
+      }
+      if (next.isEmpty) return const [];
+      scopes = next;
     }
     final out = <String>[];
-    for (final el in elements) {
+    for (final el in scopes) {
       if (!isAttr) {
         out.add(_textOf(el).trim());
       } else if (last == 'text' || last == 'textall') {

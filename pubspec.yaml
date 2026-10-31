@@ -57,6 +57,13 @@ dependencies:
   qr_flutter: ^4.1.0
   # JS 爬虫运行时（type=3 .js 源）：Windows/Linux/Android 用 QuickJS FFI（同步），macOS 用 JavaScriptCore。
   flutter_js: ^0.8.7
+  # spider 异步引擎：kodjodevf fork（mangayomi 同款）= QuickJS + flutter_js 兼容 API
+  # + 真实 Promise 桥（evaluateAsync/handlePromise/async onMessage），解决
+  # flutter_js evaluateAsync 不泵微任务导致 `await req()` 永不完成的卡点。
+  flutter_qjs:
+    git:
+      url: https://github.com/kodjodevf/flutter_qjs.git
+      ref: main
 
   shared_preferences: ^2.5.6
   path_provider: ^2.1.6

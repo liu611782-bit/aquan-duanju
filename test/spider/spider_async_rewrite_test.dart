@@ -63,6 +63,14 @@ var r = b(obj);
       expect(out, contains('await b(obj)'), reason: '普通函数互调也要 await');
     });
 
+    test('成员链：await 打在调用上，链留在 await 外（端到端抓出的括号 bug）', () {
+      const src = 'function c() { var h = req({url: 1}).body; return h; }';
+      final out = SpiderAsyncRewrite.rewrite(src);
+      expect(out, contains("(await req({url: 1})).body"),
+          reason: '(await req(...).body) 会 await 属性访问，得到 undefined');
+      expect(out, isNot(contains('await req({url: 1}).body')));
+    });
+
     test('await 幂等：已含 await 的调用不重复', () {
       const src = 'function c() { await req("http://x"); }';
       final out = SpiderAsyncRewrite.rewrite(src);
