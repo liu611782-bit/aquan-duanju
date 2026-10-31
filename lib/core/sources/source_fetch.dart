@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import 'idn.dart';
 import 'source_adapter.dart';
 import 'source_import.dart';
 
@@ -137,7 +138,7 @@ Future<FetchResult> fetchProbe(
             error: '重定向缺少 Location',
           );
         }
-        current = Uri.parse(current).resolve(location).toString();
+        current = uriForRequest(current).resolve(location).toString();
         if (enforceSsrf) {
           try {
             SourceImporter.validateImportUrl(current);

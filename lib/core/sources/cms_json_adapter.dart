@@ -7,6 +7,7 @@ import 'package:xml/xml.dart';
 
 import 'normal_title.dart';
 import 'source_adapter.dart';
+import 'idn.dart';
 import 'source_import.dart';
 
 /// CMS（苹果 CMS V10）源适配器：覆盖 type=1（JSON）与 type=0（XML）。
@@ -106,7 +107,7 @@ class CmsJsonAdapter implements SourceAdapter {
       ...config.headers,
     };
     final res = await _client
-        .get(Uri.parse(url), headers: headers)
+        .get(uriForRequest(url), headers: headers)
         .timeout(timeout ?? _timeout);
     if (res.statusCode < 200 || res.statusCode >= 400) {
       throw SourceException(
@@ -213,19 +214,40 @@ class CmsJsonAdapter implements SourceAdapter {
     return out;
   }
 
+  /// 分类过滤参数风格（'t' = MacCMS 标准 / 'tid' = 部分采集站变体）。
+  /// 首次按 't' 请求，空结果自动换 'tid' 并记忆——两种风格在真实源里并存
+  /// （非凡资源忽略 t、要 tid；端到端冒烟抓出）。
+  String? _listParam;
+
   @override
   Future<SourcePage<UnifiedSeries>> list(
       {String? categoryId, required int page}) async {
     final endpoint = await _endpoint();
-    final params = categoryId == null || categoryId.isEmpty
-        ? 'ac=videolist&pg=$page'
-        : 'ac=videolist&t=${Uri.encodeQueryComponent(categoryId)}&pg=$page';
-    final payload = await _call('$endpoint?$params');
-    return SourcePage(
-      items: _itemsOf(payload),
-      page: page,
-      hasMore: _pageInfoOf(payload, page),
-    );
+    Future<SourcePage<UnifiedSeries>> fetch(String param) async {
+      final params = categoryId == null || categoryId.isEmpty
+          ? 'ac=videolist&pg=$page'
+          : 'ac=videolist&$param=${Uri.encodeQueryComponent(categoryId)}&pg=$page';
+      final payload = await _call('$endpoint?$params');
+      return SourcePage(
+        items: _itemsOf(payload),
+        page: page,
+        hasMore: _pageInfoOf(payload, page),
+      );
+    }
+
+    if (categoryId == null || categoryId.isEmpty) return fetch('t');
+    final preferred = _listParam ?? 't';
+    final page1 = await fetch(preferred);
+    if (page1.items.isNotEmpty || _listParam != null || page != 1) {
+      return page1;
+    }
+    final other = preferred == 't' ? 'tid' : 't';
+    final retry = await fetch(other);
+    if (retry.items.isNotEmpty) {
+      _listParam = other;
+      return retry;
+    }
+    return page1;
   }
 
   @override
