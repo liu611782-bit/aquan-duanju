@@ -31,6 +31,8 @@ class FongmiSpiderRuntime {
     Map<String, dynamic>? ext,
     String? httpJs,
     required String profilePath,
+    Map<String, String> libSources = const {},
+    String? sourceUrl,
   }) async {
     final resultJson = await Isolate.run(() => _runInIsolate(
           jsSource: jsSource,
@@ -38,6 +40,8 @@ class FongmiSpiderRuntime {
           argsJson: jsonEncode(args),
           extJson: jsonEncode(ext ?? {}),
           httpJs: httpJs,
+          libSources: libSources,
+          sourceUrl: sourceUrl,
           profilePath: profilePath,
         ));
     final decoded = jsonDecode(resultJson);
@@ -63,12 +67,54 @@ class FongmiSpiderRuntime {
     return const {};
   }
 
+  /// 模块解析：打包 lib 资产 → 相对 base 的网络模块（阻塞 FFI 抓取）。
+  static String _moduleSource(
+    String moduleName, {
+    required String base,
+    required Map<String, String> libSources,
+    required String Function(String url) fetcher,
+  }) {
+    for (final entry in libSources.entries) {
+      if (moduleName == entry.key ||
+          moduleName.endsWith('/${entry.key}') ||
+          moduleName.endsWith(entry.key)) {
+        return entry.value;
+      }
+    }
+    if (moduleName.startsWith('http://') ||
+        moduleName.startsWith('https://')) {
+      return fetcher(moduleName);
+    }
+    if (base.isNotEmpty && !moduleName.startsWith('/')) {
+      return fetcher('$base/$moduleName');
+    }
+    return fetcher(moduleName);
+  }
+
+  /// 阻塞 FFI 抓取模块源（isolate 内合法；UTF-8 文本）。
+  static String _blockingFetch(AquaLibrary lib, int handle, String url) {
+    final resp = lib.call(handle, 'syncHttp',
+        jsonEncode([{'url': url, 'method': 'GET'}]));
+    final env = jsonDecode(resp) as Map<String, dynamic>;
+    if (env['error'] != null) {
+      throw Exception('模块抓取失败: ${env['error']['message']}');
+    }
+    final result = env['result'] as Map<String, dynamic>;
+    if ((result['status'] as num).toInt() != 200) {
+      throw Exception('模块抓取失败: HTTP ${result['status']}');
+    }
+    return utf8.decode(base64.decode(result['bodyB64'] as String),
+        allowMalformed: true);
+  }
+
   static String _runInIsolate({
     required String jsSource,
     required String method,
     required String argsJson,
     required String extJson,
     required String? httpJs,
+    required Map<String, String> libSources,
+    required String? sourceUrl,
     required String profilePath,
   }) {
     final lib = AquaLibrary.open();
@@ -79,7 +125,20 @@ class FongmiSpiderRuntime {
     }
     final handle = (createEnv['result']['handle'] as num).toInt();
 
-    final runtime = QuickJsRuntime2(stackSize: 1024 * 1024 * 4);
+    // 模块相对解析基址：源自身 URL 的目录（moduleNormalizeName 同语义）。
+    final dir = (sourceUrl ?? '').contains('/')
+        ? (sourceUrl ?? '').substring(0, (sourceUrl ?? '').lastIndexOf('/'))
+        : '';
+
+    final runtime = QuickJsRuntime2(
+      stackSize: 1024 * 1024 * 4,
+      moduleHandler: (moduleName) => _moduleSource(
+        moduleName,
+        base: dir,
+        libSources: libSources,
+        fetcher: (url) => _blockingFetch(lib, handle, url),
+      ),
+    );
     try {
       runtime.enableHandlePromises();
       // 同步 req：阻塞 AquaCall（Go 代取网络）——isolate 内阻塞合法。
@@ -133,9 +192,13 @@ globalThis._http = function (url, options) {
   } catch (e) {}
 });
 ''');
-      // 源码：占位替换成全局赋值（FongMi 协议）。
-      runtime.evaluate(jsSource.replaceFirst(
-          '__JS_SPIDER__', 'globalThis.__JS_SPIDER__'));
+      // 源码：以 MODULE 求值（支持 ES import；moduleHandler 解析依赖），
+      // 占位替换成全局赋值（FongMi 协议）。
+      runtime.evaluate(
+        jsSource.replaceFirst('__JS_SPIDER__', 'globalThis.__JS_SPIDER__'),
+        name: sourceUrl,
+        evalFlags: JSEvalFlag.MODULE,
+      );
       // init（catvod 式 ext 注入）。
       runtime.evaluate(
           'globalThis.__JS_SPIDER__.init(${extJson == '{}' ? 'undefined' : extJson})');

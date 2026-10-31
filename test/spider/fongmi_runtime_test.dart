@@ -1,4 +1,5 @@
-// FongMi 引擎集成测试：后台 isolate + 同步 req（阻塞 FFI）+ 短名方法调用。
+// FongMi 引擎集成测试：后台 isolate + 同步 req（阻塞 FFI）+ 短名方法调用 +
+// 模块加载器（ES import 经 moduleHandler 网络抓取）。
 // 运行前置同 spider（双 DLL + AQUAN_SPIDER_TESTS=1）。
 // 注意：AquaNew 需 Go 核心库（aquan_core.dll），与 quickjs DLL 并存加载。
 import 'dart:convert';
@@ -44,6 +45,18 @@ function play(flag, id, vipFlags) {
 globalThis.__JS_SPIDER__ = {init: init, home: home, category: category, detail: detail, search: search, play: play};
 ''';
 
+// 模块加载器夹具：spider 以 ES import 引入相对模块。
+const _moduleSpiderJs = r'''
+import * as lib from './lib.js';
+var base = '';
+function home(filter) {
+  var r = req(base + '/home');
+  var data = JSON.parse(r.body);
+  return JSON.stringify({class: data.classes, tag: lib.decorate('x')});
+}
+globalThis.__JS_SPIDER__ = {home: home};
+''';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() => HttpOverrides.global = null);
@@ -53,8 +66,15 @@ void main() {
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     addTearDown(() => server.close(force: true));
     server.listen((req) async {
-      req.response.headers.contentType = ContentType.json;
       final path = req.uri.path;
+      if (path == '/lib.js') {
+        req.response.headers.contentType =
+            ContentType('application', 'javascript');
+        req.response.write('export function decorate(n) { return "mod-" + n; }');
+        await req.response.close();
+        return;
+      }
+      req.response.headers.contentType = ContentType.json;
       if (path == '/home') {
         req.response.write(jsonEncode({
           'classes': [
@@ -91,17 +111,19 @@ void main() {
   String makeJs() => _spiderJs.replaceFirst(
       "var base = '';", "var base = 'http://127.0.0.1:${server.port}';");
 
+  Future<String> httpJs() => rootBundle.loadString('assets/fongmi/http.js');
+
   test('FongMi 全链：home → category → detail → play（同步 req）', () async {
     if (!ensureFlutterQjsLibrary()) return;
     final profile =
         '${Directory.systemTemp.path}/fongmi_profile_${DateTime.now().millisecondsSinceEpoch}.json';
+    final js = await httpJs();
 
-    final httpJs = await rootBundle.loadString('assets/fongmi/http.js');
     final home = await FongmiSpiderRuntime.call(
       jsSource: makeJs(),
       method: 'home',
       args: [false],
-      httpJs: httpJs,
+      httpJs: js,
       profilePath: profile,
     );
     // ignore: avoid_print
@@ -112,7 +134,7 @@ void main() {
       jsSource: makeJs(),
       method: 'category',
       args: ['1', 1, true, <String, String>{}],
-      httpJs: httpJs,
+      httpJs: js,
       profilePath: profile,
     );
     final list = category['list'] as List;
@@ -125,7 +147,7 @@ void main() {
       jsSource: makeJs(),
       method: 'detail',
       args: ['v1'],
-      httpJs: httpJs,
+      httpJs: js,
       profilePath: profile,
     );
     // ignore: avoid_print
@@ -136,24 +158,44 @@ void main() {
       jsSource: makeJs(),
       method: 'play',
       args: ['线1', 'http://cdn.example/1.m3u8', <String>[]],
-      httpJs: httpJs,
+      httpJs: js,
       profilePath: profile,
     );
     expect(play['url'], 'http://cdn.example/1.m3u8');
   }, timeout: const Timeout(Duration(minutes: 2)));
 
-  test('FongMi 搜索 + ext 注入', () async {
+  test('FongMi 搜索', () async {
     if (!ensureFlutterQjsLibrary()) return;
     final profile =
         '${Directory.systemTemp.path}/fongmi_profile_${DateTime.now().millisecondsSinceEpoch}.json';
-    final httpJs = await rootBundle.loadString('assets/fongmi/http.js');
+    final js = await httpJs();
     final hits = await FongmiSpiderRuntime.call(
       jsSource: makeJs(),
       method: 'search',
       args: ['海贼', false],
-      httpJs: httpJs,
+      httpJs: js,
       profilePath: profile,
     );
     expect((hits['list'] as List), hasLength(1));
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
+  test('FongMi 模块加载器：ES import 相对模块（网络抓取）', () async {
+    if (!ensureFlutterQjsLibrary()) return;
+    final profile =
+        '${Directory.systemTemp.path}/fongmi_profile_${DateTime.now().millisecondsSinceEpoch}.json';
+    final result = await FongmiSpiderRuntime.call(
+      jsSource: _moduleSpiderJs.replaceFirst(
+          "var base = '';", "var base = 'http://127.0.0.1:${server.port}';"),
+      method: 'home',
+      args: [false],
+      httpJs: await httpJs(),
+      sourceUrl: 'http://127.0.0.1:${server.port}/spider.js',
+      profilePath: profile,
+    );
+    // ignore: avoid_print
+    print('module home → $result');
+    expect((result['class'] as List), hasLength(2));
+    expect(result['tag'], 'mod-x',
+        reason: 'ES import 模块应经 moduleHandler 抓取并生效');
   }, timeout: const Timeout(Duration(minutes: 2)));
 }
