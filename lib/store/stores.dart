@@ -1000,7 +1000,7 @@ class HistoryStore extends _JsonFileStore {
 
 /// 追剧收藏：series_id → 记录。
 class FollowStore extends _JsonFileStore {
-  FollowStore() : super('aquan_follows.json');
+  FollowStore({super.testDirectory}) : super('aquan_follows.json');
 
   final Map<String, FollowEntry> _entries = {};
 

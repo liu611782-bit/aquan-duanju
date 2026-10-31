@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../core/sources/source_adapter.dart';
 import '../core/sources/spider_js_adapter.dart';
+import '../core/sources/fongmi/fongmi_spider_adapter.dart';
 import '../widgets/common.dart';
 import '../core/bili/api.dart';
 import 'media_hub_screen.dart' show SourceCover;
@@ -270,13 +271,25 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
   EpisodePlayResolver? _resolverFor(String flag) {
     if (widget.source.kind != SourceKind.spiderJs) return null;
     final adapter = widget.adapter;
-    if (adapter is! SpiderJsAdapter) return null;
-    return (ep) async {
-      try {
-        final url = await adapter.resolvePlayUrl(flag: flag, id: ep.url);
-        if (url.isNotEmpty) return ResolvedPlay(videoUrl: url);
-      } catch (_) {}
-      return ResolvedPlay(videoUrl: ep.url);
-    };
+    // 两种 JS 口味的二次解析同路径：解析失败回退直连 url。
+    if (adapter is SpiderJsAdapter) {
+      return (ep) async {
+        try {
+          final url = await adapter.resolvePlayUrl(flag: flag, id: ep.url);
+          if (url.isNotEmpty) return ResolvedPlay(videoUrl: url);
+        } catch (_) {}
+        return ResolvedPlay(videoUrl: ep.url);
+      };
+    }
+    if (adapter is FongmiSpiderAdapter) {
+      return (ep) async {
+        try {
+          final url = await adapter.resolvePlayUrl(flag: flag, id: ep.url);
+          if (url.isNotEmpty) return ResolvedPlay(videoUrl: url);
+        } catch (_) {}
+        return ResolvedPlay(videoUrl: ep.url);
+      };
+    }
+    return null;
   }
 }

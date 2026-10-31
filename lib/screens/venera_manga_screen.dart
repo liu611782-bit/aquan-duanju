@@ -375,6 +375,7 @@ class _VeneraMangaDetailScreenState extends State<VeneraMangaDetailScreen> {
   VeneraComicDetail? _detail;
   Object? _error;
   bool _loading = true;
+  bool _followed = false;
 
   @override
   void initState() {
@@ -391,6 +392,7 @@ class _VeneraMangaDetailScreenState extends State<VeneraMangaDetailScreen> {
         _detail = detail;
         _loading = false;
       });
+      _syncFollowed();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -400,13 +402,42 @@ class _VeneraMangaDetailScreenState extends State<VeneraMangaDetailScreen> {
     }
   }
 
+  void _syncFollowed() {
+    _followed = AppScope.read(context).follows.get(_bookId) != null;
+  }
+
+  Future<void> _toggleFollow() async {
+    final detail = _detail;
+    if (detail == null) return;
+    final scope = AppScope.read(context);
+    await scope.follows.toggle(
+      seriesId: _bookId,
+      title: detail.title,
+      coverUrl: detail.cover,
+      episodeCount: detail.flatEpisodes.length,
+    );
+    if (!mounted) return;
+    setState(() => _followed = scope.follows.get(_bookId) != null);
+  }
+
   String get _bookId => 'venera:${widget.source.key}:${widget.comicId}';
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('漫画详情')),
+      appBar: AppBar(
+        title: const Text('漫画详情'),
+        actions: [
+          if (_detail != null)
+            IconButton(
+              icon: Icon(_followed ? Icons.favorite : Icons.favorite_border,
+                  color: _followed ? theme.colorScheme.primary : null),
+              onPressed: _toggleFollow,
+              tooltip: _followed ? '取消收藏' : '收藏',
+            ),
+        ],
+      ),
       body: LoadView(
         loading: _loading,
         error: _error,
