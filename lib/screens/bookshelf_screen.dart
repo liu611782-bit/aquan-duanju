@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/aqua_error.dart';
 import '../core/reading_sort.dart';
@@ -16,7 +17,35 @@ class BookshelfScreen extends StatefulWidget {
 }
 
 class _BookshelfScreenState extends State<BookshelfScreen> {
+  /// 排序偏好持久化（Pathfin LibraryPersonalization 同语义）：按枚举 name
+  /// 存 SharedPreferences，损坏/未知值回退 recent。
+  static const _sortKey = 'shelf.sort';
+
   ReadingSort _sort = ReadingSort.recent;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSort();
+  }
+
+  Future<void> _loadSort() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      final saved = prefs.getString(_sortKey);
+      _sort = ReadingSort.values
+          .where((v) => v.name == saved)
+          .firstOrNull ?? ReadingSort.recent;
+    });
+  }
+
+  Future<void> _changeSort(ReadingSort sort) async {
+    setState(() => _sort = sort);
+    final prefs = await SharedPreferences.getInstance();
+    // ignore: discarded_futures
+    prefs.setString(_sortKey, sort.name);
+  }
 
   /// 多选模式（Pathfin LibrarySelection 同语义）：长按进入，批量移除。
   bool _selectionMode = false;
@@ -218,7 +247,7 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                 PopupMenuButton<ReadingSort>(
                   tooltip: '排序',
                   icon: const Icon(Icons.sort),
-                  onSelected: (sort) => setState(() => _sort = sort),
+                  onSelected: _changeSort,
                   itemBuilder: (context) => [
                     for (final sort in ReadingSort.values)
                       PopupMenuItem(
