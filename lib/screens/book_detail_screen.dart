@@ -7,8 +7,8 @@ import '../store/stores.dart';
 import '../widgets/book_directory_sheet.dart';
 import '../widgets/common.dart';
 import 'book_audio_screen.dart';
+import 'book_category_screen.dart';
 import 'manga_reader_screen.dart';
-import 'search_screen.dart';
 import 'reader_screen.dart';
 
 /// 从阅读进度打开一本书（统一入口，便于以后加转场/埋点）。
@@ -327,11 +327,15 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                     runSpacing: 6,
                     children: [
                       if (detail?.category.isNotEmpty == true)
-                        // 分类标签可点：跳按标签词的搜索（书库筛选入口的补充路径）。
+                        // 小说分类标签：点进去小说书库（分类页），不是短剧搜索页。
+                        // 早期误接 showSearchScreen（那是真人剧/漫剧搜索）→ 跳成短剧。
                         InkWell(
                           borderRadius: BorderRadius.circular(6),
-                          onTap: () => showSearchScreen(context,
-                              query: detail.category),
+                          onTap: () => Navigator.of(context).push(
+                            MaterialPageRoute(
+                                builder: (_) => BookCategoryScreen(
+                                    initialCategory: detail.category)),
+                          ),
                           child: _chip(context, detail!.category),
                         ),
                       if (detail?.finished == true) _chip(context, '完结'),

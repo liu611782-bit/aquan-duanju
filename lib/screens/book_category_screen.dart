@@ -9,7 +9,10 @@ import 'book_detail_screen.dart';
 ///
 /// 瓦片来自 `new_category/front`，点进去是 `new_category/landing` 的书单页。
 class BookCategoryScreen extends StatefulWidget {
-  const BookCategoryScreen({super.key});
+  const BookCategoryScreen({super.key, this.initialCategory = ''});
+
+  /// 从书详情点分类标签带入的类目名：进入后自动打开对应分类的书单页（匹配不到则停在分类网格）。
+  final String initialCategory;
 
   @override
   State<BookCategoryScreen> createState() => _BookCategoryScreenState();
@@ -20,10 +23,13 @@ class _BookCategoryScreenState extends State<BookCategoryScreen> {
   Object? _error;
   bool _loading = true;
   String _tab = '1';
+  bool _autoOpened = false;
 
   @override
   void initState() {
     super.initState();
+    // 由书详情标签带入类目名时，直接用「全部」tab（含全部类目）打开，匹配率更高。
+    if (widget.initialCategory.trim().isNotEmpty) _tab = '8';
     _load();
   }
 
@@ -39,6 +45,7 @@ class _BookCategoryScreenState extends State<BookCategoryScreen> {
         _page = page;
         _loading = false;
       });
+      _maybeAutoOpenCategory(page);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -48,9 +55,91 @@ class _BookCategoryScreenState extends State<BookCategoryScreen> {
     }
   }
 
+  /// 带入的类目名→分类瓦片：优先精确、再取包含，命中就自动跳到该分类书单页。
+  void _maybeAutoOpenCategory(CategoryPage page) {
+    if (_autoOpened || widget.initialCategory.trim().isEmpty) return;
+    _autoOpened = true;
+    final want = widget.initialCategory.trim();
+    CategoryTile? hit;
+    for (final t in page.tiles) {
+      if (t.name == want) {
+        hit = t;
+        break;
+      }
+    }
+    if (hit == null) {
+      for (final t in page.tiles) {
+        if (t.name.isNotEmpty &&
+            (t.name.contains(want) || want.contains(t.name))) {
+          hit = t;
+          break;
+        }
+      }
+    }
+    if (hit == null) {
+      // 3) 模糊：取与标签词最长公共子串 ≥ 2 的类目（如「玄幻脑洞」→「玄幻仙侠」）。
+      var best = 0;
+      for (final t in page.tiles) {
+        final c = _commonLen(want, t.name);
+        if (c > best) {
+          best = c;
+          hit = t;
+        }
+      }
+      if (best < 2) hit = null;
+    }
+    final found = hit;
+    if (found == null) {
+      ErrorLog.instance.record(
+          '分类标签匹配', '未匹配 want="$want" tab=$_tab '
+          'tiles=${page.tiles.map((t) => t.name).take(12).join(",")}');
+      return;
+    }
+    if (!mounted) return;
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => BookCategoryListScreen(
+        categoryId: found.categoryId,
+        categoryName: found.name,
+        tab: _tab,
+      ),
+    ));
+  }
+
+  static const List<Color> _tilePalette = <Color>[
+    Color(0xFF5B8FF9), Color(0xFF61C9A0), Color(0xFFF6BD16), Color(0xFFE8684A),
+    Color(0xFF6DC8EC), Color(0xFF9270CA), Color(0xFFFF9D4D), Color(0xFF5AD8A6),
+  ];
+
+  /// 无封面的分类瓦片：按类目名哈希取一个色块 + 首字，让占位看着像有意设计。
+  static Color _tileColor(String name) {
+    if (name.isEmpty) return _tilePalette.first;
+    var h = 0;
+    for (final r in name.runes) {
+      h = (h * 31 + r) & 0x7FFFFFFF;
+    }
+    return _tilePalette[h % _tilePalette.length];
+  }
+
+  /// 两串最长公共连续子串的长度（标签词↔粗类目的模糊度，短串 O(n*m) 足够）。
+  static int _commonLen(String a, String b) {
+    if (a.isEmpty || b.isEmpty) return 0;
+    final al = a.runes.toList();
+    final bl = b.runes.toList();
+    var best = 0;
+    final dp = List.generate(al.length + 1, (_) => List.filled(bl.length + 1, 0));
+    for (var i = 1; i <= al.length; i++) {
+      for (var j = 1; j <= bl.length; j++) {
+        if (al[i - 1] == bl[j - 1]) {
+          dp[i][j] = dp[i - 1][j - 1] + 1;
+          if (dp[i][j] > best) best = dp[i][j];
+        }
+      }
+    }
+    return best;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final page = _page;
     return Scaffold(
       appBar: AppBar(title: const Text('小说分类')),
@@ -118,9 +207,18 @@ class _BookCategoryScreenState extends State<BookCategoryScreen> {
                                 width: double.infinity,
                                 child: tile.picUrl.isEmpty
                                     ? Container(
-                                        color: theme
-                                            .colorScheme.surfaceContainerHighest,
-                                        child: const Icon(Icons.menu_book))
+                                        color: _tileColor(tile.name),
+                                        alignment: Alignment.center,
+                                        child: Text(
+                                          tile.name.isEmpty
+                                              ? ''
+                                              : tile.name.substring(0, 1),
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 22,
+                                          ),
+                                        ))
                                     : CoverImage(url: tile.picUrl,
                                         onFetchError: () {
                                           ErrorLog.instance.record(
