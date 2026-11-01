@@ -41,19 +41,22 @@ class _Step {
 }
 
 /// 顶层按组合符切分（尊重引号/括号/方括号内的空格与符号）。
+/// 产出 [(combinator, compound)]，首个 combinator 为空；`>`/`+`/`~` 显式优先，
+/// 其余空白视为后代 `' '`。
 List<_Step> _parseSelector(String sel) {
   final steps = <_Step>[];
   final buf = StringBuffer();
-  var combinator = '';
   var depth = 0;
+  var comb = '';
+  var havePrev = false;
   String? quote;
-  void flush(String nextComb) {
+  void flush() {
     final c = buf.toString().trim();
-    if (c.isNotEmpty) {
-      steps.add(_Step(combinator, c));
-      combinator = nextComb;
-    }
     buf.clear();
+    if (c.isEmpty) return;
+    steps.add(_Step(havePrev ? comb : '', c));
+    havePrev = true;
+    comb = '';
   }
 
   for (var i = 0; i < sel.length; i++) {
@@ -79,31 +82,17 @@ List<_Step> _parseSelector(String sel) {
       continue;
     }
     if (depth == 0 && (ch == '>' || ch == '+' || ch == '~')) {
-      flush(ch);
+      flush();
+      comb = ch;
       continue;
     }
     if (depth == 0 && ch == ' ') {
-      // 空格：可能是后代组合符，也可能是相邻显式组合符两侧的空白，交给 flush 去重。
-      if (buf.toString().trim().isNotEmpty && combinator.isEmpty) {
-        // 暂存：真正是否为后代，看下一个非空格字符。
-        var j = i + 1;
-        while (j < sel.length && sel[j] == ' ') {
-          j++;
-        }
-        if (j < sel.length &&
-            (sel[j] == '>' || sel[j] == '+' || sel[j] == '~')) {
-          // 组合符两侧空格：忽略本空格，后续符号会 flush。
-          continue;
-        }
-        flush(' ');
-        continue;
-      }
+      if (buf.toString().trim().isNotEmpty) flush();
       continue;
     }
     buf.write(ch);
   }
-  final tail = buf.toString().trim();
-  if (tail.isNotEmpty) steps.add(_Step(combinator, tail));
+  flush();
   if (steps.isEmpty) throw SoNovelSelectorException('空选择器', sel);
   return steps;
 }
