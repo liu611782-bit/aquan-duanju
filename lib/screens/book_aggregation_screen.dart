@@ -5,6 +5,7 @@ import 'dart:convert';
 import '../core/books/book_source_model.dart';
 import '../core/books/book_source_service.dart';
 import '../core/books/book_source_store.dart';
+import '../core/books/so_novel_seed.dart';
 import '../core/error_log.dart';
 import '../core/sources/source_fetch.dart';
 import '../models/book.dart';
@@ -183,7 +184,7 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
           ),
           if (_store.enabled.isEmpty) ...[
             const SizedBox(height: 8),
-            Text('支持粘贴 legado（阅读 3.0）书源 JSON，或从书源仓库拉取',
+            Text('支持粘贴 legado / so-novel 书源 JSON（自动识别方言），或从书源仓库拉取',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: theme.colorScheme.outline)),
@@ -288,7 +289,7 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
             controller: controller,
             maxLines: 10,
             decoration: const InputDecoration(
-              hintText: '粘贴 legado 书源 JSON（单个对象或数组）',
+              hintText: '粘贴 legado / so-novel 书源 JSON（单个对象或数组，自动识别）',
               border: OutlineInputBorder(),
             ),
           ),
@@ -371,6 +372,21 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
     }
   }
 
+  /// 内置 so-novel 种子一键导入（香书小说/书海阁，so-novel 仓库逐字摘录）。
+  Future<void> _importBuiltinSoNovel() async {
+    setState(() => _importing = true);
+    try {
+      final added = await _store.importAll(builtinSoNovelSources);
+      if (!mounted) return;
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+              'so-novel 精选源：新增 $added 个（内置 ${builtinSoNovelSources.length} 个，重导自动去重覆盖）')));
+    } finally {
+      if (mounted) setState(() => _importing = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -412,7 +428,12 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis),
                             subtitle: Text(
-                                [if (s.group.isNotEmpty) s.group, s.url]
+                                [
+                                  if (s.format == BookSourceFormat.soNovel)
+                                    'so-novel',
+                                  if (s.group.isNotEmpty) s.group,
+                                  s.url,
+                                ]
                                     .where((t) => t.isNotEmpty)
                                     .join(' · '),
                                 maxLines: 1,
@@ -454,7 +475,15 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
                             'https://fastly.jsdelivr.net/gh/XIU2/Yuedu@master/shuyuan',
                             'XIU2 精品书源'),
                     icon: const Icon(Icons.inventory_2_outlined, size: 18),
-                    label: const Text('导入内置：XIU2 精品书源'),
+                    label: const Text('内置：XIU2 精品书源'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _importing ? null : _importBuiltinSoNovel,
+                    icon: const Icon(Icons.auto_stories_outlined, size: 18),
+                    label: const Text('内置：so-novel 精选源'),
                   ),
                 ),
               ],

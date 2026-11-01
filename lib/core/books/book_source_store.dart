@@ -68,17 +68,8 @@ class BookSourceStore extends ChangeNotifier {
     final source = byUrl(url);
     if (source == null) return;
     final index = _sources.indexOf(source);
-    _sources[index] = BookSource(
-      url: source.url,
-      name: source.name,
-      group: source.group,
-      enabled: enabled,
-      searchUrl: source.searchUrl,
-      ruleSearch: source.ruleSearch,
-      ruleBookInfo: source.ruleBookInfo,
-      ruleToc: source.ruleToc,
-      ruleContent: source.ruleContent,
-    );
+    // 必须经 copyWithEnabled：手工重建会丢掉 format/rawRuleJson（方言源切启停即坏）。
+    _sources[index] = source.copyWithEnabled(enabled);
     await _persist();
   }
 

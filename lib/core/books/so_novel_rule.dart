@@ -14,16 +14,20 @@ class SoNovelRule {
   const SoNovelRule();
 
   /// 取字段值：在 [root] 子树里按 [query] 选择 → 取内容 → 跑步骤链。
+  ///
+  /// [type] 强制内容类型（默认按 [query] 推断）：`bookName@js:` 再取 href 的
+  /// 场景必须传 [SoContentType.href]——把 `@href` 拼进串会混入 js 代码段。
   static String extract(
     Node root,
     String query, {
     String baseUri = '',
     String Function(String code, String input)? runJs,
     bool html = false,
+    SoContentType? type,
   }) {
     if (query.trim().isEmpty) return '';
     final sel = selectorOf(query);
-    final ct = html ? SoContentType.html : contentTypeOf(query);
+    final ct = type ?? (html ? SoContentType.html : contentTypeOf(query));
     final els = sel.isEmpty ? const <Element>[] : soNovelSelect(root, sel);
     var result = _contentOf(els, ct, baseUri);
     for (final step in stepsOf(query)) {

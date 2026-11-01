@@ -119,6 +119,14 @@ class BookSource {
     if (raw is Map<String, dynamic>) {
       // legado 分享格式偶见 {"bookSourceUrl": ...} 顶层单对象。
       if (raw.containsKey('bookSourceUrl')) return [BookSource.fromJson(raw)];
+      // so-novel 单对象（无 bookSourceUrl，有 url + search/toc/chapter 指纹）。
+      if (!raw.containsKey('bookSourceUrl') &&
+          raw.containsKey('url') &&
+          (raw.containsKey('search') ||
+              raw.containsKey('toc') ||
+              raw.containsKey('chapter'))) {
+        return [BookSource.fromJson(raw)];
+      }
       // 或 {"bookSources": [...]} 包装。
       final wrapped = raw['bookSources'];
       if (wrapped is List) return listFromJson(wrapped);
@@ -128,12 +136,19 @@ class BookSource {
 
   Map<String, dynamic> toJson() {
     if (format == BookSourceFormat.soNovel) {
-      // 原样回写 so-novel Rule（含 search/toc/chapter 指纹，fromJson 会重新识别）。
+      // 原样回写 so-novel Rule（含 search/toc/chapter 指纹，fromJson 会重新识别）；
+      // 启用态落回 so-novel 自带的 `disabled` 字段做往返（否则停用状态重启即丢）。
+      Map<String, dynamic> out;
       try {
         final decoded = jsonDecode(rawRuleJson);
-        if (decoded is Map<String, dynamic>) return decoded;
-      } catch (_) {}
-      return <String, dynamic>{'url': url, 'name': name};
+        out = decoded is Map<String, dynamic>
+            ? decoded
+            : <String, dynamic>{'url': url, 'name': name};
+      } catch (_) {
+        out = <String, dynamic>{'url': url, 'name': name};
+      }
+      out['disabled'] = !enabled;
+      return out;
     }
     return {
         'bookSourceUrl': url,

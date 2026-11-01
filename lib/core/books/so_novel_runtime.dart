@@ -71,8 +71,10 @@ class SoNovelRuntime {
             .trim()
             .isNotEmpty)
           BookHit(
-            bookUrl: SoNovelRule.extract(el, '$nameSel@href',
-                baseUri: base, runJs: _runJs),
+            // bookName 可能带 @js: 清洗（research 样例 C）：href 用内容类型覆盖，
+            // 不能拼 '$nameSel@href'（@href 会混进 js 代码段）。
+            bookUrl: SoNovelRule.extract(el, nameSel,
+                baseUri: base, runJs: _runJs, type: SoContentType.href),
             name: SoNovelRule.extract(el, nameSel, baseUri: base, runJs: _runJs),
             author: SoNovelRule.extract(el, s.author, baseUri: base, runJs: _runJs),
             lastChapter:
