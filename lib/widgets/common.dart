@@ -293,10 +293,18 @@ class SeriesCard extends StatelessWidget {
 /// 解码；磁盘缓存里存的是转码后的字节，key 为原始 URL。封面 URL 有签名
 /// 过期时间（x-expires），过期 403 时维持裂图占位兜底。
 class CoverImage extends StatelessWidget {
-  const CoverImage({super.key, required this.url, this.fit = BoxFit.cover});
+  const CoverImage({
+    super.key,
+    required this.url,
+    this.fit = BoxFit.cover,
+    this.onFetchError,
+  });
 
   final String url;
   final BoxFit fit;
+
+  /// 诊断钩子：封面加载失败时回调（调用方记录 URL 供排查）。
+  final VoidCallback? onFetchError;
 
   @override
   Widget build(BuildContext context) {
@@ -318,11 +326,14 @@ class CoverImage extends StatelessWidget {
           child: child,
         );
       },
-      errorBuilder: (_, _, _) => Container(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
-        child: Icon(Icons.broken_image_outlined,
-            color: Theme.of(context).colorScheme.outline),
-      ),
+      errorBuilder: (_, _, _) {
+        onFetchError?.call();
+        return Container(
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          child: Icon(Icons.broken_image_outlined,
+              color: Theme.of(context).colorScheme.outline),
+        );
+      },
     );
   }
 }

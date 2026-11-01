@@ -378,11 +378,27 @@ $export
     sources[key] = info;
     // 预置设置默认值（Venera 宿主行为：loadSetting 未设置时回落 default，
     // 如 mh18 的 baseUrl 依赖 domains 设置）。
+    // **必须先 ensureLoaded**：冷启动 store 未读盘时 value 全 null，
+    // 预置会把用户保存的值覆盖回默认（「重启后设置丢失」的根因）。
+    await store.ensureLoaded();
     final settingsRaw = await _awaitJs(
         'JSON.stringify(globalThis.__veneraSources["$key"].settings ?? {})');
     if (settingsRaw is Map) {
       settingsRaw.forEach((sk, sv) {
-        final def = sv is Map ? sv['default'] : null;
+        var def = sv is Map ? sv['default'] : null;
+        // 用户要求「默认大陆线路」：源作者的 default 常是海外（copy_manga
+        // region="0"），国内网络下源直接不可用。启发式：select 选项 text
+        // 含「大陆」的优先作为未设置时的预置值。
+        if (sv is Map && sv['type'] == 'select' && sv['options'] is List) {
+          for (final o in (sv['options'] as List)) {
+            if (o is Map &&
+                o['text'].toString().contains('大陆') &&
+                o['value'] != null) {
+              def = o['value'];
+              break;
+            }
+          }
+        }
         final k = 'setting/$key/$sk';
         if (store.value(k) == null && def != null) {
           unawaited(store.setValue(k, def));

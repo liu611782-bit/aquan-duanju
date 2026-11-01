@@ -4,11 +4,13 @@ import '../screens/book_detail_screen.dart';
 import '../store/stores.dart';
 import 'common.dart';
 
-/// 「最近在读」横排：小说与漫画共用一份阅读进度，点了直接回详情页续读。
-///
-/// 与发现页的「继续观看」分开：那边是短剧，这里只有书籍，互不干扰。
+/// 「最近在读」横排：小说与漫画各看各的（[manga] 过滤域），
+/// 发现页小说 tab 只显示小说、漫画 tab 只显示漫画——不与影视的「继续观看」混排。
 class ReadingRail extends StatelessWidget {
-  const ReadingRail({super.key});
+  const ReadingRail({super.key, this.manga = false});
+
+  /// true = 只显示漫画；false = 只显示小说。
+  final bool manga;
 
   @override
   Widget build(BuildContext context) {
@@ -16,7 +18,10 @@ class ReadingRail extends StatelessWidget {
     return ListenableBuilder(
       listenable: scope.reading,
       builder: (context, _) {
-        final entries = scope.reading.entries.take(10).toList();
+        final entries = scope.reading.entries
+            .where((e) => e.manga == manga)
+            .take(10)
+            .toList();
         if (entries.isEmpty) return const SizedBox.shrink();
         return Padding(
           padding: const EdgeInsets.only(top: 4, bottom: 4),

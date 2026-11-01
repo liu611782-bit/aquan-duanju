@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../core/error_log.dart';
 import '../models/models.dart';
 import '../widgets/common.dart';
 import 'book_detail_screen.dart';
@@ -120,7 +121,13 @@ class _BookCategoryScreenState extends State<BookCategoryScreen> {
                                         color: theme
                                             .colorScheme.surfaceContainerHighest,
                                         child: const Icon(Icons.menu_book))
-                                    : CoverImage(url: tile.picUrl),
+                                    : CoverImage(url: tile.picUrl,
+                                        onFetchError: () {
+                                          ErrorLog.instance.record(
+                                              '分类封面',
+                                              '加载失败 name=${tile.name} '
+                                              'url=${tile.picUrl}');
+                                        }),
                               ),
                             ),
                           ),

@@ -324,9 +324,12 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                     // 扫完源"去哪选源看视频"的显眼入口（原先只在聚合页 AppBar）。
                     if (_type.name == '短剧')
                       const SliverToBoxAdapter(child: _SourceManageEntry()),
-                    // 漫画源入口归位漫画 tab（原先挂在小说 tab 下，语义错位）。
+                    // 漫画 tab：只放「漫画聚合」一个入口。
                     if (_type.name == '漫画')
                       const SliverToBoxAdapter(child: _VeneraMangaEntry()),
+                    // 小说 tab：小说聚合 + 按分类找书，两个入口。
+                    if (_type.name == '小说')
+                      const SliverToBoxAdapter(child: _BookAggregationEntry()),
                     if (_type.name == '小说')
                       SliverToBoxAdapter(
                         child: _CategoryEntry(
@@ -336,8 +339,14 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                           ),
                         ),
                       ),
-                    const SliverToBoxAdapter(child: _ContinueRail()),
-                    const SliverToBoxAdapter(child: ReadingRail()),
+                    // 继续观看只在影视类 tab；「最近在读」按小说/漫画分域
+                    // （用户要求：各 tag 的历史记录互不混排）。
+                    if (_type.kind == ContentKind.video)
+                      const SliverToBoxAdapter(child: _ContinueRail()),
+                    if (_type.kind == ContentKind.book)
+                      const SliverToBoxAdapter(child: ReadingRail(manga: false)),
+                    if (_type.kind == ContentKind.manga)
+                      const SliverToBoxAdapter(child: ReadingRail(manga: true)),
                     if (_type.channels.length > 1)
                       SliverToBoxAdapter(
                         child: _ChannelBar(
@@ -678,9 +687,9 @@ class _VeneraMangaEntry extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('漫画源', style: theme.textTheme.titleMedium),
+                      Text('漫画聚合', style: theme.textTheme.titleMedium),
                       Text(
-                        'Venera 契约第三方漫画源（源 JS 由你自行导入）',
+                        '多漫画源浏览与阅读（拷贝/包子/漫画柜…可切换）',
                         style: theme.textTheme.bodySmall
                             ?.copyWith(color: theme.colorScheme.outline),
                       ),
@@ -811,6 +820,53 @@ class _ContinueCard extends StatelessWidget {
 }
 
 /// 小说类型的「按分类找书」入口。
+/// 「小说聚合」入口卡：书源（legado）聚合搜索与阅读。
+/// 核心引擎已就绪（core/books），聚合搜索 UI 接续中。
+class _BookAggregationEntry extends StatelessWidget {
+  const _BookAggregationEntry();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      child: Card(
+        margin: EdgeInsets.zero,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () {
+            ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(
+                content: Text('书源聚合搜索建设中：仓库扫描与导入先行版即将上线')));
+          },
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Row(
+              children: [
+                Icon(Icons.auto_stories, color: theme.colorScheme.primary),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('小说聚合', style: theme.textTheme.titleMedium),
+                      Text(
+                        '书源仓库扫描与聚合搜索（建设中，先按分类找书）',
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: theme.colorScheme.outline),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _CategoryEntry extends StatelessWidget {
   const _CategoryEntry({required this.onTap});
 

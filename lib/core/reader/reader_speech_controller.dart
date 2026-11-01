@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart' hide AudioTrack;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../error_log.dart';
 import '../../models/audio.dart';
 import '../../models/book.dart';
 import '../../store/stores.dart';
@@ -581,6 +582,9 @@ class ReaderSpeechController extends ChangeNotifier {
     _useTts = false;
     await _saveProgress();
     await _openChapter(_chapterIndex, keepPosition: true);
+    ErrorLog.instance.record('听书音色',
+        'setTone(${tone.id}) 完成：tone=${_tone?.id} 段落=$_paragraphIndex'
+        '/$_paragraphCount 高亮缓存已重建');
   }
 
   /// 按音色 id 切换（UI 传的是 id）。
@@ -624,6 +628,9 @@ class ReaderSpeechController extends ChangeNotifier {
       startRatio: anchor.$2,
       explicitStart: true,
     );
+    ErrorLog.instance.record('听书音色',
+        'setTtsVoice($voiceId) 完成：段落=$_paragraphIndex/$_paragraphCount'
+        ' useTts=$_useTts');
   }
 
   /// 同书在「平台音轨」与「自建合成」之间切换朗读路径，**不停下、不丢位置**。
@@ -1385,8 +1392,12 @@ class ReaderSpeechController extends ChangeNotifier {
       _applyPositions(ParagraphTimelineAdapter(points));
       _recomputeParagraph();
       notify();
-    } catch (_) {
+    } catch (e, stack) {
       // 时间点拿不到就退化成不精确高亮（仍按段落数比例估算）。
+      // 用户反复报「切音色后高亮/跟随没了」：新音色大概率没有时间点数据，
+      // 记下来才能区分「数据缺失」与「切换逻辑 bug」。
+      ErrorLog.instance.record(
+          '听书时间点', 'chapter=$chapterId tone=$toneId 失败：$e', stack);
       _applyPositions(const ParagraphTimelineAdapter(AudioTimepoints()));
     }
   }

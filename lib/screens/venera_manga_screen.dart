@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -96,7 +97,11 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
 
   /// 源 JS：缓存目录优先（下载过即离线可用），否则网络下载。
   Future<String> _fetchJs(String url) async {
-    final cache = File('${(await getCacheDir()).path}/venera_source.js');
+    // 缓存按 URL 区分：多源切换时不能互相串文件（旧实现单一文件名，
+    // 切到新源会静默读到旧源缓存，表现为「换了没反应」）。
+    final tag = base64Url.encode(utf8.encode(url)).replaceAll('=', '');
+    final cache = File(
+        '${(await getCacheDir()).path}/venera_${tag.length > 48 ? tag.substring(0, 48) : tag}.js');
     if (await cache.exists()) {
       final cached = await cache.readAsString();
       if (cached.isNotEmpty) return cached;
@@ -264,43 +269,81 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
   /// 换源：输入任意 Venera 源 JS URL（venera-configs 全部源适用），
   /// 持久化到设置后重载。
   Future<void> _showSourceSwitcher() async {
-    final controller = TextEditingController(
-        text: AppScope.read(context).settings.veneraSourceUrl);
+    final currentUrl = AppScope.read(context).settings.veneraSourceUrl;
+    final controller = TextEditingController(text: currentUrl);
+    var pending = currentUrl;
     final ok = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('换源'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: controller,
-              decoration: const InputDecoration(
-                labelText: '源 JS 地址',
-                hintText: _defaultUrl,
-              ),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('选择漫画源'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      for (final (name, file) in _builtinVeneraSources)
+                        ListTile(
+                          dense: true,
+                          leading: Icon(
+                            pending == _veneraUrl(file)
+                                ? Icons.radio_button_checked
+                                : Icons.radio_button_unchecked,
+                            size: 20,
+                          ),
+                          title: Text(name),
+                          onTap: () =>
+                              setDialogState(() => pending = _veneraUrl(file)),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: controller,
+                  decoration: const InputDecoration(
+                    labelText: '自定义源 JS 地址',
+                    hintText: 'venera-configs 仓库内任意 .js 的 raw 地址',
+                  ),
+                  onChanged: (v) => setDialogState(() => pending = v.trim()),
+                ),
+              ],
             ),
-            const SizedBox(height: 8),
-            Text('venera-configs 仓库内任意源 .js 的 raw 地址均可',
-                style: Theme.of(context).textTheme.bodySmall),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('切换')),
           ],
         ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('取消')),
-          FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('切换')),
-        ],
       ),
     );
     if (ok != true) return;
-    final url = controller.text.trim();
-    if (!mounted) return;
+    final url = pending.trim();
+    if (!mounted || url.isEmpty) return;
     AppScope.read(context).settings.veneraSourceUrl = url;
     _loadSource();
   }
+
+  /// 内置漫画源（venera-configs 仓库，按国内可达性挑选）。
+  static const _builtinVeneraSources = [
+    ('拷贝漫画', 'copy_manga.js'),
+    ('包子漫画', 'baozi.js'),
+    ('漫画柜', 'manhuagui.js'),
+    ('漫画人', 'manhuaren.js'),
+    ('神漫画', 'goda.js'),
+  ];
+
+  static String _veneraUrl(String file) =>
+      'https://raw.githubusercontent.com/venera-app/venera-configs@master/$file';
 
   /// 源设置表单：按 settings 声明渲染（input/select/switch/callback），
   /// 保存经 saveSetting → VeneraStore 落盘；baseUrl 等 getter 实时读取。
