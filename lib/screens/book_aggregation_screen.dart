@@ -184,7 +184,7 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
           ),
           if (_store.enabled.isEmpty) ...[
             const SizedBox(height: 8),
-            Text('支持粘贴 legado / so-novel 书源 JSON（自动识别方言），或从书源仓库拉取',
+            Text('支持粘贴 legado（含 js 规则）/ so-novel 书源 JSON（自动识别方言），或从书源仓库拉取',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: theme.colorScheme.outline)),
@@ -254,20 +254,18 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
     return s.startsWith('http://') || s.startsWith('https://');
   }
 
-  /// 解析并导入 legado 书源 JSON（单个/数组）；调用方保证传入的是正文而非网址。
+  /// 解析并导入书源 JSON（单个/数组；legado / so-novel 自动识别；调用方保证传入的是正文而非网址）。
   Future<void> _importJson(String raw, String origin) async {
     setState(() => _importing = true);
     try {
       final decoded = jsonDecode(raw);
       final sources = BookSource.listFromJson(decoded);
-      final usable = sources.where((s) => !s.requiresJs).toList();
-      final jsRejected = sources.length - usable.length;
-      final added = await _store.importAll(usable);
+      // js 规则源不再过滤：js 引擎按需执行，跑不通的源由体检/搜索诚实报错。
+      final added = await _store.importAll(sources);
       if (!mounted) return;
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-              '$origin：导入 $added 个书源${jsRejected > 0 ? '，跳过 $jsRejected 个含脚本规则的' : ''}')));
+          content: Text('$origin：导入 $added 个书源')));
     } catch (e) {
       if (!mounted) return;
       setState(() => _importing = false);

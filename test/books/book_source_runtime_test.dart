@@ -140,7 +140,7 @@ void main() {
     expect(check.sampleChapterCount, 2);
   });
 
-  test('js 规则源被诚实拒绝', () async {
+  test('js 规则源不再入口即拒（真实执行，失败诚实归因）', () async {
     final jsSource = BookSource(
       url: 'https://fixture.example/js.json',
       searchUrl: '$base/search',
@@ -151,7 +151,9 @@ void main() {
     );
     final check = await checker.check(jsSource, 'x');
     expect(check.ok, isFalse);
-    expect(check.reason, contains('js'));
+    // 有 QuickJS 时：js 求值空 → 搜索无结果；无原生库时：引擎加载失败原因透传。
+    // 两种都不是旧的「暂不支持」入口拒绝。
+    expect(check.reason, isNot(contains('暂不支持')));
   });
 }
 

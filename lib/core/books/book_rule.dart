@@ -3,6 +3,20 @@ import 'dart:convert';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 
+import 'legado_js/legado_js_rewrite.dart';
+
+/// js 求值接缝（legado_js 引擎注入；测试注入桩）。
+abstract interface class JsRuleRunner {
+  /// 执行 js 片段；[result] 为上段输出/当前内容；返回 String（字段规则）
+  /// 或 List/Map（列表规则，js 直接产数组）。
+  Future<Object?> evalJs(
+    String code, {
+    Object? result,
+    String baseUrl = '',
+    Map<String, Object?> extra = const {},
+  });
+}
+
 /// legado 规则求值引擎——本项目支持的子集。
 ///
 /// - URL 模板：`{{key}}` / `{{page}}` 占位 + 逗号尾随的请求选项 JSON
@@ -11,7 +25,8 @@ import 'package:html/parser.dart' as html_parser;
 ///   （`class.bookbox@tag.h4@tag.a@text`）。
 /// - `##regex##replacement` 尾缀：命中后清洗（正文高频）。
 /// - `||`：首个命中即返回；`&&`：结果拼接。
-/// - 不支持 `js:` / `<js>`（模型层 [BookSource.requiresJs] 先行拦截）。
+/// - js 段（`<js>`/`@js:`）：提供 [JsRuleRunner] 时分段执行（`evalStringAsync` /
+///   `evalListAsync` / `parseSearchUrlAsync`）；无 runner 时拒绝（诚实报错）。
 class BookRule {
   /// 拆出请求选项：`url` 与 `BookRequestOptions`。
   static (String, BookRequestOptions) parseSearchUrl(String searchUrl) {
@@ -42,16 +57,103 @@ class BookRule {
         .replaceAll('{{page}}', '$page');
   }
 
-  /// 列表规则：从页面（HTML 或 JSON）求出一批节点。
+  /// URL 通道（对齐 AnalyzeUrl.initUrl 顺序）：先 js 产出 URL → `{{…}}` 内嵌
+  /// js 求值（`{{key}}/{{page}}` 字面占位保持旧契约，不进 js）→ 切选项 → 填 key/page。
+  static Future<(String, BookRequestOptions)> parseSearchUrlAsync(
+    String searchUrl, {
+    required String key,
+    required int page,
+    JsRuleRunner? js,
+    String baseUrl = '',
+  }) async {
+    var url = searchUrl.trim();
+    if (js != null && LegadoJsRewrite.containsJs(url)) {
+      // AnalyzeUrl.analyzeJs：段序列 result 传递；文本段（js 前缀）按 `@result`→result 拼接。
+      var result = '';
+      for (final seg in LegadoJsRewrite.split(url)) {
+        if (seg.webJs) {
+          throw FormatException('@webjs: 需要 WebView，暂不支持');
+        }
+        if (seg.isJs) {
+          result = '${await js.evalJs(seg.text,
+              result: result, baseUrl: baseUrl, extra: {'key': key, 'page': page})}';
+        } else {
+          result += seg.text.replaceAll('@result', result);
+        }
+      }
+      url = result.trim();
+      if (url.isEmpty) {
+        throw FormatException('搜索 URL 的 js 求值为空');
+      }
+    }
+    if (js != null) {
+      final embeds = LegadoJsRewrite.urlEmbeds(url);
+      for (final e in embeds.reversed) {
+        final value = await js.evalJs(e.code,
+            result: key, baseUrl: baseUrl, extra: {'key': key, 'page': page});
+        url = url.replaceRange(e.start, e.end, '$value');
+      }
+    }
+    final (clean, options) = parseSearchUrl(url);
+    return (fillUrl(clean, key: key, page: page), options);
+  }
+
+  /// 列表规则：从页面（HTML 或 JSON）求出一批节点（js 无关路径，行为不变）。
   static List<dynamic> evalList(Object page, String rule) {
     final expr = _splitAlternatives(rule).first;
+    if (expr.startsWith('/')) {
+      // XPath：现引擎无求值器，诚实报错（package:html 只认 CSS，此前会抛笼统异常）。
+      throw FormatException('XPath 规则暂不支持: $expr');
+    }
     if (page is Map<String, dynamic> || page is List<dynamic>) {
       return _jsonList(page, expr);
     }
     return _cssList(page, expr);
   }
 
-  /// 字段规则：从节点求字符串。
+  /// 列表规则（支持 js 段）。无 js 的规则走 [evalList]（行为逐字节一致）。
+  static Future<List<dynamic>> evalListAsync(
+    Object page,
+    String rule, {
+    JsRuleRunner? js,
+  }) async {
+    if (LegadoJsRewrite.containsJs(rule) && js == null) {
+      throw FormatException('js 列表规则需要 js 引擎（未注入 runner）: $rule');
+    }
+    if (js == null || !LegadoJsRewrite.containsJs(rule)) {
+      return evalList(page, rule);
+    }
+    for (final alt in LegadoJsRewrite.splitAlternatives(rule)) {
+      try {
+        var content = page is String ? page : jsonEncode(page);
+        var isListShape = false;
+        for (final seg in LegadoJsRewrite.split(alt)) {
+          if (seg.webJs) throw FormatException('@webjs: 需要 WebView，暂不支持');
+          if (seg.isJs) {
+            content =
+                '${await js.evalJs(seg.text, result: content)}';
+          } else {
+            final nodes = evalList(_maybeParseJson(content), seg.text);
+            content = jsonEncode(nodes);
+            isListShape = true;
+          }
+        }
+        final parsed = _maybeParseJson(content);
+        if (parsed is List) return parsed;
+        if (parsed is Map) return [parsed];
+        if (!isListShape && parsed is String && parsed.isNotEmpty) {
+          return [parsed];
+        }
+      } on FormatException {
+        rethrow;
+      } catch (_) {
+        // 分支失败：尝试下一 || 分支。
+      }
+    }
+    return const [];
+  }
+
+  /// 字段规则：从节点求字符串（js 无关路径，行为不变）。
   static String evalString(
     dynamic node,
     String rule, {
@@ -62,6 +164,9 @@ class BookRule {
       final (expr, clean) = _splitClean(part);
       var value = '';
       if (expr.isNotEmpty) {
+        if (expr.startsWith('/')) {
+          throw FormatException('XPath 规则暂不支持: $expr');
+        }
         if (node is Map<String, dynamic> || node is List<dynamic>) {
           value = _jsonString(node, expr);
         } else {
@@ -78,6 +183,68 @@ class BookRule {
     return '';
   }
 
+  /// 字段规则（支持 js 段）。无 js 的规则走 [evalString]（行为逐字节一致）。
+  ///
+  /// 分段语义（AnalyzeRule.getString）：段序列 `result` 传递；文本段的选择器作用
+  /// 于**当前内容字符串**；js 段返回值成为下一段输入；`##` 清洗作用于整条分支
+  /// 的最终输出（与旧契约一致）。
+  static Future<String> evalStringAsync(
+    dynamic node,
+    String rule, {
+    String baseUrl = '',
+    JsRuleRunner? js,
+    Map<String, Object?> bindings = const {},
+  }) async {
+    if (LegadoJsRewrite.containsJs(rule) && js == null) {
+      throw FormatException('js 字段规则需要 js 引擎（未注入 runner）: $rule');
+    }
+    if (js == null || !LegadoJsRewrite.containsJs(rule)) {
+      return evalString(node, rule, baseUrl: baseUrl);
+    }
+    for (final alt in LegadoJsRewrite.splitAlternatives(rule)) {
+      try {
+        final (expr, clean) = splitClean(alt);
+        var content = node is String
+            ? node
+            : (node is Map || node is List ? jsonEncode(node) : '${node ?? ''}');
+        var out = content;
+        for (final seg in LegadoJsRewrite.split(expr)) {
+          if (seg.webJs) {
+            throw FormatException('@webjs: 需要 WebView，暂不支持');
+          }
+          if (seg.isJs) {
+            out = '${await js.evalJs(seg.text,
+                result: content, baseUrl: baseUrl, extra: bindings)}';
+          } else {
+            out = evalString(_maybeParseJson(content), seg.text,
+                baseUrl: baseUrl);
+          }
+          content = out;
+        }
+        final value = applyClean(out.trim(), clean);
+        if (value.trim().isNotEmpty) {
+          return _absoluteUrl(value.trim(), baseUrl);
+        }
+      } on FormatException {
+        rethrow;
+      } catch (_) {
+        // 分支失败：尝试下一 || 分支。
+      }
+    }
+    return '';
+  }
+
+  /// 内容字符串里的选择器求值入参：JSON 内容先解码（js 段常产 JSON）。
+  static Object _maybeParseJson(String content) {
+    final t = content.trim();
+    if (t.startsWith('{') || t.startsWith('[')) {
+      try {
+        return jsonDecode(t);
+      } catch (_) {}
+    }
+    return content;
+  }
+
   /// `##regex##replacement` 清洗执行。
   static String applyClean(String value, (String, String)? clean) {
     if (clean == null) return value;
@@ -86,6 +253,17 @@ class BookRule {
     } catch (_) {
       return value;
     }
+  }
+
+  /// `##` 尾缀拆分（runtime 的 `_splitContentRule` 与内部 `_splitClean` 的收敛点）。
+  static (String, (String, String)?) splitClean(String rule) {
+    final idx = rule.indexOf('##');
+    if (idx < 0) return (rule.trim(), null);
+    final expr = rule.substring(0, idx).trim();
+    final rest = rule.substring(idx + 2);
+    final sep = rest.indexOf('##');
+    if (sep < 0) return (expr, (rest, ''));
+    return (expr, (rest.substring(0, sep), rest.substring(sep + 2)));
   }
 
   // ---------- 内部 ----------
@@ -98,15 +276,8 @@ class BookRule {
     }
   }
 
-  static (String, (String, String)?) _splitClean(String rule) {
-    final idx = rule.indexOf('##');
-    if (idx < 0) return (rule.trim(), null);
-    final expr = rule.substring(0, idx).trim();
-    final rest = rule.substring(idx + 2);
-    final sep = rest.indexOf('##');
-    if (sep < 0) return (expr, (rest, ''));
-    return (expr, (rest.substring(0, sep), rest.substring(sep + 2)));
-  }
+  static (String, (String, String)?) _splitClean(String rule) =>
+      splitClean(rule);
 
   // ---------- JSONPath 简集 ----------
 

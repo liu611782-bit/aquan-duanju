@@ -18,6 +18,7 @@ class BookSource {
     this.ruleBookInfo = const BookRuleGroup.empty(),
     this.ruleToc = const BookTocRule.empty(),
     this.ruleContent = const BookContentRule.empty(),
+    this.jsLib = '',
     this.format = BookSourceFormat.legado,
     this.rawRuleJson = '',
   });
@@ -34,6 +35,10 @@ class BookSource {
   final BookRuleGroup ruleBookInfo;
   final BookTocRule ruleToc;
   final BookContentRule ruleContent;
+
+  /// 共享 JS 库（legado `jsLib`）：大量真实源的函数定义在此；js 求值前注入全局。
+  /// 仅支持文本形态；`{name:url}` 远程形态诚实拒绝（供应链风险，见 spec）。
+  final String jsLib;
 
   /// 方言：legado 走 `BookSourceRuntime`；soNovel 走 `SoNovelRuntime`（用 [rawRuleJson]）。
   final BookSourceFormat format;
@@ -74,6 +79,7 @@ class BookSource {
         ruleBookInfo: ruleBookInfo,
         ruleToc: ruleToc,
         ruleContent: ruleContent,
+        jsLib: jsLib,
         format: format,
         rawRuleJson: rawRuleJson,
       );
@@ -105,6 +111,7 @@ class BookSource {
       ruleBookInfo: BookRuleGroup.fromJson(group(json['ruleBookInfo'])),
       ruleToc: BookTocRule.fromJson(group(json['ruleToc'])),
       ruleContent: BookContentRule.fromJson(group(json['ruleContent'])),
+      jsLib: json['jsLib']?.toString() ?? '',
     );
   }
 
@@ -160,6 +167,7 @@ class BookSource {
         'ruleBookInfo': ruleBookInfo.toJson(),
         'ruleToc': ruleToc.toJson(),
         'ruleContent': ruleContent.toJson(),
+        if (jsLib.isNotEmpty) 'jsLib': jsLib,
       };
   }
 }

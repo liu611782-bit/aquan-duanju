@@ -84,7 +84,7 @@ void main() {
 
   tearDown(() async => server.close(force: true));
 
-  test('扫描 feed：解析 2 源，good 三连通过、js 源被诚实拒绝', () async {
+  test('扫描 feed：解析 2 源，good 三连通过、js 源真实执行（不再入口即拒）', () async {
     final market = BookSourceMarket(enforceSsrf: false);
     final seed = BookSeed(id: 't', name: 't', urls: ['$base/feed']);
     final events = await market.scan(seeds: [seed], query: '斗破').toList();
@@ -98,8 +98,9 @@ void main() {
     expect(checks.any((e) => e.check.ok), isTrue,
         reason: '夹具源应搜书+详情+目录三连通过');
     final js = checks.firstWhere((e) => e.check.source.name == 'JS源').check;
+    // js 源走真实执行：bookList js 求值为空 → 搜索无结果（而非「暂不支持」拒绝）。
     expect(js.ok, isFalse);
-    expect(js.reason, contains('js'));
+    expect(js.reason, isNot(contains('暂不支持')));
 
     final stats = events.whereType<BookScanDone>().single.stats;
     expect(stats.sources, 2);

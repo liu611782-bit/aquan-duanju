@@ -139,15 +139,8 @@ class BookSourceMarket {
       if (cancel?.call() == true) return;
       final batch = sources.skip(i).take(width);
       final results = await Future.wait([
-        for (final s in batch)
-          s.requiresJs
-              ? Future.value(BookSourceCheck(
-                  source: s,
-                  ok: false,
-                  stage: BookCheckStage.none,
-                  reason: '含脚本规则（js:），暂不支持',
-                ))
-              : _checker.check(s, query, fetchContent: fetchContent),
+        // js 源不再入口即拒：checker 真实执行（js 引擎按需），失败诚实归因。
+        for (final s in batch) _checker.check(s, query, fetchContent: fetchContent),
       ]);
       for (final r in results) {
         yield r;

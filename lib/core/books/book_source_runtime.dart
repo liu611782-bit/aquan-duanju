@@ -4,25 +4,49 @@ import 'package:http/http.dart' as http;
 
 import '../sources/source_fetch.dart';
 import '../sources/source_import.dart';
+import '../error_log.dart';
 import 'book_rule.dart';
 import 'book_source_model.dart';
+import 'legado_js/legado_js_engine.dart';
 
 /// 书源运行时：search / bookInfo / toc / content 四连。
 ///
 /// GET 走 [fetchProbe]（复用超时/限流/SSRF 防护）；POST 需要 body，
 /// 自行发起但同样先过 `SourceImporter.validateImportUrl` 的 SSRF 校验。
+/// 含 js 规则的源按需走 [LegadoJsEngine]（缓存/cookie 会话按源隔离）。
 class BookSourceRuntime {
   BookSourceRuntime({
     this.connectTimeout,
     this.readTimeout,
     this.enforceSsrf = true,
-  });
+    LegadoJsEngine? jsEngine,
+  }) : _jsEngineOverride = jsEngine;
 
   final Duration? connectTimeout;
   final Duration? readTimeout;
 
   /// 生产必须开（书源服务器不允许指向本机）；本地 HTTP 夹具测试传 false。
   final bool enforceSsrf;
+
+  final LegadoJsEngine? _jsEngineOverride;
+  LegadoJsEngine? _jsEngine;
+  LegadoJsEngine get _engine =>
+      _jsEngine ??= _jsEngineOverride ??
+          LegadoJsEngine(enforceSsrf: enforceSsrf);
+
+  /// js 会话状态（cache/cookie jar），按源隔离——聚合搜索并发跑多源不能串台。
+  final _sessionCache = <String, Map<String, String>>{};
+  final _sessionCookies = <String, Map<String, String>>{};
+
+  JsRuleRunner _runnerFor(
+    BookSource source, {
+    Object? key,
+    Object? page,
+    Map<String, Object?> book = const {},
+    Map<String, Object?> chapter = const {},
+  }) =>
+      _JsRunner(this, source,
+          key: key, page: page, book: book, chapter: chapter);
 
   /// 搜索：关键词 → 一页书条目。
   Future<List<BookHit>> search(
@@ -33,11 +57,17 @@ class BookSourceRuntime {
     if (source.searchUrl.trim().isEmpty) {
       throw BookSourceException('源没有配置搜索地址');
     }
-    final (rawUrl, options) = BookRule.parseSearchUrl(source.searchUrl);
-    // legado 很多源的 searchUrl 是相对路径（如 `/modules/article/search.php`），
-    // 必须按 bookSourceUrl 补成绝对地址，否则被 SSRF 判「非法地址」→ 直接搜不到。
-    final url = _resolveAgainst(
-        BookRule.fillUrl(rawUrl, key: query, page: page), source.url);
+    final runner = _runnerFor(source, key: query, page: page);
+    final (rawUrl, options) = await BookRule.parseSearchUrlAsync(
+      source.searchUrl,
+      key: query,
+      page: page,
+      js: runner,
+      baseUrl: source.url,
+    );
+    // legado 很多源的 searchUrl 是相对路径：按 bookSourceUrl 补全（js 产出的
+    // 绝对地址原样透传）。
+    final url = _resolveAgainst(rawUrl, source.url);
     final body = BookRule.fillUrl(options.body, key: query, page: page);
     final text = await _request(
       url,
@@ -45,32 +75,38 @@ class BookSourceRuntime {
       body: options.isPost ? body : null,
       headers: options.headers,
     );
-    return _parseHits(source, text, baseUrl: url);
+    return _parseHits(source, text, baseUrl: url, runner: runner);
   }
 
-  List<BookHit> _parseHits(
+  Future<List<BookHit>> _parseHits(
     BookSource source,
     String text, {
     String baseUrl = '',
-  }) {
+    JsRuleRunner? runner,
+  }) async {
     final rule = source.ruleSearch;
     if (rule.bookList.trim().isEmpty) {
       throw BookSourceException('源没有配置搜索列表规则');
     }
     final page = _autoDecode(text);
-    final nodes = BookRule.evalList(page, rule.bookList);
-    return [
-      for (final node in nodes)
-        BookHit(
-          bookUrl: BookRule.evalString(node, rule.bookUrl, baseUrl: baseUrl),
-          name: BookRule.evalString(node, rule.name),
-          author: BookRule.evalString(node, rule.author),
-          coverUrl: BookRule.evalString(node, rule.coverUrl),
-          intro: BookRule.evalString(node, rule.intro),
-          kind: BookRule.evalString(node, rule.kind),
-          lastChapter: BookRule.evalString(node, rule.lastChapter),
-        ),
-    ];
+    final nodes = await BookRule.evalListAsync(page, rule.bookList, js: runner);
+    final hits = <BookHit>[];
+    for (final node in nodes) {
+      hits.add(BookHit(
+        bookUrl: await BookRule.evalStringAsync(node, rule.bookUrl,
+            baseUrl: baseUrl, js: runner),
+        name: await BookRule.evalStringAsync(node, rule.name, js: runner),
+        author:
+            await BookRule.evalStringAsync(node, rule.author, js: runner),
+        coverUrl: await BookRule.evalStringAsync(node, rule.coverUrl,
+            baseUrl: baseUrl, js: runner),
+        intro: await BookRule.evalStringAsync(node, rule.intro, js: runner),
+        kind: await BookRule.evalStringAsync(node, rule.kind, js: runner),
+        lastChapter: await BookRule.evalStringAsync(node, rule.lastChapter,
+            js: runner),
+      ));
+    }
+    return hits;
   }
 
   /// 详情 + 目录：bookUrl → 书信息（含目录）。
@@ -79,14 +115,17 @@ class BookSourceRuntime {
     final text = await _request(base);
     final page = _autoDecode(text);
     final rule = source.ruleBookInfo;
+    final runner = _runnerFor(source, book: {'bookUrl': bookUrl});
     final info = BookInfo(
-      name: BookRule.evalString(page, rule.name),
-      author: BookRule.evalString(page, rule.author),
-      coverUrl: BookRule.evalString(page, rule.coverUrl, baseUrl: base),
-      intro: BookRule.evalString(page, rule.intro),
+      name: await BookRule.evalStringAsync(page, rule.name, js: runner),
+      author: await BookRule.evalStringAsync(page, rule.author, js: runner),
+      coverUrl: await BookRule.evalStringAsync(page, rule.coverUrl,
+          baseUrl: base, js: runner),
+      intro: await BookRule.evalStringAsync(page, rule.intro, js: runner),
       tocUrl: rule.tocUrl.trim().isEmpty
           ? base
-          : BookRule.evalString(page, rule.tocUrl, baseUrl: base),
+          : await BookRule.evalStringAsync(page, rule.tocUrl,
+              baseUrl: base, js: runner),
     );
     info.chapters = await toc(source, info.tocUrl);
     return info;
@@ -101,15 +140,22 @@ class BookSourceRuntime {
     if (rule.chapterList.trim().isEmpty) {
       throw BookSourceException('源没有配置目录规则');
     }
-    final nodes = BookRule.evalList(page, rule.chapterList);
-    return [
-      for (final node in nodes)
-        BookTocItem(
-          title: BookRule.evalString(node, rule.chapterName),
-          url: BookRule.evalString(node, rule.chapterUrl, baseUrl: base),
-          isVolume: BookRule.evalString(node, rule.isVolume).isNotEmpty,
-        ),
-    ];
+    final runner = _runnerFor(source, book: {'bookUrl': tocUrl});
+    final nodes =
+        await BookRule.evalListAsync(page, rule.chapterList, js: runner);
+    final items = <BookTocItem>[];
+    for (final node in nodes) {
+      items.add(BookTocItem(
+        title: await BookRule.evalStringAsync(node, rule.chapterName,
+            js: runner),
+        url: await BookRule.evalStringAsync(node, rule.chapterUrl,
+            baseUrl: base, js: runner),
+        isVolume: (await BookRule.evalStringAsync(node, rule.isVolume,
+                js: runner))
+            .isNotEmpty,
+      ));
+    }
+    return items;
   }
 
   /// 正文：章节地址 → 章节文本（带 `##` 清洗）。
@@ -121,8 +167,13 @@ class BookSourceRuntime {
     if (rule.content.trim().isEmpty) {
       throw BookSourceException('源没有配置正文规则');
     }
-    final (expr, clean) = _splitContentRule(rule.content);
-    final value = BookRule.evalString(page, expr, baseUrl: base);
+    final (expr, clean) = BookRule.splitClean(rule.content);
+    final value = await BookRule.evalStringAsync(
+      page,
+      expr,
+      baseUrl: base,
+      js: _runnerFor(source, chapter: {'url': chapterUrl}),
+    );
     return BookRule.applyClean(value, clean);
   }
 
@@ -139,16 +190,7 @@ class BookSourceRuntime {
     return b.resolve(url).toString();
   }
 
-  /// 正文规则同样支持 `##` 清洗尾缀。
-  static (String, (String, String)?) _splitContentRule(String rule) {
-    final idx = rule.indexOf('##');
-    if (idx < 0) return (rule.trim(), null);
-    final expr = rule.substring(0, idx).trim();
-    final rest = rule.substring(idx + 2);
-    final sep = rest.indexOf('##');
-    if (sep < 0) return (expr, (rest, ''));
-    return (expr, (rest.substring(0, sep), rest.substring(sep + 2)));
-  }
+  /// 正文规则 `##` 清洗尾缀拆分已收敛到 [BookRule.splitClean]。
 
   /// 页面解码：JSON 首先尝试；否则保留原始文本（HTML 规则求值自己 parse）。
   static Object _autoDecode(String text) {
@@ -230,4 +272,63 @@ class BookSourceException implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// js 规则求值 runner：绑定一个源 + 一次链路调用的 bindings，桥到
+/// [LegadoJsEngine]；cache/cookie 会话按源隔离（聚合搜索并发不串台）。
+class _JsRunner implements JsRuleRunner {
+  _JsRunner(
+    this._rt,
+    this._source, {
+    this.key,
+    this.page,
+    this.book = const {},
+    this.chapter = const {},
+  });
+
+  final BookSourceRuntime _rt;
+  final BookSource _source;
+  final Object? key;
+  final Object? page;
+  final Map<String, Object?> book;
+  final Map<String, Object?> chapter;
+
+  @override
+  Future<Object?> evalJs(
+    String code, {
+    Object? result,
+    String baseUrl = '',
+    Map<String, Object?> extra = const {},
+  }) async {
+    final engine = _rt._engine;
+    final cache = _rt._sessionCache.putIfAbsent(_source.url, () => {});
+    final cookies = _rt._sessionCookies.putIfAbsent(_source.url, () => {});
+    final res = await engine.eval(
+      code,
+      bindings: {
+        'result': '$result',
+        'baseUrl': baseUrl,
+        'key': key,
+        'page': page,
+        'book': book,
+        'chapter': chapter,
+        'sourceKey': _source.url,
+        ...extra,
+      },
+      jsLib: _source.jsLib,
+      cacheIn: Map.unmodifiable(cache),
+      cookieIn: Map.unmodifiable(cookies),
+    );
+    // cacheOut/cookieOut 是入参快照的完整最新态：整体回写会话。
+    cache
+      ..clear()
+      ..addAll(res.cacheOut);
+    cookies
+      ..clear()
+      ..addAll(res.cookieOut);
+    for (final line in res.logs) {
+      ErrorLog.instance.record('书源 js', '${_source.name}：$line');
+    }
+    return res.value;
+  }
 }
