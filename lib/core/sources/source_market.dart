@@ -417,6 +417,12 @@ class MarketScanner {
     var idSeq = 0;
 
     Future<FetchResult> fetch(String url) {
+      // 唯一网络入口：报毒地址（含代理前缀包裹形态）在此彻底封堵。
+      // 之前只在提取/种子两处过滤，漏了多仓嵌套子配置（info.children）。
+      if (_isBlockedUrl(url)) {
+        return Future.value(FetchResult(
+            ok: false, error: '该地址被主流杀软报毒，已跳过'));
+      }
       final key = normalizeSeedUrl(url);
       return _inFlight.putIfAbsent(key, () {
         final future = fetchProbe(

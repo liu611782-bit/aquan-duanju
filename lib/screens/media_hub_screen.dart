@@ -287,7 +287,10 @@ class _BrowseTabState extends State<_BrowseTab>
         _categories
           ..clear()
           ..addAll(cats);
-        _categoryId = cats.isEmpty ? '' : cats.first.id;
+        // 保留用户已选分类（否则点分类后 _reload 又跳回第一个）。
+        _categoryId = cats.isEmpty
+            ? ''
+            : (cats.any((c) => c.id == _categoryId) ? _categoryId : cats.first.id);
       });
       await _loadPage(reset: true);
     } catch (e) {

@@ -422,7 +422,12 @@ class ReaderScreen extends StatefulWidget {
     this.restoreOffset = 0,
     this.restoreCharOffset = -1,
     this.autoListen = false,
+    this.textLoader,
   });
+
+  /// 外部书源正文加载器：给了就优先走它（书源聚合链路），
+  /// 不给退回番茄 core 的 chapterText。
+  final Future<String> Function(BookChapter chapter)? textLoader;
 
   final String bookId;
   final String bookTitle;
@@ -1243,7 +1248,9 @@ class _ReaderScreenState extends State<ReaderScreen>
       return;
     }
     try {
-      final text = await AppScope.read(context).api.chapterText(chapter.id);
+      final text = widget.textLoader != null
+          ? await widget.textLoader!(chapter)
+          : await AppScope.read(context).api.chapterText(chapter.id);
       _rawCache[chapter.id] = text;
       final paragraphs = _deriveParagraphs(chapter, text);
       _cache[chapter.id] = paragraphs;

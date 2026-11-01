@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../core/aqua_api.dart';
 import '../core/aqua_error.dart';
 import '../core/download_service.dart';
+import '../core/books/book_source_store.dart';
 import '../core/image_cache_store.dart';
 import '../core/reader/reader_speech_controller.dart';
 import '../models/models.dart';
@@ -30,6 +31,7 @@ class AppScope extends InheritedNotifier<ChangeNotifier> {
     required this.downloads,
     required this.detailSnapshots,
     required this.sources,
+    required this.bookSources,
     required this.sourceHealth,
     required this.marketSites,
     required this.seeds,
@@ -60,6 +62,7 @@ class AppScope extends InheritedNotifier<ChangeNotifier> {
 
   /// 第三方影视源（TVBox / CMS）：配置、健康、源市场索引站。
   final SourcesStore sources;
+  final BookSourceStore bookSources;
   final SourceHealthStore sourceHealth;
   final MarketSitesStore marketSites;
 

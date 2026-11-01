@@ -330,7 +330,9 @@ class CmsJsonAdapter implements SourceAdapter {
         title: vod['vod_name']?.toString() ?? '',
         normalizedTitle: normalizeTitle(vod['vod_name']?.toString() ?? ''),
         year: vod['vod_year']?.toString() ?? '',
-        coverUrl: vod['vod_pic']?.toString() ?? '',
+        // vod_pic 常见相对路径（/upload/...）或协议相对（//host/...）：
+        // 不补全的话该源封面全挂（索尼影视类源的主诉）。
+        coverUrl: _absoluteCover(vod['vod_pic']?.toString() ?? '', config.api),
         remarks: vod['vod_remarks']?.toString() ?? '',
         description: _stripHtml(vod['vod_content']?.toString() ?? ''),
         lines: lines,
@@ -466,3 +468,18 @@ String _stripMarkdown(String seg) {
 String _unslash(String url) =>
     url.replaceAll(r'\/', '/').replaceAll('\r', '').replaceAll('\n', '');
 
+
+/// 封面相对路径补全：`/path` 与 `//host/path` 以源 api 域名为基准。
+String _absoluteCover(String raw, String api) {
+  if (raw.isEmpty || raw.startsWith('http://') || raw.startsWith('https://')) {
+    return raw;
+  }
+  try {
+    if (raw.startsWith('//')) return 'https:$raw';
+    final base = Uri.tryParse(api);
+    if (base == null || !base.hasScheme) return raw;
+    return base.resolve(raw).toString();
+  } catch (_) {
+    return raw;
+  }
+}

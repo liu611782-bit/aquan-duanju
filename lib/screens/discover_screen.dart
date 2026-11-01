@@ -6,6 +6,7 @@ import '../models/models.dart';
 import '../store/stores.dart';
 import '../widgets/common.dart';
 import '../widgets/reading_rail.dart';
+import 'book_aggregation_screen.dart';
 import 'book_category_screen.dart';
 import 'book_detail_screen.dart';
 import 'community_screen.dart';
@@ -300,9 +301,9 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       case '小说':
         return [
           card(Icons.auto_stories, '小说聚合',
-              '书源仓库扫描与聚合搜索（建设中，先按分类找书）', () {
-            _snack('书源聚合搜索建设中：仓库扫描与导入先行版即将上线');
-          }),
+              'legado 书源聚合搜索与阅读（导入书源后可用）',
+              () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const BookAggregationScreen()))),
           card(Icons.category_outlined, '按分类找书', '玄幻、言情、都市、悬疑……',
               () => Navigator.of(context).push(
                   MaterialPageRoute(builder: (_) => const BookCategoryScreen()))),

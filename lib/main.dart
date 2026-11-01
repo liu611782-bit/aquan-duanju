@@ -25,6 +25,8 @@ import 'core/error_log.dart';
 import 'models/models.dart';
 import 'screens/detail_screen.dart';
 import 'screens/home_screen.dart';
+import 'core/books/book_source_store.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'store/stores.dart';
 import 'theme/app_theme.dart';
 import 'widgets/common.dart';
@@ -247,6 +249,7 @@ class _AquaAppState extends State<AquaApp> {
   DetailSnapshotStore? _detailSnapshots;
   DownloadService? _downloads;
   SourcesStore? _sources;
+  BookSourceStore? _bookSources;
   SourceHealthStore? _sourceHealth;
   MarketSitesStore? _marketSites;
   SeedStore? _seeds;
@@ -321,6 +324,7 @@ class _AquaAppState extends State<AquaApp> {
       final downloads = DownloadStore();
       // 第三方影视源：启动即加载（索引站种子在 store 首载时写入）。
       final sources = SourcesStore();
+      final bookSources = await SharedPreferences.getInstance().then((p) => BookSourceStore(p));
       final sourceHealth = SourceHealthStore();
       final marketSites = MarketSitesStore();
       final seeds = SeedStore();
@@ -397,6 +401,7 @@ class _AquaAppState extends State<AquaApp> {
         _detailSnapshots = detailSnapshots;
         _downloads = downloadService;
         _sources = sources;
+        _bookSources = bookSources;
         _sourceHealth = sourceHealth;
         _marketSites = marketSites;
         _seeds = seeds;
@@ -525,6 +530,7 @@ class _AquaAppState extends State<AquaApp> {
         downloads: _downloads!,
         detailSnapshots: _detailSnapshots!,
         sources: _sources!,
+        bookSources: _bookSources!,
         sourceHealth: _sourceHealth!,
         marketSites: _marketSites!,
         seeds: _seeds!,

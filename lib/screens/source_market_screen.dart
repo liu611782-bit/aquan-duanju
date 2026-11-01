@@ -603,7 +603,14 @@ class _SourceMarketScreenState extends State<SourceMarketScreen> {
   }
 
   Widget _bottomBar(AppScope scope) {
-    final availableCount = _selectedNodes().length;
+    // 已选数按「当前筛选视图内被勾选」的节点算：全局勾选集合与筛选
+    // 无关（勾选时全选 available），数字不随筛选变会让人以为选错了。
+    var availableCount = 0;
+    for (final root in _roots) {
+      for (final leaf in root.leaves(onlyAvailable: false)) {
+        if (_selected.contains(leaf.id) && _matches(leaf)) availableCount++;
+      }
+    }
     return SafeArea(
       top: false,
       child: Padding(

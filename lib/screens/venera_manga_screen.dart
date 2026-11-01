@@ -27,13 +27,6 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
   static const _defaultUrl =
       'https://raw.githubusercontent.com/venera-app/venera-configs@master/copy_manga.js';
 
-  /// GitHub raw 在国内网络经常整页失败（用户看到的就是兜底文案
-  /// 「出了点小问题」）：镜像逐个回退，命中一个即写缓存离线可用。
-  static const _fallbackUrls = [
-    'https://cdn.jsdelivr.net/gh/venera-app/venera-configs@master/copy_manga.js',
-    'https://fastly.jsdelivr.net/gh/venera-app/venera-configs@master/copy_manga.js',
-  ];
-
   VeneraMangaSource? _source;
   Object? _error;
   bool _loading = true;
@@ -58,10 +51,11 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
     });
     try {
       final custom = AppScope.read(context).settings.veneraSourceUrl;
-      // 自定义源优先；默认源在 GitHub raw 与镜像间回退。
+      // 任意 raw.githubusercontent 源都生成镜像变体参与回退——
+      // 用户切到内置其它源后同样受国内网络影响，不能只给默认源回退。
       final candidates = custom.isNotEmpty
-          ? [custom]
-          : [_defaultUrl, ..._fallbackUrls];
+          ? _mirrorCandidates(custom)
+          : _mirrorCandidates(_defaultUrl);
       Object? lastError;
       String? js;
       for (final url in candidates) {
@@ -345,6 +339,19 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
   static String _veneraUrl(String file) =>
       'https://raw.githubusercontent.com/venera-app/venera-configs@master/$file';
 
+  /// raw.githubusercontent 地址 → [原地址, jsdelivr, fastly] 回退链。
+  static List<String> _mirrorCandidates(String url) {
+    final out = [url];
+    final m = RegExp(
+            r'https://raw\.githubusercontent\.com/([^/]+)/([^/@]+)@([^/]+)/(.+)')
+        .firstMatch(url);
+    if (m != null) {
+      out.add('https://cdn.jsdelivr.net/gh/${m[1]}/${m[2]}@${m[3]}/${m[4]}');
+      out.add('https://fastly.jsdelivr.net/gh/${m[1]}/${m[2]}@${m[3]}/${m[4]}');
+    }
+    return out;
+  }
+
   /// 源设置表单：按 settings 声明渲染（input/select/switch/callback），
   /// 保存经 saveSetting → VeneraStore 落盘；baseUrl 等 getter 实时读取。
   Future<void> _showSettingsSheet() async {
@@ -626,8 +633,9 @@ class _VeneraMangaDetailScreenState extends State<VeneraMangaDetailScreen> {
         chapters: chapters,
         initialIndex: chapters.indexWhere((c) => c.id == ep.id).clamp(0, chapters.length - 1),
         pageLoader: (chapter) async {
-          final images =
-              await widget.source.loadEpImages(widget.comicId, chapter.id);
+          final images = await widget.source
+              .loadEpImages(widget.comicId, chapter.id)
+              .timeout(const Duration(seconds: 30));
           return MangaChapterPages(
             itemId: chapter.id,
             key: '',
