@@ -49,8 +49,9 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
       _loading = true;
       _error = null;
     });
+    String custom = '';
     try {
-      final custom = AppScope.read(context).settings.veneraSourceUrl;
+      custom = AppScope.read(context).settings.veneraSourceUrl;
       // 任意 raw.githubusercontent 源都生成镜像变体参与回退——
       // 用户切到内置其它源后同样受国内网络影响，不能只给默认源回退。
       final candidates = custom.isNotEmpty
@@ -80,7 +81,12 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
         _loading = false;
       });
       if (titles.isNotEmpty) await _loadExplore(0);
-    } catch (e) {
+    } catch (e, stack) {
+      // 切换失败不能只静默把旧源留着（看着像「切换无效还是拷贝漫画」）：留痕指认
+      // 具体哪个源、什么错，才能分辨是 raw 地址 404 还是运行时不支持。
+      ErrorLog.instance.record('漫画源切换',
+          '加载失败 target=${custom.isEmpty ? _defaultUrl : custom}：$e',
+          stack);
       if (!mounted) return;
       setState(() {
         _loading = false;
