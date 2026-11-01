@@ -230,6 +230,24 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
   BookSourceStore get _store => AppScope.read(context).bookSources;
 
   Future<void> _importRaw(String raw, String origin) async {
+    final trimmed = raw.trim();
+    // 粘进来的是网址而非 JSON 正文：自动转「仓库拉取」抓取，避免 jsonDecode 崩并回显整串。
+    if (_looksLikeUrl(trimmed)) {
+      await _importRepo(trimmed, origin);
+      return;
+    }
+    await _importJson(trimmed, origin);
+  }
+
+  /// 单行 http(s) 且不以 `[`/`{` 开头 → 当作导入网址处理。
+  static bool _looksLikeUrl(String s) {
+    if (s.isEmpty || s.contains('\n')) return false;
+    if (s.startsWith('[') || s.startsWith('{')) return false;
+    return s.startsWith('http://') || s.startsWith('https://');
+  }
+
+  /// 解析并导入 legado 书源 JSON（单个/数组）；调用方保证传入的是正文而非网址。
+  Future<void> _importJson(String raw, String origin) async {
     setState(() => _importing = true);
     try {
       final decoded = jsonDecode(raw);
@@ -245,8 +263,9 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _importing = false);
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('导入失败：$e')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              '导入失败：内容不是有效的书源 JSON（若地址是网页，请用「仓库拉取」或粘贴书源 JSON）')));
     }
   }
 
@@ -335,7 +354,7 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
       if (!result.ok || result.bytes == null) {
         throw Exception(result.error.isEmpty ? '拉取失败' : result.error);
       }
-      await _importRaw(utf8.decode(result.bytes!, allowMalformed: true),
+      await _importJson(utf8.decode(result.bytes!, allowMalformed: true),
           origin);
     } catch (e) {
       if (!mounted) return;
