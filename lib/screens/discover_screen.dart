@@ -10,6 +10,7 @@ import 'book_category_screen.dart';
 import 'book_detail_screen.dart';
 import 'community_screen.dart';
 import 'detail_screen.dart';
+import 'filter_screen.dart';
 import 'media_hub_screen.dart';
 import 'releases_screen.dart';
 import 'search_screen.dart';
@@ -274,6 +275,54 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         ?.showSnackBar(SnackBar(content: Text(text)));
   }
 
+  /// 统一 IA：每个 tag 两张入口卡——「XX聚合」+「按分类找XX」。
+  /// 影视三 tab 共用影视聚合（TVBox 源内容覆盖短剧/漫剧/电影）。
+  List<Widget> _entriesFor(ContentType type) {
+    Widget card(IconData icon, String title, String subtitle, VoidCallback onTap) =>
+        _EntryCard(icon: icon, title: title, subtitle: subtitle, onTap: onTap);
+    switch (type.name) {
+      case '短剧':
+      case '漫剧':
+      case '电影':
+        final genre = switch (type.name) {
+          '短剧' => 'short_play',
+          '漫剧' => 'comic_series',
+          _ => 'movie',
+        };
+        return [
+          card(Icons.live_tv, '影视聚合', 'TVBox / 采集站源聚合搜索与观看',
+              () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const MediaHubScreen()))),
+          card(Icons.category_outlined, '按分类找${type.name}',
+              '体裁、年代、主题、排序筛选',
+              () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => FilterScreen(initialGenre: genre)))),
+        ];
+      case '小说':
+        return [
+          card(Icons.auto_stories, '小说聚合',
+              '书源仓库扫描与聚合搜索（建设中，先按分类找书）', () {
+            _snack('书源聚合搜索建设中：仓库扫描与导入先行版即将上线');
+          }),
+          card(Icons.category_outlined, '按分类找书', '玄幻、言情、都市、悬疑……',
+              () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const BookCategoryScreen()))),
+        ];
+      case '漫画':
+        return [
+          card(Icons.auto_stories, '漫画聚合',
+              '多漫画源浏览与阅读（拷贝/包子/漫画柜…可切换）',
+              () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const VeneraMangaScreen()))),
+          card(Icons.category_outlined, '按分类找漫画',
+              '源内分类：恋爱、古风、悬疑、生活……',
+              () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const VeneraMangaScreen()))),
+        ];
+    }
+    return const [];
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -319,28 +368,14 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                 child: CustomScrollView(
                   physics: const AlwaysScrollableScrollPhysics(),
                   slivers: [
-                    // 影视聚合入口（TVBox / CMS 源 + 后续 B 站）。
-                    const SliverToBoxAdapter(child: _MediaHubEntry()),
-                    // 扫完源"去哪选源看视频"的显眼入口（原先只在聚合页 AppBar）。
+                    // 统一 IA：每个 tag 两张入口卡——「XX聚合」+「按分类找XX」。
+                    for (final entry in _entriesFor(_type))
+                      SliverToBoxAdapter(child: entry),
+                    // 短剧 tab 保留源管理（扫完源回这里选源看视频）。
                     if (_type.name == '短剧')
                       const SliverToBoxAdapter(child: _SourceManageEntry()),
-                    // 漫画 tab：只放「漫画聚合」一个入口。
-                    if (_type.name == '漫画')
-                      const SliverToBoxAdapter(child: _VeneraMangaEntry()),
-                    // 小说 tab：小说聚合 + 按分类找书，两个入口。
-                    if (_type.name == '小说')
-                      const SliverToBoxAdapter(child: _BookAggregationEntry()),
-                    if (_type.name == '小说')
-                      SliverToBoxAdapter(
-                        child: _CategoryEntry(
-                          onTap: () => Navigator.of(context).push(
-                            MaterialPageRoute(
-                                builder: (_) => const BookCategoryScreen()),
-                          ),
-                        ),
-                      ),
                     // 继续观看只在影视类 tab；「最近在读」按小说/漫画分域
-                    // （用户要求：各 tag 的历史记录互不混排）。
+                    // （各 tag 的历史记录互不混排）。
                     if (_type.kind == ContentKind.video)
                       const SliverToBoxAdapter(child: _ContinueRail()),
                     if (_type.kind == ContentKind.book)
@@ -378,9 +413,19 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   }
 }
 
-/// 「影视聚合」入口卡：TVBox / CMS 源聚合（B 站后续并入）。
-class _MediaHubEntry extends StatelessWidget {
-  const _MediaHubEntry();
+/// 统一入口卡：发现页每个 tag 的「XX聚合」/「按分类找XX」共用这一张卡。
+class _EntryCard extends StatelessWidget {
+  const _EntryCard({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -391,24 +436,20 @@ class _MediaHubEntry extends StatelessWidget {
         margin: EdgeInsets.zero,
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => const MediaHubScreen()),
-          ),
+          onTap: onTap,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Row(
               children: [
-                Icon(Icons.live_tv,
-                    color: theme.colorScheme.primary),
+                Icon(icon, color: theme.colorScheme.primary),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('影视聚合',
-                          style: theme.textTheme.titleMedium),
+                      Text(title, style: theme.textTheme.titleMedium),
                       Text(
-                        '导入 TVBox / 采集站源，聚合搜索与大屏观看（源由你自行导入）',
+                        subtitle,
                         style: theme.textTheme.bodySmall
                             ?.copyWith(color: theme.colorScheme.outline),
                       ),
@@ -661,51 +702,7 @@ class _ChannelPage {
 }
 
 /// 「继续观看」：最近没看完的剧横排，点了直接续播到上次那一集那一秒。
-/// 「漫画源」入口卡：Venera 契约第三方漫画源（copy_manga 等）。
-class _VeneraMangaEntry extends StatelessWidget {
-  const _VeneraMangaEntry();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-      child: Card(
-        margin: EdgeInsets.zero,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => const VeneraMangaScreen()),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              children: [
-                Icon(Icons.auto_stories, color: theme.colorScheme.primary),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('漫画聚合', style: theme.textTheme.titleMedium),
-                      Text(
-                        '多漫画源浏览与阅读（拷贝/包子/漫画柜…可切换）',
-                        style: theme.textTheme.bodySmall
-                            ?.copyWith(color: theme.colorScheme.outline),
-                      ),
-                    ],
-                  ),
-                ),
-                const Icon(Icons.chevron_right),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
+/// 「继续观看」：最近没看完的剧横排，点了直接续播到上次那一集那一秒。
 /// 看完的（finished）不出现；看完入口在「我的 → 观看历史」。
 class _ContinueRail extends StatelessWidget {
   const _ContinueRail();
@@ -815,74 +812,6 @@ class _ContinueCard extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// 小说类型的「按分类找书」入口。
-/// 「小说聚合」入口卡：书源（legado）聚合搜索与阅读。
-/// 核心引擎已就绪（core/books），聚合搜索 UI 接续中。
-class _BookAggregationEntry extends StatelessWidget {
-  const _BookAggregationEntry();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-      child: Card(
-        margin: EdgeInsets.zero,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () {
-            ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(
-                content: Text('书源聚合搜索建设中：仓库扫描与导入先行版即将上线')));
-          },
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              children: [
-                Icon(Icons.auto_stories, color: theme.colorScheme.primary),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('小说聚合', style: theme.textTheme.titleMedium),
-                      Text(
-                        '书源仓库扫描与聚合搜索（建设中，先按分类找书）',
-                        style: theme.textTheme.bodySmall
-                            ?.copyWith(color: theme.colorScheme.outline),
-                      ),
-                    ],
-                  ),
-                ),
-                const Icon(Icons.chevron_right),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _CategoryEntry extends StatelessWidget {
-  const _CategoryEntry({required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return ListTile(
-      dense: true,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-      leading: Icon(Icons.grid_view_rounded, color: theme.colorScheme.primary),
-      title: const Text('按分类找书'),
-      subtitle: const Text('玄幻、言情、都市、悬疑……'),
-      trailing: const Icon(Icons.chevron_right, size: 18),
-      onTap: onTap,
     );
   }
 }
