@@ -24,6 +24,15 @@ void main() {
       expect(options.body, 'searchkey={{key}}&page={{page}}');
     });
 
+    test('选项 JSON 解析失败也剥离 `,{...}`，主 URL 不残留选项', () {
+      final (url, options) = BookRule.parseSearchUrl(
+        '/modules/article/search.php,'
+        '{"method":"POST","body":"searchkey={{key}}",}',
+      );
+      expect(url, '/modules/article/search.php');
+      expect(options.isPost, isFalse);
+    });
+
     test('占位填充：key URL 编码、page 数字', () {
       final filled = BookRule.fillUrl(
         'https://x.example/s?key={{key}}&p={{page}}',

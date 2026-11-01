@@ -34,7 +34,10 @@ class BookSourceRuntime {
       throw BookSourceException('源没有配置搜索地址');
     }
     final (rawUrl, options) = BookRule.parseSearchUrl(source.searchUrl);
-    final url = BookRule.fillUrl(rawUrl, key: query, page: page);
+    // legado 很多源的 searchUrl 是相对路径（如 `/modules/article/search.php`），
+    // 必须按 bookSourceUrl 补成绝对地址，否则被 SSRF 判「非法地址」→ 直接搜不到。
+    final url = _resolveAgainst(
+        BookRule.fillUrl(rawUrl, key: query, page: page), source.url);
     final body = BookRule.fillUrl(options.body, key: query, page: page);
     final text = await _request(
       url,
@@ -72,17 +75,18 @@ class BookSourceRuntime {
 
   /// 详情 + 目录：bookUrl → 书信息（含目录）。
   Future<BookInfo> bookInfo(BookSource source, String bookUrl) async {
-    final text = await _request(bookUrl);
+    final base = _resolveAgainst(bookUrl, source.url);
+    final text = await _request(base);
     final page = _autoDecode(text);
     final rule = source.ruleBookInfo;
     final info = BookInfo(
       name: BookRule.evalString(page, rule.name),
       author: BookRule.evalString(page, rule.author),
-      coverUrl: BookRule.evalString(page, rule.coverUrl, baseUrl: bookUrl),
+      coverUrl: BookRule.evalString(page, rule.coverUrl, baseUrl: base),
       intro: BookRule.evalString(page, rule.intro),
       tocUrl: rule.tocUrl.trim().isEmpty
-          ? bookUrl
-          : BookRule.evalString(page, rule.tocUrl, baseUrl: bookUrl),
+          ? base
+          : BookRule.evalString(page, rule.tocUrl, baseUrl: base),
     );
     info.chapters = await toc(source, info.tocUrl);
     return info;
@@ -90,7 +94,8 @@ class BookSourceRuntime {
 
   /// 目录：目录页 → 章节列表。
   Future<List<BookTocItem>> toc(BookSource source, String tocUrl) async {
-    final text = await _request(tocUrl);
+    final base = _resolveAgainst(tocUrl, source.url);
+    final text = await _request(base);
     final page = _autoDecode(text);
     final rule = source.ruleToc;
     if (rule.chapterList.trim().isEmpty) {
@@ -101,7 +106,7 @@ class BookSourceRuntime {
       for (final node in nodes)
         BookTocItem(
           title: BookRule.evalString(node, rule.chapterName),
-          url: BookRule.evalString(node, rule.chapterUrl, baseUrl: tocUrl),
+          url: BookRule.evalString(node, rule.chapterUrl, baseUrl: base),
           isVolume: BookRule.evalString(node, rule.isVolume).isNotEmpty,
         ),
     ];
@@ -109,15 +114,29 @@ class BookSourceRuntime {
 
   /// 正文：章节地址 → 章节文本（带 `##` 清洗）。
   Future<String> content(BookSource source, String chapterUrl) async {
-    final text = await _request(chapterUrl);
+    final base = _resolveAgainst(chapterUrl, source.url);
+    final text = await _request(base);
     final page = _autoDecode(text);
     final rule = source.ruleContent;
     if (rule.content.trim().isEmpty) {
       throw BookSourceException('源没有配置正文规则');
     }
     final (expr, clean) = _splitContentRule(rule.content);
-    final value = BookRule.evalString(page, expr, baseUrl: chapterUrl);
+    final value = BookRule.evalString(page, expr, baseUrl: base);
     return BookRule.applyClean(value, clean);
+  }
+
+  /// 相对地址按书源 base（`bookSourceUrl`）补全；已是绝对地址原样返回。
+  /// legado 的 searchUrl / 字段规则常给相对路径，不补全会被 SSRF 判非法地址。
+  static String _resolveAgainst(String url, String base) {
+    if (url.isEmpty) return url;
+    final parsed = Uri.tryParse(url);
+    if (parsed != null && parsed.hasScheme && parsed.host.isNotEmpty) {
+      return url;
+    }
+    final b = Uri.tryParse(base);
+    if (b == null || !b.hasScheme) return url;
+    return b.resolve(url).toString();
   }
 
   /// 正文规则同样支持 `##` 清洗尾缀。

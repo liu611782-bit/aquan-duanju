@@ -92,6 +92,22 @@ void main() {
     expect(hits.first.bookUrl, '$base/book/1');
   });
 
+  test('search：相对 searchUrl 按 bookSourceUrl 补全（修 importSsrf 非法地址）',
+      () async {
+    final rt = BookSourceRuntime(enforceSsrf: false);
+    // 站点根作 bookSourceUrl，searchUrl 给相对路径 + POST 选项，复现真实源的形状。
+    final relative = BookSource(
+      url: base,
+      name: '相对源',
+      searchUrl: '/search,{"method":"POST","body":"key={{key}}&page={{page}}"}',
+      ruleSearch: sourceFor(base).ruleSearch,
+    );
+    final hits = await rt.search(relative, '斗破');
+    expect(hits.length, 1);
+    expect(hits.first.name, '斗破苍穹');
+    expect(hits.first.bookUrl, '$base/book/1');
+  });
+
   test('bookInfo + toc：HTML 详情与目录', () async {
     final rt = BookSourceRuntime(enforceSsrf: false);
     final info = await rt.bookInfo(sourceFor(base), '$base/book/1');

@@ -20,13 +20,16 @@ class BookRule {
     // legado：主 URL 后跟逗号 + JSON 选项（JSON 里也可能有逗号，从第一个 `,`+`{` 切）。
     final brace = url.indexOf(',{');
     if (brace >= 0) {
+      // 无条件先切掉 `,{...}` 选项块：即便选项 JSON 解析失败，主 URL 也不能残留
+      // 选项文本，否则整串（相对路径 + 垃圾）会被当成 URL 送进 SSRF 校验。
+      final optText = url.substring(brace + 1);
+      url = url.substring(0, brace);
       try {
-        final decoded = jsonDecode(url.substring(brace + 1));
+        final decoded = jsonDecode(optText);
         if (decoded is Map<String, dynamic>) {
           options = BookRequestOptions.fromJson(decoded);
-          url = url.substring(0, brace);
         }
-      } catch (_) {/* 选项解析失败按纯 URL 处理 */}
+      } catch (_) {/* 选项解析不了：URL 已清洗，按纯 GET 处理 */}
     }
     return (url.trim(), options);
   }
