@@ -606,6 +606,9 @@ class ReaderSpeechController extends ChangeNotifier {
   /// 锚点续读（与 [setPreferredPath] 同口径；不同音色的音频时长不同，毫秒不可靠）。
   Future<void> setTtsVoice(String voiceId) async {
     if (_ttsVoiceId == voiceId) return;
+    ErrorLog.instance.record('听书音色',
+        'setTtsVoice 进入：$_ttsVoiceId → $voiceId，当前段落=$_paragraphIndex'
+        '/$_paragraphCount useTts=$_useTts loading=$_loading');
     _ttsVoiceId = voiceId;
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -809,6 +812,9 @@ class ReaderSpeechController extends ChangeNotifier {
     // 世代号 +1 就是中止信号：编排层每个 await 之后都问一次 `isCurrent`，
     // 进行中的合成会在下一段边界抛 `cancelled` 自行退出（不留半成品）。
     _epoch++;
+    // 先发一次 notify 让阅读页的朗读条立刻消失（原来 notify 在整串收尾
+    // await 之后，中途抛错的话条会一直挂着——「结束朗读不消失」的主诉）。
+    notify();
     // close 也是预取的失效点（注意事项 5）：去重集独立于缓存键，不一起清会让
     // 下一次会话误判「已预取」。
     _prefetcher.invalidate();

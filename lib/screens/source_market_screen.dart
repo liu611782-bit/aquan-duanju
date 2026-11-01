@@ -659,7 +659,13 @@ class _SourceMarketScreenState extends State<SourceMarketScreen> {
                   : () => setState(() {
                         _selected.addAll(_selectedNodes().map((n) => n.id));
                       }),
-              child: Text('已选 $availableCount'),
+              child: Text('全选 $availableCount'),
+            ),
+            TextButton(
+              onPressed: _selected.isEmpty
+                  ? null
+                  : () => setState(() => _selected.clear()),
+              child: const Text('取消选中'),
             ),
             PopupMenuButton<int>(
               tooltip: '一键导入',

@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../core/aqua_api.dart';
@@ -537,3 +538,32 @@ String episodeLabel(int n) => '第$n集';
 
 /// 随机工具：洗牌（对 RangeError 免疫）。
 void shuffleList<T>(List<T> list, {math.Random? rng}) => list.shuffle(rng);
+
+/// 桌面端横向列表的滚轮支持：垂直滚轮转横向滚动（鼠标用户在源条/分类条
+/// 上「滚轮滚不动、也没滚动条」的主诉）。
+class HorizontalWheelScroll extends StatelessWidget {
+  const HorizontalWheelScroll({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = ScrollController();
+    return Listener(
+      onPointerSignal: (event) {
+        if (event is PointerScrollEvent &&
+            controller.hasClients &&
+            event.scrollDelta.dy != 0) {
+          final target =
+              (controller.offset + event.scrollDelta.dy * 2)
+                  .clamp(0.0, controller.position.maxScrollExtent);
+          controller.jumpTo(target);
+        }
+      },
+      child: PrimaryScrollController(
+        controller: controller,
+        child: child,
+      ),
+    );
+  }
+}

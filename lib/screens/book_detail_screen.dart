@@ -8,6 +8,7 @@ import '../widgets/book_directory_sheet.dart';
 import '../widgets/common.dart';
 import 'book_audio_screen.dart';
 import 'manga_reader_screen.dart';
+import 'search_screen.dart';
 import 'reader_screen.dart';
 
 /// 从阅读进度打开一本书（统一入口，便于以后加转场/埋点）。
@@ -326,7 +327,13 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                     runSpacing: 6,
                     children: [
                       if (detail?.category.isNotEmpty == true)
-                        _chip(context, detail!.category),
+                        // 分类标签可点：跳按标签词的搜索（书库筛选入口的补充路径）。
+                        InkWell(
+                          borderRadius: BorderRadius.circular(6),
+                          onTap: () => showSearchScreen(context,
+                              query: detail.category),
+                          child: _chip(context, detail!.category),
+                        ),
                       if (detail?.finished == true) _chip(context, '完结'),
                       if (detail?.score.isNotEmpty == true)
                         _chip(context, '评分 ${detail!.score}'),

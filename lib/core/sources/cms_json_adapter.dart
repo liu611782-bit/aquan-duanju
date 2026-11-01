@@ -323,6 +323,7 @@ class CmsJsonAdapter implements SourceAdapter {
       final lines = parsePlayLines(
         vod['vod_play_from']?.toString() ?? '',
         vod['vod_play_url']?.toString() ?? '',
+        baseUrl: config.api,
       );
       out.add(UnifiedSeries(
         sourceKey: id == '' ? '' : config.id,
@@ -361,7 +362,8 @@ class CmsJsonAdapter implements SourceAdapter {
             names.add(dd.getAttribute('flag') ?? '');
             blocks.add(dd.innerText);
           }
-          dds.addAll(parsePlayLines(names.join(r'$$$'), blocks.join(r'$$$')));
+          dds.addAll(parsePlayLines(names.join(r'$$$'), blocks.join(r'$$$'),
+              baseUrl: config.api));
         }
         out.add(UnifiedSeries(
           sourceKey: config.id,
@@ -397,7 +399,8 @@ class CmsJsonAdapter implements SourceAdapter {
 /// `vod_play_url` 解析（纯函数，tvbox PlaybackParser 同语义）：
 /// `$$$` 分线路 → `#` 分集 → `lastIndexOf('$')` 分「标题$URL」；
 /// 只保留 http(s) 直链，兼容 Markdown 包裹；线路 ≤4、每线路 ≤240 集。
-List<PlayLine> parsePlayLines(String fromRaw, String urlRaw) {
+List<PlayLine> parsePlayLines(String fromRaw, String urlRaw,
+    {String baseUrl = ''}) {
   if (urlRaw.trim().isEmpty) return const [];
   final names = fromRaw.split(r'$$$');
   final blocks = urlRaw.split(r'$$$');
@@ -424,7 +427,21 @@ List<PlayLine> parsePlayLines(String fromRaw, String urlRaw) {
         // URL 部分做 Markdown 包裹剥离与 \/、\r\n 归一（切分后再清洗，
         // 否则「第1集$(https://…)」里的括号会挡住 lastIndexOf 的判定）。
         url = _stripMarkdown(_unslash(url));
-        if (!url.startsWith('http://') && !url.startsWith('https://')) continue;
+        if (url.isEmpty) continue;
+        // 相对播放地址（/play/xxx）按源 api 域名补全：不补则整条线路
+        // 被 http 前缀检查丢弃（「有 25 集却无可播分集」的根因之一）。
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+          if (baseUrl.isEmpty) continue;
+          try {
+            final base = Uri.tryParse(baseUrl);
+            if (base == null || !base.hasScheme) continue;
+            url = base.resolve(url.startsWith('//')
+                ? '${base.scheme}:$url'
+                : url).toString();
+          } catch (_) {
+            continue;
+          }
+        }
         episodes.add(UnifiedEpisode(
             title: title.isEmpty ? '第${episodes.length + 1}集' : title,
             url: url,

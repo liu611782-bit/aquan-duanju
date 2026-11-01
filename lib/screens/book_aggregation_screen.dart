@@ -321,6 +321,11 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
     );
     final url = controller.text.trim();
     if (ok != true || url.isEmpty) return;
+    await _importRepo(url, '仓库拉取');
+  }
+
+  /// 拉取仓库 URL → 解析 → 导入（内置与自定义共用）。
+  Future<void> _importRepo(String url, String origin) async {
     setState(() => _importing = true);
     try {
       final result = await fetchProbe(url,
@@ -331,12 +336,12 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
         throw Exception(result.error.isEmpty ? '拉取失败' : result.error);
       }
       await _importRaw(utf8.decode(result.bytes!, allowMalformed: true),
-          '仓库拉取');
+          origin);
     } catch (e) {
       if (!mounted) return;
       setState(() => _importing = false);
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('仓库拉取失败：$e')));
+          .showSnackBar(SnackBar(content: Text('$origin失败：$e')));
     }
   }
 
@@ -412,6 +417,23 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
                     ),
             ),
             const Divider(height: 20),
+            // 内置书源仓库（国内可达镜像，实测直连 200；导入自动去重）。
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _importing
+                        ? null
+                        : () => _importRepo(
+                            'https://fastly.jsdelivr.net/gh/XIU2/Yuedu@master/shuyuan',
+                            'XIU2 精品书源'),
+                    icon: const Icon(Icons.inventory_2_outlined, size: 18),
+                    label: const Text('导入内置：XIU2 精品书源'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
             Row(
               children: [
                 Expanded(

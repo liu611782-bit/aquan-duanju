@@ -151,8 +151,10 @@ class _SourceChipBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return SizedBox(
       height: 52,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
+      // 桌面端垂直滚轮转横向滚动：源多时鼠标用户滚不到右侧（主诉）。
+      child: HorizontalWheelScroll(
+        child: ListView(
+          scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         children: [
           Padding(
@@ -189,6 +191,7 @@ class _SourceChipBar extends StatelessWidget {
               ),
             ),
         ],
+        ),
       ),
     );
   }
@@ -342,23 +345,25 @@ class _BrowseTabState extends State<_BrowseTab>
         if (_categories.isNotEmpty)
           SizedBox(
             height: 44,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              children: [
-                for (final c in _categories)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: ChoiceChip(
-                      label: Text(c.name),
-                      selected: c.id == _categoryId,
-                      onSelected: (_) {
-                        setState(() => _categoryId = c.id);
-                        _reload();
-                      },
+            child: HorizontalWheelScroll(
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                children: [
+                  for (final c in _categories)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ChoiceChip(
+                        label: Text(c.name),
+                        selected: c.id == _categoryId,
+                        onSelected: (_) {
+                          setState(() => _categoryId = c.id);
+                          _reload();
+                        },
                     ),
                   ),
               ],
+            ),
             ),
           ),
         Expanded(

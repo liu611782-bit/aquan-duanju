@@ -1,10 +1,15 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 /// 应用内错误日志（关于页「错误日志」可查看 / 复制 / 清空）。
 ///
-/// 口径：**只记录本次打开期间**的错误，关闭即清空——只放内存，不写磁盘；
-/// 最多保留 [maxEntries] 条（超出丢最旧的）。记录内容在入库前做脱敏，
-/// 避免 token / decryption_key / URL 查询串被用户复制出去。
+/// 口径：内存保留本次打开期间的最近 [maxEntries] 条（超出丢最旧的），
+/// **同时逐条追加落盘** `error_log.txt`（应用支持目录）——用户反馈时
+/// 可直接发文件。记录内容在入库前做脱敏，避免 token / decryption_key /
+/// URL 查询串被写出去。
 class ErrorLogEntry {
   const ErrorLogEntry({
     required this.time,
@@ -73,7 +78,18 @@ class ErrorLog extends ChangeNotifier {
     if (_entries.length > maxEntries) {
       _entries.removeRange(0, _entries.length - maxEntries);
     }
+    unawaited(_appendToFile(_entries.last));
     notifyListeners();
+  }
+
+  /// 逐条追加落盘（fire-and-forget，失败静默——日志不能拖垮业务）。
+  Future<void> _appendToFile(ErrorLogEntry entry) async {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final file = File('${dir.path}${Platform.pathSeparator}error_log.txt');
+      await file.writeAsString('${entry.toString()}\n\n',
+          mode: FileMode.append, flush: false);
+    } catch (_) {}
   }
 
   void clear() {
