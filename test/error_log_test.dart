@@ -32,5 +32,11 @@ void main() {
       log.clear();
       expect(log.isEmpty, isTrue);
     });
+
+    test('resolveLogFilePath 不抛（无 path_provider 时回空串供 UI 隐藏入口）',
+        () async {
+      final path = await ErrorLog().resolveLogFilePath();
+      expect(path, isA<String>());
+    });
   });
 }

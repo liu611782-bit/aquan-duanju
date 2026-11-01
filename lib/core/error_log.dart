@@ -83,13 +83,45 @@ class ErrorLog extends ChangeNotifier {
   }
 
   /// 逐条追加落盘（fire-and-forget，失败静默——日志不能拖垮业务）。
+  ///
+  /// 主写「应用支持目录」；便携 Release（非 debug 且 exe 同级目录可写）再在
+  /// exe 同级写一份，方便测试直接从安装目录找到 `error_log.txt`。
   Future<void> _appendToFile(ErrorLogEntry entry) async {
+    final line = '${entry.toString()}\n\n';
     try {
-      final dir = await getApplicationSupportDirectory();
-      final file = File('${dir.path}${Platform.pathSeparator}error_log.txt');
-      await file.writeAsString('${entry.toString()}\n\n',
-          mode: FileMode.append, flush: false);
+      await (await _appSupportFile())
+          .writeAsString(line, mode: FileMode.append, flush: false);
     } catch (_) {}
+    if (kDebugMode) return;
+    try {
+      final portable = _portableFile();
+      await portable?.writeAsString(line, mode: FileMode.append, flush: false);
+    } catch (_) {}
+  }
+
+  Future<File> _appSupportFile() async {
+    final dir = await getApplicationSupportDirectory();
+    return File('${dir.path}${Platform.pathSeparator}error_log.txt');
+  }
+
+  /// exe 同级目录里的 `error_log.txt`（便携包用）；拿不到目录返回 null。
+  File? _portableFile() {
+    try {
+      final exeDir = File(Platform.resolvedExecutable).parent;
+      return File('${exeDir.path}${Platform.pathSeparator}error_log.txt');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 供 UI 展示/定位：应用支持目录里 `error_log.txt` 的绝对路径。
+  /// 解析不了（如无 path_provider 的测试环境）返回空串，UI 据此隐藏定位入口。
+  Future<String> resolveLogFilePath() async {
+    try {
+      return (await _appSupportFile()).path;
+    } catch (_) {
+      return '';
+    }
   }
 
   void clear() {

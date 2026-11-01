@@ -1770,6 +1770,7 @@ class _AboutPanelState extends State<AboutPanel> {
   String _version = '';
   String _core = '';
   String _build = '';
+  String _logPath = '';
 
   @override
   void initState() {
@@ -1783,6 +1784,7 @@ class _AboutPanelState extends State<AboutPanel> {
     try {
       core = AquaClient.coreVersion();
     } catch (_) {}
+    final logPath = await ErrorLog.instance.resolveLogFilePath();
     if (mounted) {
       setState(() {
         _version = '${info.version}+${info.buildNumber}';
@@ -1790,6 +1792,7 @@ class _AboutPanelState extends State<AboutPanel> {
         // 构建标识：用来确认用户跑的是不是最新包。
         _build = const String.fromEnvironment('AQUAN_BUILD',
             defaultValue: 'dev');
+        _logPath = logPath;
       });
     }
   }
@@ -1839,8 +1842,63 @@ class _AboutPanelState extends State<AboutPanel> {
             onTap: () => _showErrorLog(context),
           ),
         ),
+        if (_logPath.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 4, top: 4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SelectableText('日志文件：$_logPath',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.outline)),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    TextButton.icon(
+                      onPressed: () async {
+                        final messenger = ScaffoldMessenger.of(context);
+                        await Clipboard.setData(ClipboardData(text: _logPath));
+                        messenger.showSnackBar(
+                            const SnackBar(content: Text('日志路径已复制')));
+                      },
+                      icon: const Icon(Icons.copy_rounded, size: 18),
+                      label: const Text('复制路径'),
+                    ),
+                    if (Platform.isWindows ||
+                        Platform.isLinux ||
+                        Platform.isMacOS)
+                      TextButton.icon(
+                        onPressed: _openLogFolder,
+                        icon: const Icon(Icons.folder_open, size: 18),
+                        label: const Text('打开所在文件夹'),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
       ],
     );
+  }
+
+  /// 在系统文件管理器里定位日志目录（Windows 高亮文件本体）。
+  /// explorer 即使命中也返回非 0 退出码，故不判结果、只防抛异常。
+  Future<void> _openLogFolder() async {
+    if (_logPath.isEmpty) return;
+    final file = File(_logPath);
+    final dir = file.parent.path;
+    try {
+      if (Platform.isWindows) {
+        await Process.run(
+            'explorer', [file.existsSync() ? '/select,${file.path}' : dir]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [dir]);
+      } else {
+        await Process.run('xdg-open', [dir]);
+      }
+    } catch (e, s) {
+      ErrorLog.instance.record('打开日志目录', e, s);
+    }
   }
 
   Future<void> _showErrorLog(BuildContext context) async {
