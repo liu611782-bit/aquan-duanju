@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../core/error_log.dart';
 import '../core/sources/source_import.dart';
 import '../core/sources/venera/venera_js_runtime.dart';
 import '../core/sources/venera/venera_manga_source.dart';
@@ -308,8 +309,14 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
     if (source == null) return;
     final current = <String, dynamic>{};
     for (final key in _settingsSchema.keys) {
-      current[key] = await source.loadSettingValue(key);
+      try {
+        current[key] = await source.loadSettingValue(key);
+      } catch (e, stack) {
+        // 用户报过「设置第二次进去没保存」：回显失败时留痕，别让 sheet 静默拿空。
+        ErrorLog.instance.record('漫画源设置', '回显 $key 失败：$e', stack);
+      }
     }
+    ErrorLog.instance.record('漫画源设置', '打开设置：当前值=$current');
     if (!mounted) return;
     final changed = await showModalBottomSheet<bool>(
       context: context,
@@ -507,7 +514,10 @@ class _VeneraMangaDetailScreenState extends State<VeneraMangaDetailScreen> {
         loading: _loading,
         error: _error,
         onRetry: _load,
-        child: _buildContent(theme),
+        // child 参数是立即求值的：_buildContent 里 `_detail!` 在 loading/error
+        // 态会抛 null 断言 → 整页 build 异常（release 表现为一篇灰、无返回栏）。
+        // 必须 Builder 惰性化，让 LoadView 只在内容态才触到 _detail。
+        child: Builder(builder: (_) => _buildContent(theme)),
       ),
     );
   }
@@ -693,10 +703,19 @@ class _SourceSettingsFormState extends State<_SourceSettingsForm> {
               const SizedBox(width: 8),
               FilledButton(
                 onPressed: () async {
-                  for (final e in _changed.entries) {
-                    await widget.source.saveSettingValue(e.key, e.value);
+                  final messenger = ScaffoldMessenger.of(context);
+                  try {
+                    for (final e in _changed.entries) {
+                      await widget.source.saveSettingValue(e.key, e.value);
+                    }
+                    ErrorLog.instance.record(
+                        '漫画源设置', '已保存 ${_changed.keys.toList()}');
+                    if (context.mounted) Navigator.pop(context, true);
+                  } catch (e, stack) {
+                    ErrorLog.instance.record('漫画源设置', '保存失败：$e', stack);
+                    messenger.showSnackBar(
+                        SnackBar(content: Text('保存失败：$e')));
                   }
-                  if (context.mounted) Navigator.pop(context, true);
                 },
                 child: const Text('保存'),
               ),

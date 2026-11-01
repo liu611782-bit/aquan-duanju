@@ -16,6 +16,7 @@ import 'package:window_manager/window_manager.dart';
 
 import '../cli/launch_command.dart';
 import '../cli/player_bus.dart';
+import '../core/error_log.dart';
 import '../core/aqua_error.dart';
 import '../core/cast/cast_controller.dart';
 import '../core/muted_hint.dart';
@@ -279,7 +280,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     PlayerBus.instance.attach(this);
     if (Platform.isWindows) _initSmtc();
-    _openEpisode(_index, widget.startAt);
+    // 播放页的首次打开都源于用户动作（详情页点「第 N 集」/继续播放/立即播放）：
+    // 立刻把「想去这一集」写进历史，否则起播慢/失败时退出，历史还停在旧集。
+    // 页内的自动连播/换线不经这里，语义不变。
+    _openEpisode(_index, widget.startAt, manual: true);
   }
 
   // ---------- Windows 系统媒体控制（SMTC）：媒体键 + 音量浮层 ----------
@@ -506,7 +510,20 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (_mini) await _toggleMiniWindow();
       final full = await windowManager.isFullScreen();
       await windowManager.setFullScreen(!full);
-    } catch (_) {}
+      // setFullScreen 是异步系统调用，执行完立即回读真实状态：
+      // 与目标不符（用户报过「全屏后仍有标题栏」）留痕进错误日志，
+      // 「我的」页可复制——空 catch 吞掉后这类问题永远无诊断证据。
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      final actual = await windowManager.isFullScreen();
+      if (actual != !full) {
+        ErrorLog.instance.record(
+          '全屏',
+          'setFullScreen(${"!full"}) 后回读 isFullScreen=$actual，与预期不符',
+        );
+      }
+    } catch (e, stack) {
+      ErrorLog.instance.record('全屏', e, stack);
+    }
   }
 
   /// 迷你置顶小窗：缩成小尺寸 + 窗口置顶，边干活边看；再按一次还原。
@@ -2293,9 +2310,20 @@ class _PlayerScreenState extends State<PlayerScreen>
     try {
       if (!await windowManager.isFullScreen()) {
         await windowManager.setFullScreen(true);
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        if (!await windowManager.isFullScreen()) {
+          // 首击在部分 Windows 环境（DPI 切换/窗口刚重建）会被吞：重试一次。
+          await windowManager.setFullScreen(true);
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+          if (!await windowManager.isFullScreen()) {
+            ErrorLog.instance.record('全屏', '铺满两次尝试后 isFullScreen 仍为 false');
+          }
+        }
       }
       if (mounted) setState(() => _fill = !_fill);
-    } catch (_) {}
+    } catch (e, stack) {
+      ErrorLog.instance.record('全屏', e, stack);
+    }
   }
 
   Widget _buildLoadError(BuildContext context) {

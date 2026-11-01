@@ -213,16 +213,20 @@ class _DetailScreenState extends State<DetailScreen> {
                 _play(ep, start);
               },
               icon: const Icon(Icons.play_arrow),
-              label: Builder(builder: (context) {
-                final scope = AppScope.read(context);
-                final h = scope.history.get(widget.seriesId);
-                // 有未看完记录就报集数（含 position==0 的跳集意图记录），
-                // 跟 _resumeTarget 的选集逻辑保持同一个真相。
-                final ep = (h != null && !h.finished)
-                    ? '继续播放 第${h.episode}集'
-                    : '立即播放';
-                return Text(ep);
-              }),
+              // Builder 不监听 store：从播放页 back 回来时 State 还活着，
+              // 历史已变（如刚跳到第 9 集）但文案停在旧值，点击与显示不一致。
+              label: ListenableBuilder(
+                listenable: AppScope.read(context).history,
+                builder: (context, _) {
+                  final h = AppScope.read(context).history.get(widget.seriesId);
+                  // 有未看完记录就报集数（含 position==0 的跳集意图记录），
+                  // 跟 _resumeTarget 的选集逻辑保持同一个真相。
+                  final ep = (h != null && !h.finished)
+                      ? '继续播放 第${h.episode}集'
+                      : '立即播放';
+                  return Text(ep);
+                },
+              ),
             )
           : null,
     );
