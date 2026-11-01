@@ -299,8 +299,14 @@ class MarketScanner {
   };
 
   static bool _isBlockedUrl(String url) {
-    final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
-    return _blockedHosts.contains(host);
+    // 全文包含而非仅 host 段：聚合页常见「代理前缀包裹」形态
+    // （https://g.xxx/https://js.134584.xyz/json/pp87.json），host 是代理域
+    // 但最终仍会请求报毒地址——杀软照样拦截用户流量。
+    final lower = url.toLowerCase();
+    for (final host in _blockedHosts) {
+      if (lower.contains(host)) return true;
+    }
+    return false;
   }
 
   /// 扫描种子清单。

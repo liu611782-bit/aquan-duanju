@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
+import '../core/error_log.dart';
 import '../core/bili/bili_adapter.dart';
 import '../core/bili/session.dart';
 import '../core/sources/source_adapter.dart';
@@ -298,6 +299,8 @@ class _BiliLoginSheetState extends State<_BiliLoginSheet> {
     super.dispose();
   }
 
+  DateTime _qrGeneratedAt = DateTime.now();
+
   Future<void> _generate() async {
     setState(() {
       _expired = false;
@@ -309,6 +312,7 @@ class _BiliLoginSheetState extends State<_BiliLoginSheet> {
       setState(() {
         _qrData = url;
         _qrcodeKey = key;
+        _qrGeneratedAt = DateTime.now();
         _status = '用 B 站 App 扫码登录';
       });
       _pollTimer?.cancel();
@@ -332,9 +336,16 @@ class _BiliLoginSheetState extends State<_BiliLoginSheet> {
           setState(() => _status = '已扫码，请在手机上确认');
         case BiliQrState.expired:
           _pollTimer?.cancel();
+          // 刚生成的二维码不可能立刻过期：多半是风控/接口异常把它伪装成了
+          // 过期（用户实测「二维码 2 秒后消失」）。不清码、按失败给刷新出口。
+          final tooFresh =
+              DateTime.now().difference(_qrGeneratedAt) <
+              const Duration(seconds: 60);
           setState(() {
             _expired = true;
-            _status = '二维码已过期';
+            _status = tooFresh
+                ? '轮询异常（可能被风控），点「刷新二维码」重试'
+                : '二维码已过期';
           });
         case BiliQrState.waiting:
           break;
@@ -342,7 +353,10 @@ class _BiliLoginSheetState extends State<_BiliLoginSheet> {
           _pollTimer?.cancel();
           setState(() => _status = '登录失败，请重试');
       }
-    } catch (_) {}
+    } catch (e, stack) {
+      // 之前空吞：轮询异常时用户只看到「二维码 2 秒后没了」，无任何证据。
+      ErrorLog.instance.record('B站扫码', e, stack);
+    }
   }
 
   @override

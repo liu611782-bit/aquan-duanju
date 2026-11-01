@@ -9,6 +9,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:screen_brightness/screen_brightness.dart';
+import 'package:screen_retriever/screen_retriever.dart' as sr;
 import 'package:share_plus/share_plus.dart';
 import 'package:smtc_windows/smtc_windows.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -436,11 +437,16 @@ class _PlayerScreenState extends State<PlayerScreen>
     _smtc = null;
     _engine.dispose();
     _disposed = true;
-    // 全屏/置顶残留会把主窗口卡在全屏态：退播放页时还原。
+    // 全屏/置顶残留会把主窗口卡在全屏态：退播放页时还原（含自建全屏的
+    // 标题栏与 bounds 恢复）。
     if (_isDesktop) {
-      windowManager.isFullScreen().then((full) {
-        if (full) windowManager.setFullScreen(false);
-      });
+      unawaited(() async {
+        try {
+          if (await windowManager.isFullScreen()) {
+            await _applyFullscreen(false);
+          }
+        } catch (_) {}
+      }());
     }
     WakelockPlus.disable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -504,21 +510,56 @@ class _PlayerScreenState extends State<PlayerScreen>
     } catch (_) {}
   }
 
+  /// 自建全屏：window_manager 0.5.2 的 Windows setFullScreen 只剥
+  /// THICKFRAME/MAXIMIZEBOX 而保留 WS_CAPTION（标题栏还在）且盖不住任务栏——
+  /// 用户实测「全屏后仍有状态栏」。这里显式：隐标题栏 + 窗口铺满显示器 + 原生
+  /// 标记同步；退出时按序还原。
+  Rect? _preFullscreenBounds;
+
+  Future<void> _applyFullscreen(bool on) async {
+    if (on) {
+      _preFullscreenBounds = await windowManager.getBounds();
+      await windowManager.setMinimumSize(const Size(0, 0));
+      await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+      try {
+        // screen_retriever 的坐标是逻辑像素，与 windowManager.setBounds 同一
+        // 体系；visiblePosition 是该屏工作区原点（多显示器下的偏移）。
+        final display = await sr.screenRetriever.getPrimaryDisplay();
+        final origin = display.visiblePosition ?? Offset.zero;
+        await windowManager.setBounds(Rect.fromLTWH(
+          origin.dx,
+          origin.dy,
+          display.size.width,
+          display.size.height,
+        ));
+      } catch (e, stack) {
+        ErrorLog.instance.record('全屏', '取显示器尺寸失败：$e', stack);
+      }
+      await windowManager.setFullScreen(true);
+    } else {
+      await windowManager.setFullScreen(false);
+      await windowManager.setTitleBarStyle(TitleBarStyle.normal);
+      await windowManager.setMinimumSize(const Size(380, 480));
+      final restore = _preFullscreenBounds;
+      if (restore != null) await windowManager.setBounds(restore);
+    }
+  }
+
   Future<void> _toggleFullscreen() async {
     if (!_isDesktop) return;
     try {
       if (_mini) await _toggleMiniWindow();
       final full = await windowManager.isFullScreen();
-      await windowManager.setFullScreen(!full);
-      // setFullScreen 是异步系统调用，执行完立即回读真实状态：
-      // 与目标不符（用户报过「全屏后仍有标题栏」）留痕进错误日志，
-      // 「我的」页可复制——空 catch 吞掉后这类问题永远无诊断证据。
+      final target = !full;
+      await _applyFullscreen(target);
+      // setFullScreen 是异步系统调用，执行完立即回读真实状态；
+      // 与目标不符（用户报过「全屏后仍有标题栏」）留痕进错误日志。
       await Future<void>.delayed(const Duration(milliseconds: 120));
       final actual = await windowManager.isFullScreen();
-      if (actual != !full) {
+      if (actual != target) {
         ErrorLog.instance.record(
           '全屏',
-          'setFullScreen(${"!full"}) 后回读 isFullScreen=$actual，与预期不符',
+          'setFullScreen($target) 后回读 isFullScreen=$actual，与预期不符',
         );
       }
     } catch (e, stack) {
@@ -2309,16 +2350,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!_isDesktop) return;
     try {
       if (!await windowManager.isFullScreen()) {
-        await windowManager.setFullScreen(true);
-        await Future<void>.delayed(const Duration(milliseconds: 120));
-        if (!await windowManager.isFullScreen()) {
-          // 首击在部分 Windows 环境（DPI 切换/窗口刚重建）会被吞：重试一次。
-          await windowManager.setFullScreen(true);
-          await Future<void>.delayed(const Duration(milliseconds: 120));
-          if (!await windowManager.isFullScreen()) {
-            ErrorLog.instance.record('全屏', '铺满两次尝试后 isFullScreen 仍为 false');
-          }
-        }
+        await _applyFullscreen(true);
       }
       if (mounted) setState(() => _fill = !_fill);
     } catch (e, stack) {

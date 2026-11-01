@@ -828,6 +828,25 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
                 enabled: _danmakuEnabled && _playing,
               ),
             ),
+            // 常驻悬浮返回：AppBar 只在控件条显示时出现，控件条 4 秒自动隐藏
+            // 后用户找不到返回（B站播放退不出的主诉）。这个按钮不随控件隐藏。
+            Positioned(
+              top: 10,
+              left: 10,
+              child: Material(
+                color: Colors.black.withValues(alpha: 0.45),
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: () => Navigator.of(context).maybePop(),
+                  child: const Padding(
+                    padding: EdgeInsets.all(8),
+                    child: Icon(Icons.arrow_back,
+                        color: Colors.white, size: 22),
+                  ),
+                ),
+              ),
+            ),
             if (_loading)
               const Center(child: CircularProgressIndicator()),
             if (_error != null)

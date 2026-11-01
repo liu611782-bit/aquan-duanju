@@ -12,6 +12,7 @@ import '../core/sources/qr_share_server.dart';
 import '../core/sources/source_probe.dart';
 import '../core/sources/source_registry.dart';
 import '../widgets/common.dart';
+import 'source_market_screen.dart';
 
 /// 源管理：增删改查 / 开关 / 钉选 / 排序 / 单源检测 / 导入导出 / 清缓存。
 class SourceManageScreen extends StatefulWidget {
@@ -25,6 +26,7 @@ class _SourceManageScreenState extends State<SourceManageScreen> {
   /// 单源测速/检测状态：sourceId → 展示文本。
   final Map<String, ProbeOutcome?> _probe = {};
   final Map<String, String> _checkText = {};
+  final Set<String> _probing = {};
   bool _probingAll = false;
 
   @override
@@ -41,6 +43,15 @@ class _SourceManageScreenState extends State<SourceManageScreen> {
       appBar: AppBar(
         title: const Text('源管理'),
         actions: [
+          IconButton(
+            tooltip: '源市场（自动扫描抓源）',
+            icon: const Icon(Icons.storefront_outlined),
+            onPressed: () async {
+              await Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const SourceMarketScreen()));
+              if (mounted) setState(() {});
+            },
+          ),
           IconButton(
             tooltip: '批量测速',
             icon: Icon(_probingAll ? Icons.hourglass_top : Icons.speed),
@@ -70,8 +81,27 @@ class _SourceManageScreenState extends State<SourceManageScreen> {
       ),
       body: sorted.isEmpty
           ? Center(
-              child: Text('还没有源，去「源市场」扫描或在此导入',
-                  style: TextStyle(color: theme.colorScheme.outline)))
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('还没有源',
+                      style: TextStyle(color: theme.colorScheme.outline)),
+                  const SizedBox(height: 8),
+                  Text('去「源市场」扫描抓源，或点右上角导入',
+                      style: TextStyle(color: theme.colorScheme.outline)),
+                  const SizedBox(height: 16),
+                  FilledButton.icon(
+                    onPressed: () async {
+                      await Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => const SourceMarketScreen()));
+                      if (mounted) setState(() {});
+                    },
+                    icon: const Icon(Icons.storefront_outlined),
+                    label: const Text('去源市场'),
+                  ),
+                ],
+              ),
+            )
           : ListView.builder(
               padding: const EdgeInsets.only(bottom: 24),
               itemCount: sorted.length,
@@ -109,6 +139,8 @@ class _SourceManageScreenState extends State<SourceManageScreen> {
                     children: [
                       Text(s.api,
                           maxLines: 1, overflow: TextOverflow.ellipsis),
+                      if (_probing.contains(s.id))
+                        const Text('测速中…'),
                       if (probe != null) _probeText(probe, theme),
                       if (check != null) Text(check, style: theme.textTheme.bodySmall),
                       if (health.coolingDown(s.id))
@@ -215,11 +247,21 @@ class _SourceManageScreenState extends State<SourceManageScreen> {
   }
 
   Future<void> _probeOne(AppScope scope, SourceConfig s) async {
-    final outcome = await probeSource(s,
-        timeout: Duration(milliseconds: scope.settings.sourcesProbeTimeoutMs));
-    await _recordProbeHealth(scope, s.kind, outcome);
-    if (!mounted) return;
-    setState(() => _probe[s.id] = outcome);
+    // 测速是网络调用，短则几百毫秒长则超时：先给「测速中」反馈，
+    // 否则用户点了行内菜单看不到任何动静（「点测试没有反应」的主诉）。
+    setState(() => _probing.add(s.id));
+    try {
+      final outcome = await probeSource(s,
+          timeout: Duration(milliseconds: scope.settings.sourcesProbeTimeoutMs));
+      await _recordProbeHealth(scope, s.kind, outcome);
+      if (!mounted) return;
+      setState(() {
+        _probing.remove(s.id);
+        _probe[s.id] = outcome;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _probing.remove(s.id));
+    }
   }
 
   Future<void> _probeAll(List<SourceConfig> sources) async {

@@ -4,18 +4,34 @@ import 'source_market.dart';
 
 /// 导入结果。
 class ImportOutcome {
-  const ImportOutcome({required this.imported, required this.skipped});
+  const ImportOutcome({
+    required this.imported,
+    required this.skipped,
+    this.configs = 0,
+  });
 
   const ImportOutcome.empty()
       : imported = 0,
-        skipped = 0;
+        skipped = 0,
+        configs = 0;
 
   final int imported;
   final int skipped;
 
-  String get message => imported > 0
-      ? '导入 $imported 条${skipped > 0 ? '，跳过 $skipped 条重复' : ''}'
-      : (skipped > 0 ? '所选源都已存在' : '没有可导入的源');
+  /// 本次实际勾选的配置节点数（一个配置可展开出多个站点候选）。
+  final int configs;
+
+  String get message {
+    if (imported > 0) {
+      // 「入库所选」勾的是配置节点，落库的是节点内的站点候选——
+      // 数字对不上时用户会以为导错了，把换算关系写明白。
+      final scale = configs > 0 && configs != imported
+          ? '（$configs 个配置展开 $imported 个站点）'
+          : '';
+      return '导入 $imported 条$scale${skipped > 0 ? '，跳过 $skipped 条重复' : ''}';
+    }
+    return skipped > 0 ? '所选源都已存在' : '没有可导入的源';
+  }
 }
 
 /// 把扫描结果写进源注册表。
@@ -29,8 +45,10 @@ class MarketImporter {
   ) async {
     final candidates = <SourceCandidate>[];
     final seen = <String>{};
+    var configCount = 0;
     for (final node in nodes) {
       if (!node.available || node.isMulti) continue;
+      configCount++;
       for (final candidate in node.candidates) {
         if (!candidate.usable) continue;
         final key = '${candidate.kind.name}|${_normalizeApi(candidate.api)}';
@@ -43,6 +61,7 @@ class MarketImporter {
     return ImportOutcome(
       imported: added,
       skipped: candidates.length - added,
+      configs: configCount,
     );
   }
 
