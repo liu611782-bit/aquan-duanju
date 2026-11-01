@@ -136,6 +136,9 @@ class _FakePlayer implements PlayerEngine {
   int stops = 0;
   int playOrPauses = 0;
 
+  /// 非 null 时 `stop()` 挂起等它的 future，用于模拟原生桥卡住。
+  Completer<void>? stopBlock;
+
   @override
   PlayerStream get stream => feed;
 
@@ -149,7 +152,10 @@ class _FakePlayer implements PlayerEngine {
   Future<void> playOrPause() async => playOrPauses++;
 
   @override
-  Future<void> stop() async => stops++;
+  Future<void> stop() async {
+    stops++;
+    if (stopBlock != null) await stopBlock!.future;
+  }
 
   @override
   Future<void> seek(Duration position) async => seeks.add(position);
@@ -361,6 +367,43 @@ void main() {
       reason: '时间点必须与音频成对',
     );
   }
+
+  group('结束朗读立即收起朗读条（fix: 不消失主诉）', () {
+    test('stop 卡住时 isFor/isActive 也随 close() 同步前缀翻 false', () async {
+      final controller = build(_FakeTts());
+      await start(controller);
+      expect(controller.isFor('7001'), isTrue);
+      expect(controller.isActive, isTrue);
+
+      // 让 _engine.stop() 永不返回，模拟原生桥卡住。
+      player.stopBlock = Completer<void>();
+      final closeFuture = controller.close();
+
+      // close() 同步前缀已落下 _finalizing：不依赖 stop 是否完成，条判定即时失效。
+      expect(controller.isFor('7001'), isFalse);
+      expect(controller.isActive, isFalse);
+
+      await pumpEventQueue();
+      expect(controller.isActive, isFalse, reason: 'stop 仍卡住时不得复活');
+      expect(player.stops, 1);
+
+      // 放行 stop，收尾不悬挂（tearDown 会 dispose）。
+      player.stopBlock!.complete();
+      await closeFuture;
+    });
+
+    test('close() 后重新 start() 复位关闭闸，朗读条判定恢复', () async {
+      final controller = build(_FakeTts());
+      await start(controller);
+      await controller.close();
+      expect(controller.isActive, isFalse);
+      expect(controller.isFor('7001'), isFalse);
+
+      await start(controller);
+      expect(controller.isFor('7001'), isTrue);
+      expect(controller.isActive, isTrue);
+    });
+  });
 
   group('无平台音色时改走本地合成', () {
     test('不再报「没有可用的朗读音色」，而是合成后开播并成对落盘', () async {

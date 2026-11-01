@@ -158,6 +158,10 @@ class ReaderSpeechController extends ChangeNotifier {
   final TtsEngineFallback _ttsEngineFallback;
 
   String _bookId = '';
+  /// close() 进行中闸：进入即置 true，使 [isFor]/[isActive] 立刻翻 false（朗读条即时
+  /// 消失），不依赖后续 `_engine.stop()` 是否卡住；[start] 复位。**只服务主动结束，
+  /// 不影响错误态**（失败时不调 close，`_bookId` 保留、条仍可见，见 listen-tts-contract）。
+  bool _finalizing = false;
   String _bookTitle = '';
   String _coverUrl = '';
   List<BookChapter> _chapters = const <BookChapter>[];
@@ -415,14 +419,14 @@ class ReaderSpeechController extends ChangeNotifier {
   }
 
   /// 是否有正在进行的朗读会话（用于全局迷你条与页面接管判断）。
-  bool get isActive => _bookId.isNotEmpty;
+  bool get isActive => !_finalizing && _bookId.isNotEmpty;
 
   BookChapter? get currentChapter =>
       _chapterIndex >= 0 && _chapterIndex < _chapters.length
       ? _chapters[_chapterIndex]
       : null;
 
-  bool isFor(String bookId) => _bookId == bookId;
+  bool isFor(String bookId) => !_finalizing && _bookId == bookId;
 
   /// 阅读页把「清洗后的段落数」告诉控制器：段落下标只能由这个数字收敛。
   ///
@@ -447,6 +451,7 @@ class ReaderSpeechController extends ChangeNotifier {
     double startRatio = 0,
     int toneId = 0,
   }) async {
+    _finalizing = false; // 新会话复位关闭闸，恢复 isFor/isActive 判定
     final sameSession = _bookId == bookId && _playing;
     _bookId = bookId;
     _bookTitle = bookTitle;
@@ -581,7 +586,17 @@ class ReaderSpeechController extends ChangeNotifier {
     // 的世代号会让进行中的合成结果作废。
     _useTts = false;
     await _saveProgress();
-    await _openChapter(_chapterIndex, keepPosition: true);
+    // 换音色 = 换一条平台音轨：不同 tone 的时长与毫秒各不相同，把旧音轨的
+    // `_position`（`keepPosition` 走毫秒 seek）灌进新音轨就是错的落点，实测会塌回
+    // 段 0 从章首重读。与 setTtsVoice / setPreferredPath 同口径：用「段落 + 段内比例」
+    // 锚点续读（轨道无关），落到新音轨对应段起点。
+    final anchor = _currentAnchor();
+    await _openChapter(
+      _chapterIndex,
+      startParagraph: anchor.$1,
+      startRatio: anchor.$2,
+      explicitStart: true,
+    );
     ErrorLog.instance.record('听书音色',
         'setTone(${tone.id}) 完成：tone=${_tone?.id} 段落=$_paragraphIndex'
         '/$_paragraphCount 高亮缓存已重建');
@@ -812,8 +827,10 @@ class ReaderSpeechController extends ChangeNotifier {
     // 世代号 +1 就是中止信号：编排层每个 await 之后都问一次 `isCurrent`，
     // 进行中的合成会在下一段边界抛 `cancelled` 自行退出（不留半成品）。
     _epoch++;
-    // 先发一次 notify 让阅读页的朗读条立刻消失（原来 notify 在整串收尾
-    // await 之后，中途抛错的话条会一直挂着——「结束朗读不消失」的主诉）。
+    // 关闭闸先落下：isFor/isActive 随即翻 false，底部朗读条与全局迷你条立刻消失。
+    // 仅把 notify 放在 `_bookId=''` 之前没用——显隐判据读的就是 `_bookId`，只要
+    // `await _engine.stop()` 卡住或抛错，条就一直挂着（「结束朗读不消失」主诉）。
+    _finalizing = true;
     notify();
     // close 也是预取的失效点（注意事项 5）：去重集独立于缓存键，不一起清会让
     // 下一次会话误判「已预取」。

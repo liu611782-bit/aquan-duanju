@@ -1941,15 +1941,22 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   /// 听书控制条：只在「正在读这本书」时出现。
+  ///
+  /// `isFor` 判定必须放进 `ListenableBuilder` 内部：`close()` 只 notify 控制器，
+  /// 不会重建整个 Scaffold（听书性能契约里 `_onSpeechChanged` 刻意不做整页 setState），
+  /// 若把 `isFor` 留在外层，关闭时这一判断不会被重新评估 → 朗读条「点了不消失」。
+  /// 配合控制器的 `_finalizing`（close 进入即让 isFor 翻 false），首次 notify 即隐条。
   Widget? _speechBar(BuildContext context) {
     final speech = _speech;
-    if (speech == null || !speech.isFor(widget.bookId)) return null;
+    if (speech == null) return null;
     return ListenableBuilder(
       listenable: speech,
-      builder: (context, _) => ReaderAudioBar(
-        controller: speech,
-        onClose: () => unawaited(speech.close()),
-      ),
+      builder: (context, _) => !speech.isFor(widget.bookId)
+          ? const SizedBox.shrink()
+          : ReaderAudioBar(
+              controller: speech,
+              onClose: () => unawaited(speech.close()),
+            ),
     );
   }
 
