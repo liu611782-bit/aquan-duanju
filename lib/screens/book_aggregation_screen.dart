@@ -3,12 +3,13 @@ import 'dart:convert';
 
 
 import '../core/books/book_source_model.dart';
-import '../core/books/book_source_runtime.dart';
+import '../core/books/book_source_service.dart';
 import '../core/books/book_source_store.dart';
 import '../core/error_log.dart';
 import '../core/sources/source_fetch.dart';
 import '../models/book.dart';
 import '../widgets/common.dart';
+import 'book_source_market_screen.dart';
 import 'reader_screen.dart';
 
 /// 小说聚合：legado 书源聚合搜索 → 书详情/目录 → 接现有阅读器。
@@ -24,7 +25,7 @@ class BookAggregationScreen extends StatefulWidget {
 
 class _BookAggregationScreenState extends State<BookAggregationScreen> {
   final _queryController = TextEditingController();
-  final _runtime = BookSourceRuntime();
+  final _service = BookSourceService();
   final _hits = <(BookSource, BookHit)>[];
   bool _searching = false;
 
@@ -58,7 +59,7 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
       for (final s in sources)
         () async {
           try {
-            return (s, await _runtime.search(s, query));
+            return (s, await _service.search(s, query));
           } catch (e) {
             ErrorLog.instance.record('书源搜索', '${s.name}：$e');
             return (s, const <BookHit>[]);
@@ -88,6 +89,12 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
       appBar: AppBar(
         title: const Text('小说聚合'),
         actions: [
+          IconButton(
+            tooltip: '书源仓库',
+            icon: const Icon(Icons.storefront_outlined),
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => const BookSourceMarketScreen())),
+          ),
           IconButton(
             tooltip: '书源管理',
             icon: const Icon(Icons.tune),
@@ -195,7 +202,7 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
   Future<void> _openBook(BookSource source, BookHit hit) async {
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => _BookSourceBookPage(
-        runtime: _runtime,
+        service: _service,
         source: source,
         hit: hit,
       ),
@@ -488,12 +495,12 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
 /// 外部书源的书详情：封面/简介/目录 → 点章进阅读器（textLoader 注入）。
 class _BookSourceBookPage extends StatefulWidget {
   const _BookSourceBookPage({
-    required this.runtime,
+    required this.service,
     required this.source,
     required this.hit,
   });
 
-  final BookSourceRuntime runtime;
+  final BookSourceService service;
   final BookSource source;
   final BookHit hit;
 
@@ -502,7 +509,7 @@ class _BookSourceBookPage extends StatefulWidget {
 }
 
 class _BookSourceBookPageState extends State<_BookSourceBookPage> {
-  BookInfo? _info;
+  BookDetailData? _info;
   Object? _error;
   bool _loading = true;
 
@@ -514,8 +521,8 @@ class _BookSourceBookPageState extends State<_BookSourceBookPage> {
 
   Future<void> _load() async {
     try {
-      final info = await widget.runtime
-          .bookInfo(widget.source, widget.hit.bookUrl)
+      final info = await widget.service
+          .detail(widget.source, widget.hit.bookUrl)
           .timeout(const Duration(seconds: 30));
       if (!mounted) return;
       setState(() {
@@ -621,7 +628,7 @@ class _BookSourceBookPageState extends State<_BookSourceBookPage> {
                                     initialIndex: bookChapters
                                         .indexWhere((b) => b.id == c.url)
                                         .clamp(0, bookChapters.length - 1),
-                                    textLoader: (chapter) => widget.runtime
+                                    textLoader: (chapter) => widget.service
                                         .content(widget.source, chapter.id),
                                   ),
                                 ));

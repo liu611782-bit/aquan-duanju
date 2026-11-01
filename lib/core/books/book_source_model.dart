@@ -1,3 +1,8 @@
+import 'dart:convert';
+
+/// 书源方言（可插拔多格式引擎的第一层：按格式分派到对应运行时）。
+enum BookSourceFormat { legado, soNovel }
+
 /// legado（阅读3.0）书源模型——本项目支持的字段子集。
 ///
 /// 只取「搜书 → 详情 → 目录 → 正文」链路必需的字段；`js:` 一类脚本规则
@@ -13,6 +18,8 @@ class BookSource {
     this.ruleBookInfo = const BookRuleGroup.empty(),
     this.ruleToc = const BookTocRule.empty(),
     this.ruleContent = const BookContentRule.empty(),
+    this.format = BookSourceFormat.legado,
+    this.rawRuleJson = '',
   });
 
   /// 书源自身地址（legado `bookSourceUrl`，作唯一键）。
@@ -28,8 +35,16 @@ class BookSource {
   final BookTocRule ruleToc;
   final BookContentRule ruleContent;
 
+  /// 方言：legado 走 `BookSourceRuntime`；soNovel 走 `SoNovelRuntime`（用 [rawRuleJson]）。
+  final BookSourceFormat format;
+
+  /// so-novel 等方言的原样源 JSON（format != legado 时非空，供专用运行时解析）。
+  final String rawRuleJson;
+
   /// 规则里出现 `js:` / `<js>` / `@js:` / 内嵌 `{{...js}}` → 本引擎不支持。
   bool get requiresJs {
+    // so-novel 方言自带 @js: 执行（SoNovelRuntime/SoNovelFunc），不走 legado 拒绝。
+    if (format == BookSourceFormat.soNovel) return false;
     final all = [
       searchUrl,
       ...ruleSearch.values,
@@ -48,7 +63,36 @@ class BookSource {
 
   String get id => url;
 
+  /// 换启用态重建（市场导入：可用即启用、失败源导入但停用）。
+  BookSource copyWithEnabled(bool enabled) => BookSource(
+        url: url,
+        name: name,
+        group: group,
+        enabled: enabled,
+        searchUrl: searchUrl,
+        ruleSearch: ruleSearch,
+        ruleBookInfo: ruleBookInfo,
+        ruleToc: ruleToc,
+        ruleContent: ruleContent,
+        format: format,
+        rawRuleJson: rawRuleJson,
+      );
+
   factory BookSource.fromJson(Map<String, dynamic> json) {
+    // so-novel 方言指纹：无 bookSourceUrl，但有 url + search/toc/chapter 之一。
+    if (!json.containsKey('bookSourceUrl') &&
+        json.containsKey('url') &&
+        (json.containsKey('search') ||
+            json.containsKey('toc') ||
+            json.containsKey('chapter'))) {
+      return BookSource(
+        url: json['url']?.toString() ?? '',
+        name: json['name']?.toString() ?? '',
+        enabled: json['disabled'] != true,
+        format: BookSourceFormat.soNovel,
+        rawRuleJson: jsonEncode(json),
+      );
+    }
     Map<String, dynamic> group(Object? raw) =>
         raw is Map<String, dynamic> ? raw : const {};
     return BookSource(
@@ -82,7 +126,16 @@ class BookSource {
     return const [];
   }
 
-  Map<String, dynamic> toJson() => {
+  Map<String, dynamic> toJson() {
+    if (format == BookSourceFormat.soNovel) {
+      // 原样回写 so-novel Rule（含 search/toc/chapter 指纹，fromJson 会重新识别）。
+      try {
+        final decoded = jsonDecode(rawRuleJson);
+        if (decoded is Map<String, dynamic>) return decoded;
+      } catch (_) {}
+      return <String, dynamic>{'url': url, 'name': name};
+    }
+    return {
         'bookSourceUrl': url,
         'bookSourceName': name,
         'bookSourceGroup': group,
@@ -93,6 +146,7 @@ class BookSource {
         'ruleToc': ruleToc.toJson(),
         'ruleContent': ruleContent.toJson(),
       };
+  }
 }
 
 /// 搜索/详情共用的字段规则组（字段名 → 规则字符串）。
