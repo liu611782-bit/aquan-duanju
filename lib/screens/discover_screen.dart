@@ -14,7 +14,6 @@ import 'filter_screen.dart';
 import 'media_hub_screen.dart';
 import 'releases_screen.dart';
 import 'search_screen.dart';
-import 'source_manage_screen.dart';
 import 'venera_manga_screen.dart';
 
 /// 发现页：内容类型条 + 类型内频道条 + 多列网格（分页加载）。
@@ -371,9 +370,6 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                     // 统一 IA：每个 tag 两张入口卡——「XX聚合」+「按分类找XX」。
                     for (final entry in _entriesFor(_type))
                       SliverToBoxAdapter(child: entry),
-                    // 短剧 tab 保留源管理（扫完源回这里选源看视频）。
-                    if (_type.name == '短剧')
-                      const SliverToBoxAdapter(child: _SourceManageEntry()),
                     // 继续观看只在影视类 tab；「最近在读」按小说/漫画分域
                     // （各 tag 的历史记录互不混排）。
                     if (_type.kind == ContentKind.video)
@@ -466,53 +462,6 @@ class _EntryCard extends StatelessWidget {
   }
 }
 
-/// 影视源管理入口卡：扫描/启用/禁用影视源的显眼入口。
-/// 原先只藏在聚合页 AppBar 的小图标里，扫完源的用户找不到"去哪选源看视频"。
-class _SourceManageEntry extends StatelessWidget {
-  const _SourceManageEntry();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-      child: Card(
-        margin: EdgeInsets.zero,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => const SourceManageScreen()),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              children: [
-                Icon(Icons.tune, color: theme.colorScheme.primary),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('影视源管理', style: theme.textTheme.titleMedium),
-                      Text(
-                        '扫描源库并勾选启用；启用后即可在聚合里搜片观看',
-                        style: theme.textTheme.bodySmall
-                            ?.copyWith(color: theme.colorScheme.outline),
-                      ),
-                    ],
-                  ),
-                ),
-                const Icon(Icons.chevron_right),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// 一级：内容类型条。字号 + 字重 + 底部指示条表达选中态。
 class _ContentTypeBar extends StatelessWidget {
   const _ContentTypeBar({required this.selected, required this.onSelect});
 
