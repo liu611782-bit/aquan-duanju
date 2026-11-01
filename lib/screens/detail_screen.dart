@@ -258,7 +258,9 @@ class _DetailScreenState extends State<DetailScreen> {
     final theme = Theme.of(context);
     final items = _sameName;
     if (items == null) return const SizedBox.shrink();
-    final seasons = _album?.seasons ?? const <Series>[];
+    // Season 不是 SeriesSummary 的子类：cast 懒视图会在 build 迭代时抛
+    // TypeError（release 表现为整页灰），两套 tile 必须分开渲染。
+    final seasons = _album?.seasons ?? const <Season>[];
     final series = [
       for (final s in items)
         if (_seasonMark.hasMatch(s.title) || _seasonMark.hasMatch(s.description))
@@ -313,6 +315,33 @@ class _DetailScreenState extends State<DetailScreen> {
             ),
         ];
 
+    List<Widget> seasonTiles() => [
+          for (final s in seasons)
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: SizedBox(
+                width: 44,
+                height: 60,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: CoverImage(url: s.coverUrl),
+                ),
+              ),
+              title: Text(s.title,
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle: Text(
+                  s.seriesId == widget.seriesId
+                      ? '当前季'
+                      : '共${s.episodeCount}集',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+              onTap: s.seriesId == widget.seriesId
+                  ? null
+                  : () => openDetail(context, s.seriesId, s.title),
+            ),
+        ];
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
       child: Column(
@@ -321,7 +350,7 @@ class _DetailScreenState extends State<DetailScreen> {
           Text('同名系列',
               style: theme.textTheme.titleMedium
                   ?.copyWith(fontWeight: FontWeight.bold)),
-          group('季与合集', tileList(seasons.cast<SeriesSummary>())),
+          group('季与合集', seasonTiles()),
           group('同名系列', tileList(series)),
           group('同名单剧', tileList(singles)),
         ],
