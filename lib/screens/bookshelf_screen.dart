@@ -15,8 +15,10 @@ import '../widgets/shelf_3d.dart';
 import 'book_audio_screen.dart';
 import 'book_detail_screen.dart';
 import 'dictionary_screen.dart';
+import 'mini_reading_window.dart';
 import 'reader_screen.dart';
 import 'reading_stats_screen.dart';
+import 'sync_screen.dart';
 
 /// 书架：在读的小说与漫画，可继续、可移除、可排序。
 class BookshelfScreen extends StatefulWidget {
@@ -629,6 +631,14 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                         builder: (_) => const DictionaryScreen(),
                       ));
                     }
+                    if (value == 'sync') {
+                      Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) => const SyncScreen(),
+                      ));
+                    }
+                    if (value == 'mini') {
+                      MiniReadingWindow.open(context);
+                    }
                   },
                   itemBuilder: (context) => const [
                     PopupMenuItem(
@@ -649,6 +659,26 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                         leading: Icon(Icons.translate_outlined),
                         title: Text('离线词典'),
                         subtitle: Text('导入 StarDict，阅读时查词'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'sync',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.cloud_sync_outlined),
+                        title: Text('云同步'),
+                        subtitle: Text('WebDAV / S3 备份与合并恢复'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'mini',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.picture_in_picture_alt_outlined),
+                        title: Text('阅读浮窗'),
+                        subtitle: Text('置顶迷你窗：今日时长与在读进度'),
                       ),
                     ),
                   ],
