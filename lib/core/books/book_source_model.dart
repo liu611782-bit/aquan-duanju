@@ -1,7 +1,29 @@
 import 'dart:convert';
 
-/// 书源方言（可插拔多格式引擎的第一层：按格式分派到对应运行时）。
-enum BookSourceFormat { legado, soNovel }
+/// 书源方言（可插拔多格式引擎的第一层：按格式分派到对应 provider/runtime）。
+///
+/// 新增方言只需：枚举加值 + 写一个 `BookSourceProvider` 并注册，分派代码不动。
+enum BookSourceFormat {
+  /// legado（阅读3.0）规则源，走 `BookSourceRuntime`。
+  legado,
+
+  /// so-novel 规则源（`rawRuleJson` 承载原样 JSON），走 `SoNovelRuntime`。
+  soNovel,
+
+  /// 内置站点 provider（轻小说文库 Wenku8），公开页只读。
+  wenku8,
+
+  /// 本地导入书（虚拟源，`bookUrl = localbook:<id>`）。
+  local;
+
+  /// 持久化字符串 → 枚举；未知值回落 [legado]（历史数据兼容）。
+  static BookSourceFormat parse(Object? name) {
+    for (final v in values) {
+      if (v.name == name) return v;
+    }
+    return legado;
+  }
+}
 
 /// legado（阅读3.0）书源模型——本项目支持的字段子集。
 ///
@@ -48,8 +70,9 @@ class BookSource {
 
   /// 规则里出现 `js:` / `<js>` / `@js:` / 内嵌 `{{...js}}` → 本引擎不支持。
   bool get requiresJs {
-    // so-novel 方言自带 @js: 执行（SoNovelRuntime/SoNovelFunc），不走 legado 拒绝。
-    if (format == BookSourceFormat.soNovel) return false;
+    // 只有 legado 方言用本工程的 js 规则语法；其它方言各自处理（so-novel 自带 @js:、
+    // wenku8 内置解析、local 无规则），不得把关卡套到它们头上。
+    if (format != BookSourceFormat.legado) return false;
     final all = [
       searchUrl,
       ...ruleSearch.values,
@@ -107,6 +130,7 @@ class BookSource {
       group: json['bookSourceGroup']?.toString() ?? '',
       enabled: json['enabled'] is bool ? json['enabled'] as bool : true,
       searchUrl: json['searchUrl']?.toString() ?? '',
+      format: BookSourceFormat.parse(json['aquanFormat']),
       ruleSearch: BookRuleGroup.fromJson(group(json['ruleSearch'])),
       ruleBookInfo: BookRuleGroup.fromJson(group(json['ruleBookInfo'])),
       ruleToc: BookTocRule.fromJson(group(json['ruleToc'])),
@@ -168,6 +192,8 @@ class BookSource {
         'ruleToc': ruleToc.toJson(),
         'ruleContent': ruleContent.toJson(),
         if (jsLib.isNotEmpty) 'jsLib': jsLib,
+        // 方言往返：legado 键名与其它方言不相交，靠显式字段保真（本地/内置源必需）。
+        if (format != BookSourceFormat.legado) 'aquanFormat': format.name,
       };
   }
 }
@@ -354,3 +380,22 @@ class BookSourceCheck {
 }
 
 enum BookCheckStage { none, search, bookInfo, content }
+
+/// 详情聚合返回（**所有方言统一的数据面**）。
+///
+/// 由各 provider 的 `detail` 产出，上层（详情页/阅读器）只认这个类型。
+class BookDetailData {
+  const BookDetailData({
+    this.name = '',
+    this.author = '',
+    this.intro = '',
+    this.coverUrl = '',
+    this.chapters = const [],
+  });
+
+  final String name;
+  final String author;
+  final String intro;
+  final String coverUrl;
+  final List<BookTocItem> chapters;
+}
