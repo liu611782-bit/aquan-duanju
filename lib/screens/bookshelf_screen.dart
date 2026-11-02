@@ -14,7 +14,9 @@ import '../widgets/common.dart';
 import '../widgets/shelf_3d.dart';
 import 'book_audio_screen.dart';
 import 'book_detail_screen.dart';
+import 'dictionary_screen.dart';
 import 'reader_screen.dart';
+import 'reading_stats_screen.dart';
 
 /// 书架：在读的小说与漫画，可继续、可移除、可排序。
 class BookshelfScreen extends StatefulWidget {
@@ -612,6 +614,44 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                   tooltip: '清空',
                   icon: const Icon(Icons.delete_sweep_outlined),
                   onPressed: () => _clearAll(context),
+                ),
+                PopupMenuButton<String>(
+                  tooltip: '更多',
+                  icon: const Icon(Icons.more_vert),
+                  onSelected: (value) {
+                    if (value == 'stats') {
+                      Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) => const ReadingStatsScreen(),
+                      ));
+                    }
+                    if (value == 'dict') {
+                      Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) => const DictionaryScreen(),
+                      ));
+                    }
+                  },
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(
+                      value: 'stats',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.insights_outlined),
+                        title: Text('阅读统计'),
+                        subtitle: Text('时长热力图 · 按书排行 · 摘录卡'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'dict',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.translate_outlined),
+                        title: Text('离线词典'),
+                        subtitle: Text('导入 StarDict，阅读时查词'),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),

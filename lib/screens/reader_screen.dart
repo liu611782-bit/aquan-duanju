@@ -10,6 +10,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../core/aqua_error.dart';
 import '../core/books/formats/book_block.dart';
 import '../core/reader/rich_paragraph.dart';
+import '../core/stats/reading_stats.dart';
 import '../widgets/rich_reader_view.dart';
 import '../core/reader/reader_click_action.dart';
 import '../core/reader/reader_page_metrics.dart';
@@ -534,6 +535,10 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Timer? _autoTimer;
 
+  /// 阅读时长统计（30s 一次，仅前台计时）。
+  Timer? _statsTimer;
+  ReadingStatsTicker? _statsTicker;
+
   /// 连续阅读时：当前章内比例与段落下标（用于进度与听书对齐）。
   double _continuousRatio = 0;
   int _paragraphIndex = 0;
@@ -711,6 +716,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     });
     _syncAutoTimer();
     _applyScreenSettings();
+    _startStatsTicker();
     _load(
       _index,
       restore: widget.restoreOffset > 0 || widget.restoreCharOffset >= 0,
@@ -733,6 +739,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _replaceRules.removeListener(_onReplaceRulesChanged);
     _saveTimer?.cancel();
     _autoTimer?.cancel();
+    _statsTimer?.cancel();
     _follow.dispose();
     _scroll.removeListener(_onScroll);
     _scroll.dispose();
@@ -2077,6 +2084,24 @@ class _ReaderScreenState extends State<ReaderScreen>
         imageLoader: widget.imageLoader,
       ),
     );
+  }
+
+  /// 阅读时长统计：每 30s 落一次，仅在「已就绪 + 本页在栈顶」时计。
+  void _startStatsTicker() {
+    _statsTimer?.cancel();
+    _statsTicker = ReadingStatsTicker(
+      store: ReadingStatsStore.shared,
+      bookId: widget.bookId,
+      isActive: () {
+        if (!mounted || !_ready || _loading) return false;
+        final route = ModalRoute.of(context);
+        return route?.isCurrent ?? true;
+      },
+    );
+    _statsTimer = Timer.periodic(_statsTicker!.interval, (_) {
+      // ignore: discarded_futures
+      _statsTicker?.tick();
+    });
   }
 
   void _showNote(String note) {
