@@ -4,6 +4,7 @@ import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 
+import '../../book_markup.dart';
 import '../../ffi_bridge.dart';
 import '../../sources/source_import.dart';
 import '../book_rule.dart';
@@ -349,11 +350,15 @@ class LegadoJsHost {
       throw StateError('syncHttp: ${resp['error']['message']}');
     }
     final result = resp['result'] as Map<String, dynamic>;
+    final bodyBytes = base64.decode('${result['bodyB64']}');
+    final headers = result['headers'];
+    final contentType = headers is Map
+        ? (headers['content-type'] ?? headers['Content-Type'])?.toString()
+        : null;
     return jsonEncode({
       'status': result['status'],
-      'headers': result['headers'],
-      'body': utf8.decode(
-          base64.decode('${result['bodyB64']}'), allowMalformed: true),
+      'headers': headers,
+      'body': decodeMarkupText(bodyBytes, contentType: contentType),
     });
   }
 

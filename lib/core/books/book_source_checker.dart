@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'book_source_model.dart';
@@ -60,14 +61,16 @@ class BookSourceChecker {
         source: source,
         ok: false,
         stage: BookCheckStage.search,
-        reason: '$e',
+        reason: describeBookCheckFailure(e),
       );
     }
     var chapterCount = 0;
     var contentLength = 0;
+    List<BookTocItem> chapters;
     try {
       final info = await rt.bookInfo(source, hit.bookUrl);
-      chapterCount = info.chapters
+      chapters = info.chapters;
+      chapterCount = chapters
           .where((c) => c.title.trim().isNotEmpty && c.url.isNotEmpty)
           .length;
       if (chapterCount == 0) {
@@ -79,10 +82,22 @@ class BookSourceChecker {
           sampleHit: hit,
         );
       }
-      if (fetchContent) {
+    } catch (e) {
+      return BookSourceCheck(
+        source: source,
+        ok: false,
+        stage: BookCheckStage.bookInfo,
+        reason: describeBookCheckFailure(e),
+        sampleHit: hit,
+        sampleChapterCount: chapterCount,
+      );
+    }
+    if (fetchContent) {
+      // 正文阶段单独 try：过去与目录共用 catch，正文失败被误标成 bookInfo。
+      try {
         final text = await rt.content(
           source,
-          info.chapters.firstWhere((c) => c.url.isNotEmpty).url,
+          chapters.firstWhere((c) => c.url.isNotEmpty).url,
         );
         contentLength = text.trim().length;
         if (contentLength < 30) {
@@ -95,16 +110,16 @@ class BookSourceChecker {
             sampleChapterCount: chapterCount,
           );
         }
+      } catch (e) {
+        return BookSourceCheck(
+          source: source,
+          ok: false,
+          stage: BookCheckStage.content,
+          reason: describeBookCheckFailure(e),
+          sampleHit: hit,
+          sampleChapterCount: chapterCount,
+        );
       }
-    } catch (e) {
-      return BookSourceCheck(
-        source: source,
-        ok: false,
-        stage: BookCheckStage.bookInfo,
-        reason: '$e',
-        sampleHit: hit,
-        sampleChapterCount: chapterCount,
-      );
     }
     return BookSourceCheck(
       source: source,
@@ -153,14 +168,15 @@ class BookSourceChecker {
         source: source,
         ok: false,
         stage: BookCheckStage.search,
-        reason: '$e',
+        reason: describeBookCheckFailure(e),
       );
     }
     var chapterCount = 0;
     var contentLength = 0;
+    List<BookTocItem> chapters;
     try {
       await rt.bookInfo(rule, hit.bookUrl);
-      final chapters = await rt.toc(rule, hit.bookUrl);
+      chapters = await rt.toc(rule, hit.bookUrl);
       chapterCount = chapters
           .where((c) => c.title.trim().isNotEmpty && c.url.isNotEmpty)
           .length;
@@ -173,7 +189,18 @@ class BookSourceChecker {
           sampleHit: hit,
         );
       }
-      if (fetchContent) {
+    } catch (e) {
+      return BookSourceCheck(
+        source: source,
+        ok: false,
+        stage: BookCheckStage.bookInfo,
+        reason: describeBookCheckFailure(e),
+        sampleHit: hit,
+        sampleChapterCount: chapterCount,
+      );
+    }
+    if (fetchContent) {
+      try {
         final text = await rt.content(
           rule,
           chapters.firstWhere((c) => c.url.isNotEmpty).url,
@@ -189,16 +216,16 @@ class BookSourceChecker {
             sampleChapterCount: chapterCount,
           );
         }
+      } catch (e) {
+        return BookSourceCheck(
+          source: source,
+          ok: false,
+          stage: BookCheckStage.content,
+          reason: describeBookCheckFailure(e),
+          sampleHit: hit,
+          sampleChapterCount: chapterCount,
+        );
       }
-    } catch (e) {
-      return BookSourceCheck(
-        source: source,
-        ok: false,
-        stage: BookCheckStage.bookInfo,
-        reason: '$e',
-        sampleHit: hit,
-        sampleChapterCount: chapterCount,
-      );
     }
     return BookSourceCheck(
       source: source,
@@ -208,4 +235,39 @@ class BookSourceChecker {
       sampleContentLength: contentLength,
     );
   }
+}
+
+/// 把校验链上的异常翻成「分类原因 + 原始信息」。
+///
+/// 分类只用于让用户一眼看出是网络、SSRF、超时还是规则/js 问题；
+/// 原始信息一律保留在冒号后面，便于定位（禁止吞掉）。
+String describeBookCheckFailure(Object e) {
+  final raw = e
+      .toString()
+      .replaceFirst(
+        RegExp(
+            r'^(Exception|StateError|FormatException|BookSourceException|'
+            r'SoNovelException|LegadoJsException|SoNovelSelectorException):\s*'),
+        '',
+      )
+      .trim();
+  final lower = raw.toLowerCase();
+  final String cause;
+  if (e is TimeoutException || lower.contains('timeout') || lower.contains('超时')) {
+    cause = '请求超时';
+  } else if (lower.contains('ssrf') || lower.contains('非法地址')) {
+    cause = '地址被安全策略拒绝';
+  } else if (lower.contains('socketexception') ||
+      lower.contains('connection') ||
+      lower.contains('连接') ||
+      lower.contains('网络')) {
+    cause = '网络不可达';
+  } else if (lower.contains('js') && lower.contains('规则')) {
+    cause = '脚本规则执行失败';
+  } else if (lower.contains('目录为空') || lower.contains('搜索无结果')) {
+    cause = '站点结构或规则不匹配';
+  } else {
+    return raw.isEmpty ? '未知失败' : raw;
+  }
+  return raw.isEmpty ? cause : '$cause：$raw';
 }

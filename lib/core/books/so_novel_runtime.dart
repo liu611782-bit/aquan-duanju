@@ -1,10 +1,10 @@
-import 'dart:convert';
+import 'dart:typed_data';
 
-import 'package:fast_gbk/fast_gbk.dart';
 import 'package:html/dom.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
 
+import '../book_markup.dart';
 import '../sources/source_fetch.dart';
 import 'book_source_model.dart';
 import 'so_novel_func.dart';
@@ -276,20 +276,9 @@ class SoNovelRuntime {
     return _decode(result.bytes!);
   }
 
-  String _decode(List<int> bytes) {
-    final head = String.fromCharCodes(
-        bytes.take(2048).map((b) => b < 128 ? b : 32));
-    final cs = RegExp(r'charset=["\x27]?\s*([a-zA-Z0-9-]+)')
-        .firstMatch(head)
-        ?.group(1)
-        ?.toLowerCase();
-    if (cs == 'gbk' || cs == 'gb2312' || cs == 'gb18030') {
-      try {
-        return gbk.decode(bytes);
-      } catch (_) {}
-    }
-    return utf8.decode(bytes, allowMalformed: true);
-  }
+  String _decode(List<int> bytes) => decodeMarkupText(
+        bytes is Uint8List ? bytes : Uint8List.fromList(bytes),
+      );
 
   String _buildUrl(String template, String keyword) {
     if (template.contains('@js:')) return _runJs(_jsCodeOf(template), keyword);

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../book_markup.dart';
 import '../sources/source_fetch.dart';
 import '../sources/source_import.dart';
 import '../error_log.dart';
@@ -226,7 +227,11 @@ class BookSourceRuntime {
       if (response.statusCode >= 400) {
         throw BookSourceException('HTTP ${response.statusCode}');
       }
-      return utf8.decode(response.bodyBytes, allowMalformed: true);
+      // POST 响应同样按 charset 解码：GBK 站点表单搜索解成 UTF-8 会整页乱码。
+      return decodeMarkupText(
+        response.bodyBytes,
+        contentType: response.headers['content-type'],
+      );
     }
     final result = await fetchProbe(
       url,
@@ -242,7 +247,7 @@ class BookSourceRuntime {
     }
     final bytes = result.bytes;
     if (bytes == null || bytes.isEmpty) return '';
-    return utf8.decode(bytes, allowMalformed: true);
+    return decodeMarkupText(bytes);
   }
 }
 
