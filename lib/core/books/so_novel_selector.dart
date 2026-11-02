@@ -1,4 +1,5 @@
 import 'package:html/dom.dart';
+import 'package:xpath_selector_html_parser/xpath_selector_html_parser.dart';
 
 /// so-novel 选择器子集引擎（package:html 缺 `:nth-of-type`/`:contains`、`:nth-child(even)`
 /// 静默失效，且 so-novel 规则里 nth-of-type 常处**中置** compound，末尾后过滤救不回，
@@ -20,6 +21,23 @@ class SoNovelSelectorException implements Exception {
 List<Element> soNovelSelect(Node root, String selector) {
   final sel = selector.trim();
   if (sel.isEmpty) return const [];
+  // so-novel 判定（HtmlExtractor.java:37-43）：`^(/|//|\()` → XPath。
+  // （so-novel 规则串里 `@` 是步骤边界，选择器部分不会含 @attr 后缀——
+  // XPath 一律返回**元素**，内容由调用方按内容类型取。）
+  if (sel.startsWith('/') || sel.startsWith('(')) {
+    final node = root is Element
+        ? root
+        : root is Document
+            ? root.documentElement ?? root
+            : root;
+    final result = HtmlXPath.node(node).query(sel);
+    final out = <Element>[];
+    for (final n in result.nodes) {
+      final el = n.node;
+      if (el is Element) out.add(el);
+    }
+    return out;
+  }
   final parts = _parseSelector(sel);
   var current = _matchCompound(root, parts.first.compound, sel);
   for (var i = 1; i < parts.length; i++) {

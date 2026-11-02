@@ -77,9 +77,16 @@ void main() {
       expect(e3, 'a');
       expect(c3, ('b', 'c'));
     });
-    test('XPath 规则诚实报错（不再是笼统 FormatException）', () {
-      expect(() => BookRule.evalString('<div>x</div>', '//div/text()'),
-          throwsA(isA<FormatException>()));
+    test('XPath 规则（xpath_selector 桥）：@attr/text/元素列表', () {
+      expect(BookRule.evalString('<div><a href="/u">名</a></div>', '//a/@href'),
+          '/u');
+      expect(BookRule.evalString('<div class="i">文本</div>', '//div[@class="i"]'),
+          '文本');
+      expect(BookRule.evalString('<div>正文</div>', '//div/text()'), '正文');
+      expect(BookRule.evalList('<div><a>1</a><a>2</a></div>', '//a'), hasLength(2));
+      expect(BookRule.evalString('<meta name="k" content="v"/>', '//meta[@name="k"]/@content'),
+          'v');
+      expect(BookRule.evalList('<r><i>a</i><i>b</i></r>', '@XPath://i'), hasLength(2));
     });
     test('js 无 runner 的 async 路径诚实报错', () async {
       expect(

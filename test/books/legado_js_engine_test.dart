@@ -7,9 +7,11 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:aquan_duanju/core/books/book_source_model.dart';
 import 'package:aquan_duanju/core/books/book_source_runtime.dart';
+import 'package:aquan_duanju/core/books/legado_js/legado_js_crypto.dart';
 import 'package:aquan_duanju/core/books/legado_js/legado_js_engine.dart';
 
 import '../spider/native_lib_guard.dart';
+import 'rsa_test_keys.dart';
 
 /// LegadoJsEngine 集成测试：真 QuickJS（flutter_qjs）+ 真 FFI syncHttp（Go 核心）
 /// + 本地 HTTP 夹具——与生产完全同路径（isolate 内同步通道，无测试桩）。
@@ -147,6 +149,39 @@ void main() {
     final text = await rt.content(source, 'http://127.0.0.1:$port/content');
     expect(text, '第一段\n第二段');
   }, timeout: const Timeout(Duration(minutes: 3)));
+
+  test('createAsymmetricCrypto：js 内 RSA 加密 → Dart 私钥解密', () async {
+    if (!ensureNative()) return;
+    final (pub, priv) = rsaTestKeygen();
+    final pubPem = rsaPublicPem(pub);
+    final engine = LegadoJsEngine(enforceSsrf: false, profilePath: profile);
+    final res = await engine.eval(
+      'var c = java.createAsymmetricCrypto("RSA/ECB/PKCS1Padding"); '
+      'c.setPublicKey(${jsonEncode(pubPem)}); '
+      'c.encrypt("js 里的 RSA 明文")',
+      bindings: {'result': '', 'baseUrl': ''},
+    );
+    // 用 Dart 侧私钥解开 js 的密文 → 证明 shim 与密钥材料解析全链路正确。
+    final dec = LegadoJsCrypto.createAsymmetricCrypto('RSA/ECB/PKCS1Padding')
+      ..setPrivateKey(rsaPrivatePem(priv));
+    expect(dec.decryptStr('${res.value}'), 'js 里的 RSA 明文');
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
+  test('java.getElement/getElements：DOM 句柄 .text()/.attr()/.selectAll()', () async {
+    if (!ensureNative()) return;
+    final engine = LegadoJsEngine(enforceSsrf: false, profilePath: profile);
+    final res = await engine.eval(
+      'var e = java.getElement("div.hit"); '
+      'var links = e.selectAll("a"); '
+      'e.text() + "|" + links[0].attr("href")',
+      bindings: {
+        'result':
+            '<div class="hit"><a href="/b/1">书名甲</a><a href="/b/2">书名乙</a></div>',
+        'baseUrl': 'http://x/',
+      },
+    );
+    expect(res.value, '书名甲书名乙|/b/1');
+  }, timeout: const Timeout(Duration(minutes: 2)));
 }
 
 /// 与生产同源的 md5（crypto 包），供夹具期望值。

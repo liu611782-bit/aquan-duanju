@@ -1,10 +1,13 @@
 import 'dart:convert';
 
 import 'package:flutter_qjs/flutter_qjs.dart';
+import 'package:html/dom.dart' as dom;
+import 'package:html/parser.dart' as html_parser;
 
 import '../../ffi_bridge.dart';
 import '../../sources/source_import.dart';
 import '../book_rule.dart';
+import '../so_novel_selector.dart';
 import 'legado_js_crypto.dart';
 import 'legado_js_rewrite.dart';
 
@@ -215,6 +218,40 @@ class LegadoJsHost {
           'decrypt_str' => cipher.decryptStr(data),
           _ => throw StateError('未知 cipher op'),
         };
+      case 'rsa_new':
+        final id = ctx.nextRsaId++;
+        ctx.rsas[id] = LegadoJsCrypto.createAsymmetricCrypto(
+            a['transformation']?.toString() ?? 'RSA');
+        return id;
+      case 'rsa_key':
+        final rsa = ctx.rsas[(a['h'] as num?)?.toInt()];
+        if (rsa == null) throw StateError('RSA 句柄不存在');
+        final key = a['key']?.toString() ?? '';
+        if (a['kind']?.toString() == 'priv') {
+          rsa.setPrivateKey(key);
+        } else {
+          rsa.setPublicKey(key);
+        }
+        return null;
+      case 'rsa_op':
+        final rsa = ctx.rsas[(a['h'] as num?)?.toInt()];
+        if (rsa == null) throw StateError('RSA 句柄不存在');
+        final data = a['data']?.toString() ?? '';
+        return switch (a['op']?.toString()) {
+          'encrypt' => rsa.encryptB64(data),
+          'encrypt_hex' => rsa.encryptHex(data),
+          'decrypt' => rsa.decryptB64(data),
+          'decrypt_str' => rsa.decryptStr(data),
+          _ => throw StateError('未知 rsa op'),
+        };
+      case 'dom_query':
+        return _domQuery(ctx, a);
+      case 'dom_text':
+        return _domOf(ctx, a).text.trim();
+      case 'dom_html':
+        return _domOf(ctx, a).innerHtml;
+      case 'dom_attr':
+        return _domOf(ctx, a).attributes[a['name']?.toString() ?? ''] ?? '';
       case 'time_format':
         final t = a['time'];
         return LegadoJsCrypto.timeFormat(a['pattern']?.toString() ?? '',
@@ -453,6 +490,39 @@ class LegadoJsHost {
   static String _bind(_Ctx ctx, String key) =>
       ctx.req.bindings[key]?.toString() ?? '';
 
+  // ---------------- DOM 句柄（java.getElement/getElements） ----------------
+
+  /// `java.getElement(sel[, content])`：句柄表注册，JS 侧方法对象按句柄回查。
+  static Object? _domQuery(_Ctx ctx, Map<String, dynamic> a) {
+    dom.Node root;
+    if (a['h'] != null) {
+      root = _domOf(ctx, a);
+    } else {
+      final content = a['content']?.toString() ?? _bind(ctx, 'result');
+      root = html_parser.parse(content);
+    }
+    final els = soNovelSelect(root, a['selector']?.toString() ?? '');
+    if (a['many'] != true) {
+      if (els.isEmpty) return null;
+      ctx.doms.add(els.first);
+      return {'handle': ctx.doms.length - 1};
+    }
+    final handles = <int>[];
+    for (final e in els.take(50)) {
+      ctx.doms.add(e);
+      handles.add(ctx.doms.length - 1);
+    }
+    return {'handles': handles};
+  }
+
+  static dom.Element _domOf(_Ctx ctx, Map<String, dynamic> a) {
+    final h = (a['h'] as num?)?.toInt();
+    if (h == null || h < 0 || h >= ctx.doms.length) {
+      throw StateError('DOM 句柄不存在');
+    }
+    return ctx.doms[h];
+  }
+
   static String _absUrl(String value, String baseUrl) {
     if (value.isEmpty || baseUrl.isEmpty) return value;
     if (value.startsWith('http://') || value.startsWith('https://')) {
@@ -514,6 +584,24 @@ function __resp(r) {
     code: function () { return r.status; },
     headers: function () { return r.headers; },
     string: function () { return r.body; }
+  };
+}
+function __elem(h) {
+  return {
+    text: function () { return __host('dom_text', {h: h}); },
+    html: function () { return __host('dom_html', {h: h}); },
+    attr: function (k) { return __host('dom_attr', {h: h, name: String(k)}); },
+    select: function (s) {
+      var r = __host('dom_query', {h: h, selector: String(s), many: false});
+      return r === null ? null : __elem(r.handle);
+    },
+    selectAll: function (s) {
+      var r = __host('dom_query', {h: h, selector: String(s), many: true});
+      var out = [];
+      var hs = r.handles || [];
+      for (var i = 0; i < hs.length; i++) out.push(__elem(hs[i]));
+      return out;
+    }
   };
 }
 var java = {
@@ -585,15 +673,36 @@ var java = {
       decryptStr: function (data) { return __host('cipher_op', {h: h, op: 'decrypt_str', data: String(data)}); }
     };
   },
-  createAsymmetricCrypto: function () { throw new Error('RSA 暂不支持（后续批次）'); },
+  createAsymmetricCrypto: function (transformation) {
+    var h = __host('rsa_new', {transformation: String(transformation || 'RSA')});
+    return {
+      setPublicKey: function (k) { __host('rsa_key', {h: h, kind: 'pub', key: String(k)}); return this; },
+      setPrivateKey: function (k) { __host('rsa_key', {h: h, kind: 'priv', key: String(k)}); return this; },
+      encrypt: function (d) { return __host('rsa_op', {h: h, op: 'encrypt', data: String(d)}); },
+      encryptBase64: function (d) { return __host('rsa_op', {h: h, op: 'encrypt', data: String(d)}); },
+      encryptHex: function (d) { return __host('rsa_op', {h: h, op: 'encrypt_hex', data: String(d)}); },
+      decrypt: function (d) { return __host('rsa_op', {h: h, op: 'decrypt', data: String(d)}); },
+      decryptBase64: function (d) { return __host('rsa_op', {h: h, op: 'decrypt', data: String(d)}); },
+      decryptStr: function (d) { return __host('rsa_op', {h: h, op: 'decrypt_str', data: String(d)}); }
+    };
+  },
   createSign: function (algorithm) {
     return {
       sign: function (data, key) { return __host('hmac_hex', {data: String(data), algorithm: String(algorithm), key: String(key)}); },
       signHex: function (data, key) { return __host('hmac_hex', {data: String(data), algorithm: String(algorithm), key: String(key)}); }
     };
   },
-  getElement: function () { throw new Error('java.getElement 暂不支持（后续批次）'); },
-  getElements: function () { throw new Error('java.getElements 暂不支持（后续批次）'); },
+  getElement: function (sel, content) {
+    var r = __host('dom_query', {selector: String(sel), content: content === undefined ? null : String(content), many: false});
+    return r === null ? null : __elem(r.handle);
+  },
+  getElements: function (sel, content) {
+    var r = __host('dom_query', {selector: String(sel), content: content === undefined ? null : String(content), many: true});
+    var out = [];
+    var hs = r.handles || [];
+    for (var i = 0; i < hs.length; i++) out.push(__elem(hs[i]));
+    return out;
+  },
   webView: null,
   getWebViewUA: function () { throw new Error('webView 暂不支持'); },
   startBrowser: function () { throw new Error('webView 暂不支持'); },
@@ -652,8 +761,11 @@ class _Ctx {
   final Map<String, String> cache;
   final Map<String, Map<String, String>> cookies;
   final Map<int, SymmetricCipher> ciphers = {};
+  final Map<int, RsaCipher> rsas = {};
+  final List<dom.Element> doms = <dom.Element>[];
   final List<String> logs = [];
   int nextCipherId = 0;
+  int nextRsaId = 0;
 
   Map<String, String> cookieHost(String url) {
     final u = Uri.tryParse(url);

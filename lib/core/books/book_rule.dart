@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
+import 'package:xpath_selector_html_parser/xpath_selector_html_parser.dart';
 
 import 'legado_js/legado_js_rewrite.dart';
 
@@ -101,14 +102,21 @@ class BookRule {
   /// 列表规则：从页面（HTML 或 JSON）求出一批节点（js 无关路径，行为不变）。
   static List<dynamic> evalList(Object page, String rule) {
     final expr = _splitAlternatives(rule).first;
+    // legado 前缀与 XPath 判定（SourceRule.init）。
+    if (expr.startsWith('@XPath:')) {
+      return _xpathList(page, expr.substring(7).trim());
+    }
     if (expr.startsWith('/')) {
-      // XPath：现引擎无求值器，诚实报错（package:html 只认 CSS，此前会抛笼统异常）。
-      throw FormatException('XPath 规则暂不支持: $expr');
+      return _xpathList(page, expr);
     }
+    if (expr.startsWith('@Json:')) {
+      return _jsonList(page, expr.substring(6).trim());
+    }
+    final css = expr.startsWith('@CSS:') ? expr.substring(5).trim() : expr;
     if (page is Map<String, dynamic> || page is List<dynamic>) {
-      return _jsonList(page, expr);
+      return _jsonList(page, css);
     }
-    return _cssList(page, expr);
+    return _cssList(page, css);
   }
 
   /// 列表规则（支持 js 段）。无 js 的规则走 [evalList]（行为逐字节一致）。
@@ -161,16 +169,26 @@ class BookRule {
   }) {
     final parts = _splitAlternatives(rule);
     for (final part in parts) {
-      final (expr, clean) = _splitClean(part);
+      final (rawExpr, clean) = _splitClean(part);
+      final expr = rawExpr;
       var value = '';
       if (expr.isNotEmpty) {
-        if (expr.startsWith('/')) {
-          throw FormatException('XPath 规则暂不支持: $expr');
-        }
-        if (node is Map<String, dynamic> || node is List<dynamic>) {
-          value = _jsonString(node, expr);
+        if (expr.startsWith('@XPath:') || expr.startsWith('/')) {
+          final xpath = expr.startsWith('@XPath:')
+              ? expr.substring(7).trim()
+              : expr;
+          value = node is Map<String, dynamic> || node is List<dynamic>
+              ? _jsonString(node, expr)
+              : _xpathString(node, xpath);
+        } else if (expr.startsWith('@Json:')) {
+          value = _jsonString(node, expr.substring(6).trim());
         } else {
-          value = _cssString(node, expr);
+          final css = expr.startsWith('@CSS:') ? expr.substring(5).trim() : expr;
+          if (node is Map<String, dynamic> || node is List<dynamic>) {
+            value = _jsonString(node, css);
+          } else {
+            value = _cssString(node, css);
+          }
         }
       } else if (node is String) {
         value = node;
@@ -461,6 +479,38 @@ class BookRule {
     }
     // 其余按属性名取；取不到退回文本。
     return root.attributes[attr] ?? root.text.trim();
+  }
+
+  // ---------- XPath（xpath_selector + package:html 桥） ----------
+
+  static dom.Node _xpathRoot(Object page) {
+    if (page is dom.Element) return page;
+    if (page is dom.Document) return page.documentElement ?? page;
+    return html_parser.parse(page.toString());
+  }
+
+  static List<dom.Element> _xpathList(Object page, String expr) {
+    final result = HtmlXPath.node(_xpathRoot(page)).query(expr);
+    return [
+      for (final n in result.nodes)
+        if (n.node is dom.Element) n.node as dom.Element,
+    ];
+  }
+
+  /// 取值语义（legado AnalyzeByXPath 子集）：`/@attr` 结尾 → 首命中元素属性；
+  /// `/text()` 结尾 → 首命中元素文本；否则首命中元素文本。
+  static String _xpathString(Object page, String expr) {
+    if (RegExp(r'/@[\w:-]+$').hasMatch(expr)) {
+      final attrName = expr.substring(expr.lastIndexOf('@') + 1);
+      final els = _xpathList(page, expr.substring(0, expr.lastIndexOf('/')));
+      return els.isEmpty ? '' : els.first.attributes[attrName] ?? '';
+    }
+    var e = expr;
+    if (e.toLowerCase().endsWith('/text()')) {
+      e = e.substring(0, e.length - 7);
+    }
+    final els = _xpathList(page, e);
+    return els.isEmpty ? '' : els.first.text.trim();
   }
 
   static String _absoluteUrl(String value, String baseUrl) {

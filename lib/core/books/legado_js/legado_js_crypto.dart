@@ -227,7 +227,86 @@ class LegadoJsCrypto {
     return out;
   }
 
-  // ---------- 时间格式化 ----------
+  // ---------- RSA ----------
+
+  /// `java.createAsymmetricCrypto(transformation)`：RSA PKCS#1 v1.5。
+  /// 公私钥材料支持：PEM（PUBLIC/PRIVATE KEY、RSA PUBLIC/PRIVATE KEY 四种头）、
+  /// 裸 base64 DER、hex `modulus,exponent` 对。
+  static RsaCipher createAsymmetricCrypto(String transformation) {
+    final t = transformation.toUpperCase();
+    if (t.contains('OAEP')) {
+      throw LegadoJsCryptoException('RSA OAEP 暂不支持（可用 PKCS1Padding）');
+    }
+    final noPad = t.contains('NOPADDING');
+    return RsaCipher._(noPad);
+  }
+
+  /// 解析 RSA 公钥材料 → (n, e)。
+  static (BigInt, BigInt) parseRsaPublicKey(String material) {
+    final s = _pemStrip(material);
+    // hex `modulus,exponent` 形态。
+    if (s.contains(',') && RegExp(r'^[0-9a-fA-F,\s]+$').hasMatch(s)) {
+      final parts = s.split(',');
+      return (BigInt.parse(parts[0].trim(), radix: 16),
+          BigInt.parse(parts[1].trim(), radix: 16));
+    }
+    final Uint8List der;
+    try {
+      der = base64DecodeBytes(s);
+    } on FormatException catch (err) {
+      throw LegadoJsCryptoException('RSA 密钥材料不是合法 base64/PEM: $err');
+    }
+    final d = _Der(der);
+    final outer = d.readSeq();
+    // SPKI：SEQ(SEQ(OID,...), BITSTRING(SEQ(INT n, INT e)))；PKCS#1：SEQ(INT n, INT e)。
+    if (outer.peekTag() == 0x30) {
+      outer.readSeq(); // 算法标识
+      final bits = outer.read(0x03);
+      final inner = _Der(Uint8List.sublistView(bits, 1)); // 首字节 = 未用位数
+      final key = inner.readSeq();
+      final n = key.readInt();
+      final e = key.readInt();
+      return (n, e);
+    }
+    final n = outer.readInt();
+    final e = outer.readInt();
+    return (n, e);
+  }
+
+  /// 解析 RSA 私钥材料 → (n, d, p, q)。p/q 供 pointycastle 构造断言（运算只用 n/d）。
+  static (BigInt, BigInt, BigInt, BigInt) parseRsaPrivateKey(String material) {
+    final s = _pemStrip(material);
+    final d = _Der(base64DecodeBytes(s));
+    final outer = d.readSeq();
+    // PKCS#8 与 PKCS#1 私钥都以 INT version 开头，区分看第二个元素：
+    // PKCS#8 = INT 0, SEQ(alg), OCTETSTRING(inner SEQ(INT 0, n, e, d, p, q, ...))；
+    // PKCS#1 = INT 0, INT n, INT e, INT d, INT p, INT q, ...
+    outer.readInt(); // version
+    if (outer.peekTag() == 0x30) {
+      outer.readSeq(); // 算法标识
+      final octets = outer.read(0x04);
+      final inner = _Der(octets).readSeq();
+      inner.readInt(); // version
+      final n = inner.readInt();
+      inner.readInt(); // publicExponent
+      final priv = inner.readInt(); // privateExponent
+      final p = inner.readInt();
+      final q = inner.readInt();
+      return (n, priv, p, q);
+    }
+    final n = outer.readInt();
+    outer.readInt(); // publicExponent
+    final priv = outer.readInt();
+    final p = outer.readInt();
+    final q = outer.readInt();
+    return (n, priv, p, q);
+  }
+
+  static String _pemStrip(String material) => material
+      .split(RegExp(r'\r?\n'))
+      .where((l) => !l.contains('-----'))
+      .join()
+      .replaceAll(RegExp(r'\s'), '');
 
   /// `java.timeFormat(pattern, time?)`：支持 yyyy/MM/dd/HH/mm/ss/SSS 常用段。
   static String timeFormat(String pattern, [Object? time]) {
@@ -248,6 +327,145 @@ class LegadoJsCrypto {
         .replaceAll('mm', dt.minute.toString().padLeft(2, '0'))
         .replaceAll('ss', dt.second.toString().padLeft(2, '0'))
         .replaceAll('SSS', dt.millisecond.toString().padLeft(3, '0'));
+  }
+}
+
+/// RSA 句柄：公钥加密 / 私钥解密（PKCS#1 v1.5，或 NoPadding 裸 RSA）。
+class RsaCipher {
+  RsaCipher._(this._noPadding);
+
+  final bool _noPadding;
+  BigInt? _n;
+  BigInt? _e;
+  BigInt? _d;
+  BigInt? _p;
+  BigInt? _q;
+
+  void setPublicKey(String material) {
+    final (n, e) = LegadoJsCrypto.parseRsaPublicKey(material);
+    _n = n;
+    _e = e;
+  }
+
+  void setPrivateKey(String material) {
+    final (n, d, p, q) = LegadoJsCrypto.parseRsaPrivateKey(material);
+    _n = n;
+    _d = d;
+    _p = p;
+    _q = q;
+  }
+
+  /// 加密（utf8 字符串进 → base64 出）。
+  String encryptB64(String data) {
+    if (_n == null || _e == null) {
+      throw LegadoJsCryptoException('RSA 未设置公钥');
+    }
+    final keyParam =
+        PublicKeyParameter<RSAPublicKey>(RSAPublicKey(_n!, _e!));
+    var input = Uint8List.fromList(utf8.encode(data));
+    AsymmetricBlockCipher cipher;
+    if (_noPadding) {
+      cipher = RSAEngine()..init(true, keyParam);
+      // 裸 RSA：输入须等于块长，左填充 0。
+      final k = (_n!.bitLength + 7) ~/ 8;
+      if (input.length != k) {
+        final padded = Uint8List(k);
+        padded.setRange(k - input.length, k, input);
+        input = padded;
+      }
+    } else {
+      cipher = PKCS1Encoding(RSAEngine())..init(true, keyParam);
+    }
+    return base64.encode(_run(cipher, input));
+  }
+
+  String encryptHex(String data) =>
+      LegadoJsCrypto._hexEncode(LegadoJsCrypto.base64DecodeBytes(encryptB64(data)));
+
+  String decryptB64(String data) {
+    if (_n == null || _d == null) {
+      throw LegadoJsCryptoException('RSA 未设置私钥');
+    }
+    final keyParam = PrivateKeyParameter<RSAPrivateKey>(
+        RSAPrivateKey(_n!, _d!, _p, _q));
+    final cipher = _noPadding
+        ? (RSAEngine()..init(false, keyParam))
+        : (PKCS1Encoding(RSAEngine())..init(false, keyParam));
+    final out = _run(cipher, LegadoJsCrypto.base64DecodeBytes(data));
+    if (_noPadding) {
+      // 裸 RSA 输出含前导 0：剥到首个非零字节。
+      var start = 0;
+      while (start < out.length - 1 && out[start] == 0) {
+        start++;
+      }
+      return base64.encode(out.sublist(start));
+    }
+    return base64.encode(out);
+  }
+
+  String decryptStr(String data) => utf8.decode(
+      LegadoJsCrypto.base64DecodeBytes(decryptB64(data)),
+      allowMalformed: true);
+
+  Uint8List _run(AsymmetricBlockCipher cipher, List<int> input) {
+    try {
+      return cipher.process(Uint8List.fromList(input));
+    } on LegadoJsCryptoException {
+      rethrow;
+    } catch (e) {
+      throw LegadoJsCryptoException('RSA 运算失败: $e');
+    }
+  }
+}
+
+/// 最小 DER（TLV）读取器，只覆盖 RSA 密钥解析所需形态。
+class _Der {
+  _Der(this.bytes);
+  final Uint8List bytes;
+  int _pos = 0;
+
+  int _readByte() => bytes[_pos++];
+
+  int _readLen() {
+    final b = _readByte();
+    if (b & 0x80 == 0) return b;
+    final n = b & 0x7f;
+    var len = 0;
+    for (var i = 0; i < n; i++) {
+      len = (len << 8) | _readByte();
+    }
+    return len;
+  }
+
+  int peekTag() => bytes[_pos];
+
+  /// 读指定 tag 的 TLV，返回内容字节。
+  Uint8List read(int tag) {
+    final t = _readByte();
+    if (t != tag) {
+      throw LegadoJsCryptoException('DER 结构不符: 期望 0x${tag.toRadixString(16)}，实际 0x${t.toRadixString(16)}');
+    }
+    final len = _readLen();
+    final v = Uint8List.fromList(bytes.sublist(_pos, _pos + len));
+    _pos += len;
+    return v;
+  }
+
+  _Der readSeq() => _Der(read(0x30));
+
+  BigInt readInt() {
+    final v = read(0x02);
+    // 跳过前导 0；最高位为 1 视为正数补 0。
+    var start = 0;
+    while (start < v.length - 1 && v[start] == 0) {
+      start++;
+    }
+    var hexStr = '';
+    for (var i = start; i < v.length; i++) {
+      hexStr += v[i].toRadixString(16).padLeft(2, '0');
+    }
+    if (hexStr.isEmpty) return BigInt.zero;
+    return BigInt.parse(hexStr, radix: 16);
   }
 }
 

@@ -58,12 +58,34 @@ class SoNovelRuntime {
       cookie: s.cookies,
       referer: _hostOf(url),
     );
-    final htmlIn = SoNovelRule.stepsOf(s.result).any((e) => e.lang == 'js')
-        ? _runJs(_jsCodeOf(s.result), body)
-        : body;
-    final doc = html_parser.parse(htmlIn);
-    final containers = SoNovelRule.selectList(doc, s.result);
+    final doc = html_parser.parse(
+        SoNovelRule.stepsOf(s.result).any((e) => e.lang == 'js')
+            ? _runJs(_jsCodeOf(s.result), body)
+            : body);
     final base = _selectorBase(rule, s.baseUri);
+    final hits = _searchHits(doc, s, base);
+    // search.nextPage：分页结果 union（TocParser:69-110 同款收集，顺序补抓，上限 5 页）。
+    if (s.nextPage.trim().isNotEmpty) {
+      try {
+        final extra = await _paginationUrls(url, s.nextPage, doc);
+        for (final pageUrl in extra.take(5)) {
+          final pageBody = await _request(pageUrl, referer: _hostOf(pageUrl));
+          hits.addAll(_searchHits(
+              html_parser.parse(pageBody), s, _selectorBase(rule, s.baseUri)));
+        }
+      } catch (_) {
+        // 分页抓取失败不影响第一页结果。
+      }
+    }
+    final seen = <String>{};
+    return [
+      for (final h in hits)
+        if (h.isMeaningful && seen.add(h.bookUrl)) h,
+    ];
+  }
+
+  List<BookHit> _searchHits(Document doc, SoSearch s, String base) {
+    final containers = SoNovelRule.selectList(doc, s.result);
     final nameSel = s.bookName;
     return [
       for (final el in containers)
@@ -71,8 +93,6 @@ class SoNovelRuntime {
             .trim()
             .isNotEmpty)
           BookHit(
-            // bookName 可能带 @js: 清洗（research 样例 C）：href 用内容类型覆盖，
-            // 不能拼 '$nameSel@href'（@href 会混进 js 代码段）。
             bookUrl: SoNovelRule.extract(el, nameSel,
                 baseUri: base, runJs: _runJs, type: SoContentType.href),
             name: SoNovelRule.extract(el, nameSel, baseUri: base, runJs: _runJs),
@@ -125,36 +145,81 @@ class SoNovelRuntime {
       final id = _extractId(rule.book.url, bookUrl);
       tocUrl = id != null ? t.url.replaceAll('%s', id) : t.url;
     }
-    final body = await _request(tocUrl, referer: _hostOf(tocUrl));
-    final doc = html_parser.parse(body);
-    final base = tocUrl;
-    Node scope = doc;
-    if (t.list.trim().isNotEmpty) {
-      final frag = SoNovelRule.extract(doc, t.list,
-          baseUri: base, runJs: _runJs, html: true);
-      scope = html_parser.parseFragment(frag);
+    final firstBody = await _request(tocUrl, referer: _hostOf(tocUrl));
+    final firstDoc = html_parser.parse(firstBody);
+    // toc.nextPage：分页 URL 收集（option 一次拿全 / 单链接递归），逐页拼接。
+    final pageUrls = <String>[tocUrl];
+    if (t.nextPage.trim().isNotEmpty) {
+      try {
+        pageUrls.addAll(await _paginationUrls(tocUrl, t.nextPage, firstDoc));
+      } catch (_) {
+        // 分页收集失败退化为单页目录。
+      }
     }
-    final items = SoNovelRule.selectList(scope, t.item);
-    final chapters = [
-      for (final el in items)
-        BookTocItem(
-          title: el.text.trim(),
-          url: el.attributes['href'] != null
-              ? _abs(el.attributes['href']!, base)
-              : '',
-        ),
-    ];
-    return t.isDesc ? chapters.reversed.toList() : chapters;
+    final chapters = <BookTocItem>[];
+    for (var i = 0; i < pageUrls.length && i < 30; i++) {
+      final pageUrl = pageUrls[i];
+      final doc = i == 0 ? firstDoc : html_parser.parse(await _request(pageUrl, referer: _hostOf(pageUrl)));
+      final pageBase = pageUrl;
+      Node scope = doc;
+      if (t.list.trim().isNotEmpty) {
+        final frag = SoNovelRule.extract(doc, t.list,
+            baseUri: pageBase, runJs: _runJs, html: true);
+        scope = html_parser.parseFragment(frag);
+      }
+      final items = SoNovelRule.selectList(scope, t.item);
+      var pageChapters = [
+        for (final el in items)
+          BookTocItem(
+            title: el.text.trim(),
+            url: el.attributes['href'] != null
+                ? _abs(el.attributes['href']!, pageBase)
+                : '',
+          ),
+      ];
+      // isDesc 是「页内倒序遍历」（TocParser:169-173），不是整表反转。
+      if (t.isDesc) {
+        pageChapters = pageChapters.reversed.toList();
+      }
+      chapters.addAll(pageChapters);
+    }
+    return chapters;
   }
 
   // ---------------- content ----------------
 
   Future<String> content(SoRule rule, String chapterUrl) async {
     final c = rule.chapter;
-    final body = await _request(chapterUrl, referer: _hostOf(chapterUrl));
-    final doc = html_parser.parse(body);
-    var html = SoNovelRule.extract(doc, c.content,
-        baseUri: chapterUrl, runJs: _runJs, html: true);
+    // chapter.nextPage：分页正文循环拼接（ChapterParser:100-150）。
+    final htmlParts = <String>[];
+    final visited = <String>{};
+    var currentUrl = chapterUrl;
+    while (visited.length < 30 && !visited.contains(currentUrl)) {
+      visited.add(currentUrl);
+      final body = await _request(currentUrl, referer: _hostOf(currentUrl));
+      final doc = html_parser.parse(body);
+      htmlParts.add(SoNovelRule.extract(doc, c.content,
+          baseUri: currentUrl, runJs: _runJs, html: true));
+      if (c.nextPage.trim().isEmpty) break;
+      // 下一页链接：选择器取 href（Java ATTR_HREF）；文本用于终止判定。
+      final nextText = SoNovelRule.extract(doc, c.nextPage,
+          baseUri: currentUrl, runJs: _runJs);
+      final nextUrl = SoNovelRule.extract(doc, c.nextPage,
+          baseUri: currentUrl, runJs: _runJs, type: SoContentType.href);
+      if (nextUrl.isEmpty || nextUrl == currentUrl) break;
+      // isLastPage 启发式（ChapterParser:177-188 子集）：按钮文本是「下一章」类
+      // 即为章节切换，停止分页（「下一页」不算）。
+      if (RegExp(r'下一章|书末页|没有了|已经是最新').hasMatch(nextText)) break;
+      if (c.nextChapterLink.trim().isNotEmpty) {
+        try {
+          if (RegExp(SoNovelRule.selectorOf(c.nextChapterLink)).hasMatch(nextUrl)) {
+            break;
+          }
+        } catch (_) {/* 终止正则非法：忽略 */}
+      }
+      currentUrl = nextUrl;
+    }
+    var html = htmlParts.join('\n');
     // filterTag：删除命中标签（逗号分隔）。
     for (final tag in c.filterTag.split(',')) {
       final t = tag.trim();
@@ -262,6 +327,45 @@ class SoNovelRuntime {
     final b = Uri.tryParse(base);
     if (b == null) return href;
     return b.resolve(href).toString();
+  }
+
+  /// 分页 URL 收集（TocParser:69-110 语义）：多个 `<option>`(value)/`<a>`(href)
+  /// 一次拿全；单个则递归「下一页」，visited 防环，上限 50 轮。
+  Future<List<String>> _paginationUrls(
+      String firstUrl, String selector, Document firstDoc) async {
+    final urls = <String>[];
+    var currentDoc = firstDoc;
+    var currentUrl = firstUrl;
+    var rounds = 0;
+    while (rounds++ < 50) {
+      final els = SoNovelRule.selectList(currentDoc, selector);
+      if (els.isEmpty) break;
+      final found = <String>[];
+      for (final el in els) {
+        final v = el.attributes['value'] ?? el.attributes['href'] ?? '';
+        if (v.trim().isEmpty) continue;
+        final abs = _abs(v, currentUrl);
+        if (abs.isNotEmpty && abs != currentUrl && !urls.contains(abs)) {
+          found.add(abs);
+        }
+      }
+      if (found.length >= 2) {
+        // 一次性拿全（下拉 option / 多页码 <a>）。
+        urls.addAll(found);
+        break;
+      }
+      if (found.length == 1) {
+        final next = found.first;
+        if (next == firstUrl || urls.contains(next)) break;
+        urls.add(next);
+        currentDoc =
+            html_parser.parse(await _request(next, referer: _hostOf(next)));
+        currentUrl = next;
+        continue;
+      }
+      break;
+    }
+    return urls;
   }
 
   String _toParagraphs(String html,

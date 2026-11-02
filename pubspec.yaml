@@ -83,6 +83,8 @@ dependencies:
   audio_session: ^0.2.4
   protobuf: ^6.1.0
   multicast_dns: ^0.3.3+1
+  xpath_selector: ^3.0.2
+  xpath_selector_html_parser: ^3.0.1
 
 dependency_overrides:
   media_kit_libs_windows_video:
