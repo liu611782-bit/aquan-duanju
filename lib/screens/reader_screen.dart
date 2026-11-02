@@ -1841,11 +1841,15 @@ class _ReaderScreenState extends State<ReaderScreen>
                 icon: Icon(Icons.bookmarks_outlined, color: theme.foreground),
                 onPressed: _openBookmarks,
               ),
-              IconButton(
-                tooltip: '听书',
-                icon: Icon(Icons.headset, color: theme.foreground),
-                onPressed: _startSpeech,
-              ),
+              // 只有番茄自家书（无 textLoader）具备官方音轨链路。
+              // 第三方书源/本地书的朗读需要把正文 loader 传进朗读控制器，
+              // 该接线尚未完成，先隐藏入口，避免点了必定报错。
+              if (widget.textLoader == null)
+                IconButton(
+                  tooltip: '听书',
+                  icon: Icon(Icons.headset, color: theme.foreground),
+                  onPressed: _startSpeech,
+                ),
               IconButton(
                 tooltip: '定时关闭',
                 icon: Icon(Icons.bedtime_outlined, color: theme.foreground),
