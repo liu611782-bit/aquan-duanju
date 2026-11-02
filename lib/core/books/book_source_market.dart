@@ -78,7 +78,9 @@ class BookSourceMarket {
     required List<BookSeed> seeds,
     required String query,
     bool Function()? cancel,
-    int concurrency = 12,
+    // 扫描是 I/O 密集：并发 24 能把「几百个源」的等待压到可接受范围，
+    // 每个源只发 1 次搜索请求，不会给对方站点造成压力。
+    int concurrency = 24,
     bool fetchContent = false,
   }) async* {
     var seedsDone = 0, sources = 0, ok = 0, failedSeeds = 0;

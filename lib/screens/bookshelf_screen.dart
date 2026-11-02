@@ -556,6 +556,13 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
               title: const Text('书架'),
               actions: [
                 IconButton(
+                  tooltip: '订阅（RSS/Atom）',
+                  icon: const Icon(Icons.rss_feed),
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const RssScreen()),
+                  ),
+                ),
+                IconButton(
                   tooltip: _view3d ? '切换列表视图' : '切换 3D 书架',
                   icon: Icon(_view3d
                       ? Icons.view_list_outlined

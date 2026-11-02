@@ -51,37 +51,14 @@ class BookSeed {
 
 /// 内置书源种子（用户所列仓库中「可直读 JSON 数组」的候选；扫描按设备网络判可达）。
 final List<BookSeed> builtinBookSeeds = [
-  BookSeed(
-    id: 'xiu2-yuedu',
-    name: '「阅读」APP 精品书源 (XIU2)',
-    urls: [
-      // 实测：bitbucket 镜像在国内网络可直连（GitHub raw / jsdelivr 多被重置）。
-      'https://bitbucket.org/xiu2/yuedu/raw/master/shuyuan',
-      'https://fastly.jsdelivr.net/gh/XIU2/Yuedu@master/shuyuan',
-      'https://cdn.jsdelivr.net/gh/XIU2/Yuedu@master/shuyuan',
-      'https://raw.githubusercontent.com/XIU2/Yuedu/master/shuyuan',
-    ],
-  ),
-  BookSeed(
-    id: 'shidahuilang-shuyuan',
-    name: '大灰狼书源合集 (shuyuan)',
-    urls: BookSeed.github('shidahuilang/shuyuan/shuyuan/good.json'),
-  ),
-  BookSeed(
-    id: 'zgq-inc-source',
-    name: 'zgq-inc 源整合',
-    urls: BookSeed.github('zgq-inc/source/master/data/source_url.json'),
-  ),
-  // HTML 索引页：页面里给出 .json 导出链接，扫描器会抓页面再取 JSON。
+  // 只保留**实测能拉到 JSON** 的种子：旧的内置源（XIU2 / 大灰狼 / zgq-inc）
+  // 要么整站被墙，要么里面的源全部失效，扫一轮全是红色失败，反而干扰判断。
+  //
+  // aoaostar 是 HTML 索引页：页面里给出 `.json` 直链，扫描器抓页面 → 抽链接 → 合并。
   BookSeed(
     id: 'aoaostar-legado',
-    name: 'legado 源 (aoaostar)',
+    name: 'legado 源站合集 (aoaostar)',
     urls: ['https://legado.aoaostar.com/'],
-  ),
-  BookSeed(
-    id: 'miaogongzi-yuedu',
-    name: '喵公子阅读书源',
-    urls: ['https://yuedu.miaogongzi.net/'],
   ),
 ];
 
