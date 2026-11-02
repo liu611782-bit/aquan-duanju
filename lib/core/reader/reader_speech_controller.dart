@@ -470,15 +470,27 @@ class ReaderSpeechController extends ChangeNotifier {
       try {
         _tones = await _api.audioTones(bookId);
       } catch (e) {
-        _error = e;
-        notify();
-        return;
+        // 第三方书源 / 本地书：id 不是番茄的，音轨接口必然拒绝。
+        // 这不是错误，直接按「没有平台音轨」继续走本地合成（TTS）。
+        final message = e.toString();
+        final notTomato = message.contains('INVALID_OPTIONS') ||
+            message.contains('invalid client options');
+        _tones = null;
+        _tone = null;
+        if (!notTomato) {
+          _error = e;
+          notify();
+          return;
+        }
       }
-      final saved = toneId > 0 ? toneId : (_store.entry(bookId)?.toneId ?? 0);
-      final matched = _tones!.tones.where((t) => t.id == saved).toList();
-      _tone = matched.isNotEmpty
-          ? matched.first
-          : (_tones!.tones.isEmpty ? null : _tones!.tones.first);
+      final tones = _tones;
+      if (tones != null) {
+        final saved = toneId > 0 ? toneId : (_store.entry(bookId)?.toneId ?? 0);
+        final matched = tones.tones.where((t) => t.id == saved).toList();
+        _tone = matched.isNotEmpty
+            ? matched.first
+            : (tones.tones.isEmpty ? null : tones.tones.first);
+      }
     }
     if (_tone == null) {
       // 以前这里直接报错收工。现在默认改走本地合成：绝大多数书根本没有平台音轨，
