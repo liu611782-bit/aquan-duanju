@@ -503,6 +503,18 @@ class ReaderSpeechController extends ChangeNotifier {
             : (tones.tones.isEmpty ? null : tones.tones.first);
       }
     }
+    // 硬闸门：章节 id 不是纯数字（第三方书源/本地书）→ 一律走本地合成。
+    // 即使音色表探测“成功”也不碰音轨接口（番茄只认数字 item id）。
+    final opening = _chapters.isEmpty
+        ? ''
+        : _chapters[chapterIndex.clamp(0, _chapters.length - 1)].id;
+    if (_tones != null || _tone != null) {
+      if (!RegExp(r'^\d+$').hasMatch(opening.trim())) {
+        _tones = null;
+        _tone = null;
+        _tonesBookId = null;
+      }
+    }
     if (_tone == null) {
       // 以前这里直接报错收工。现在默认改走本地合成：绝大多数书根本没有平台音轨，
       // 「没有可用的朗读音色」对用户来说等同于「听书坏了」。开关关掉即回到今日行为。
