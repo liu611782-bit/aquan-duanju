@@ -11,6 +11,7 @@ import '../core/reading_sort.dart';
 import '../models/book.dart';
 import '../store/stores.dart';
 import '../widgets/common.dart';
+import '../widgets/shelf_3d.dart';
 import 'book_audio_screen.dart';
 import 'book_detail_screen.dart';
 import 'reader_screen.dart';
@@ -27,8 +28,12 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
   /// 排序偏好持久化（Pathfin LibraryPersonalization 同语义）：按枚举 name
   /// 存 SharedPreferences，损坏/未知值回退 recent。
   static const _sortKey = 'shelf.sort';
+  static const _view3dKey = 'shelf.view3d';
 
   ReadingSort _sort = ReadingSort.recent;
+
+  /// 3D 立体书架视图（关 = 列表视图）。
+  bool _view3d = false;
 
   /// 本地书库（复制入库；TXT/EPUB/HTML/MD/ZIP）。
   LocalBookStore? _localStore;
@@ -60,7 +65,15 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
       _sort = ReadingSort.values
           .where((v) => v.name == saved)
           .firstOrNull ?? ReadingSort.recent;
+      _view3d = prefs.getBool(_view3dKey) ?? false;
     });
+  }
+
+  Future<void> _toggleView() async {
+    setState(() => _view3d = !_view3d);
+    final prefs = await SharedPreferences.getInstance();
+    // ignore: discarded_futures
+    prefs.setBool(_view3dKey, _view3d);
   }
 
   Future<void> _changeSort(ReadingSort sort) async {
@@ -352,6 +365,62 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
     ];
   }
 
+  /// 3D 书架条目：本地书 + 阅读记录合并成一条书架。
+  List<ShelfBook> _shelf3dBooks(List<ReadingEntry> entries) {
+    final store = _localStore;
+    final reading = AppScope.read(context).reading;
+    final books = <ShelfBook>[];
+    if (store != null) {
+      for (final e in store.entries.values) {
+        final progress = reading.entry('local:${e.id}');
+        books.add(ShelfBook(
+          id: 'local:${e.id}',
+          title: e.title,
+          subtitle: '${e.format.toUpperCase()} · ${e.chapterCount} 章',
+          coverFile: store.coverPathOf(e),
+          percent: progress == null
+              ? null
+              : ((progress.chapterIndex + 1) /
+                      (progress.chapters <= 0 ? 1 : progress.chapters))
+                  .clamp(0.0, 1.0),
+        ));
+      }
+    }
+    for (final e in entries) {
+      books.add(ShelfBook(
+        id: e.bookId,
+        title: e.title.isEmpty ? '未命名' : e.title,
+        subtitle: e.chapterTitle,
+        coverUrl: e.coverUrl,
+        percent: e.percent,
+      ));
+    }
+    return books;
+  }
+
+  void _openShelfBook(ShelfBook book, List<ReadingEntry> entries) {
+    final store = _localStore;
+    if (store != null && book.id.startsWith('local:')) {
+      final entry = store.entries[book.id.substring('local:'.length)];
+      if (entry != null) {
+        _openLocalBook(entry);
+        return;
+      }
+    }
+    for (final e in entries) {
+      if (e.bookId != book.id) continue;
+      Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => BookDetailScreen(
+          bookId: e.bookId,
+          title: e.title,
+          coverUrl: e.coverUrl,
+          manga: e.manga,
+        ),
+      ));
+      return;
+    }
+  }
+
   /// 继续听：书架没有章节数据，先拉目录再进听书页。
   Future<void> _continueListening(ListenEntry entry) async {
     final messenger = ScaffoldMessenger.of(context);
@@ -481,6 +550,13 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
           : AppBar(
               title: const Text('书架'),
               actions: [
+                IconButton(
+                  tooltip: _view3d ? '切换列表视图' : '切换 3D 书架',
+                  icon: Icon(_view3d
+                      ? Icons.view_list_outlined
+                      : Icons.view_carousel_outlined),
+                  onPressed: _toggleView,
+                ),
                 PopupMenuButton<String>(
                   tooltip: '导入本地书',
                   icon: const Icon(Icons.file_open_outlined),
@@ -553,6 +629,16 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
               : scope.listening.entries.first;
           final hasListen = listen != null;
           final localTiles = _localBookTiles();
+          if (_view3d) {
+            final shelf = _shelf3dBooks(entries);
+            if (shelf.isEmpty) {
+              return const Center(child: Text('书架还是空的'));
+            }
+            return Shelf3DView(
+              books: shelf,
+              onOpen: (book) => _openShelfBook(book, entries),
+            );
+          }
           if (entries.isEmpty && !hasListen && localTiles.isEmpty) {
             return Center(
               child: Column(
