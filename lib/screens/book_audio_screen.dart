@@ -286,6 +286,17 @@ class _BookAudioScreenState extends State<BookAudioScreen>
       if (_tone != null) await _playCurrent();
     } catch (e) {
       if (!mounted) return;
+      // 第三方书源的书 id 也可能是纯数字，但仍不是番茄的书 → Go 侧返回
+      // INVALID_OPTIONS。这种情况当作「没有官方音轨」，给可操作的引导，
+      // 而不是甩一个红色错误码给用户。
+      if (e.toString().contains('INVALID_OPTIONS') ||
+          e.toString().contains('invalid client options')) {
+        setState(() {
+          _notTomatoBook = true;
+          _loadingTones = false;
+        });
+        return;
+      }
       setState(() {
         _error = e;
         _loadingTones = false;
