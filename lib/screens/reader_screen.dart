@@ -1535,6 +1535,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     // 用户主动起朗读 = 明确要跟随：清掉可能挂着的「暂停跟随」与药丸。
     _follow.resume();
+    // 朗读取正文也要走注入的 loader：第三方书源的章节 id 是 URL，
+    // 番茄接口只认数字，直接调必然 INVALID_OPTIONS。
+    speech.textLoader = widget.textLoader;
     try {
       await speech.start(
         bookId: widget.bookId,
@@ -1841,15 +1844,11 @@ class _ReaderScreenState extends State<ReaderScreen>
                 icon: Icon(Icons.bookmarks_outlined, color: theme.foreground),
                 onPressed: _openBookmarks,
               ),
-              // 只有番茄自家书（无 textLoader）具备官方音轨链路。
-              // 第三方书源/本地书的朗读需要把正文 loader 传进朗读控制器，
-              // 该接线尚未完成，先隐藏入口，避免点了必定报错。
-              if (widget.textLoader == null)
-                IconButton(
-                  tooltip: '听书',
-                  icon: Icon(Icons.headset, color: theme.foreground),
-                  onPressed: _startSpeech,
-                ),
+              IconButton(
+                tooltip: '听书',
+                icon: Icon(Icons.headset, color: theme.foreground),
+                onPressed: _startSpeech,
+              ),
               IconButton(
                 tooltip: '定时关闭',
                 icon: Icon(Icons.bedtime_outlined, color: theme.foreground),

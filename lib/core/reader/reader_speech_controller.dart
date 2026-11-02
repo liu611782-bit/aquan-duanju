@@ -1594,8 +1594,14 @@ class ReaderSpeechController extends ChangeNotifier {
   /// 简繁模式都从注入的 store 现取，于是「朗读段数 == 屏幕段数」是结构性结论
   /// 而不是巧合（`listen-tts-contract.md` 已知偏差 CRITICAL-1 的修法）。
   /// store 没注入时退化成「无规则 + 不转换」，与改造前的行为逐项相等。
+  /// 第三方书源/本地书的正文来源（阅读页注入）。为空 = 番茄自家书。
+  Future<String> Function(BookChapter chapter)? textLoader;
+
   Future<List<String>> _speechParagraphs(BookChapter chapter) async {
-    final raw = await _api.chapterText(chapter.id);
+    final loader = textLoader;
+    final raw = loader != null
+        ? await loader(chapter)
+        : await _api.chapterText(chapter.id);
     return deriveDisplayParagraphs(
       raw: raw,
       chapterTitle: chapter.title,
