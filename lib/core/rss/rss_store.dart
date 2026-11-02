@@ -8,11 +8,24 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'rss_models.dart';
 
+/// 内置订阅源（首次启动注入一次；删除后不再出现）。
+const List<RssSource> kBuiltinRssSources = [
+  RssSource(
+    url: 'http://yuedu.miaogongzi.net/gx.html',
+    name: '喵公子书源管理（更新页）',
+    group: '内置 · 网页规则',
+    ruleArticles: 'id.content@h3',
+    ruleTitle: 'a@textNodes',
+    ruleLink: 'a@href',
+  ),
+];
+
 class RssStore extends ChangeNotifier {
   RssStore(this._prefs);
 
   static const String _key = 'rss.sources.v1';
   static const String _readKey = 'rss.read.v1';
+  static const String _seededKey = 'rss.seeded.v1';
 
   final SharedPreferences _prefs;
   final List<RssSource> _sources = <RssSource>[];
@@ -51,6 +64,17 @@ class RssStore extends ChangeNotifier {
             ..addAll(list.map((e) => e.toString()));
         }
       } catch (_) {}
+    }
+    // 内置订阅源只在首次注入（用户删掉后不再回来）。
+    if (_prefs.getBool(_seededKey) != true) {
+      var changed = false;
+      for (final builtin in kBuiltinRssSources) {
+        if (_sources.any((s) => s.url == builtin.url)) continue;
+        _sources.add(builtin);
+        changed = true;
+      }
+      await _prefs.setBool(_seededKey, true);
+      if (changed) await _persist();
     }
     _loaded = true;
     notifyListeners();

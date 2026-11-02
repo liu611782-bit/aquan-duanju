@@ -53,8 +53,43 @@ void main() {
     });
   });
 
+  group('网页规则订阅源', () {
+    test('ruleArticles 选出条目，子规则取标题/链接并补全绝对地址', () {
+      const page = '''
+<div id="content">
+  <h3><a href="/book/1.html">第一条</a></h3>
+  <h3><a href="https://x.example/2.html">第二条</a></h3>
+</div>''';
+      const source = RssSource(
+        url: 'https://site.example/list',
+        name: '规则源',
+        ruleArticles: 'id.content@h3',
+        ruleTitle: 'a@textNodes',
+        ruleLink: 'a@href',
+      );
+      final items = parseRuleBasedArticles(source, page);
+      expect(items, hasLength(2));
+      expect(items.first.title, '第一条');
+      expect(items.first.link, 'https://site.example/book/1.html');
+      expect(items.last.link, 'https://x.example/2.html');
+    });
+
+    test('规则匹配不到 → RssException（不静默返回空）', () {
+      const source = RssSource(
+        url: 'https://site.example/list',
+        name: '规则源',
+        ruleArticles: 'id.nope@h3',
+      );
+      expect(
+        () => parseRuleBasedArticles(source, '<html><body></body></html>'),
+        throwsA(isA<RssException>()),
+      );
+    });
+  });
+
   group('订阅源仓库', () {
-    setUp(() => SharedPreferences.setMockInitialValues({}));
+    // 关掉内置订阅源注入，让用例只考察导入/去重/已读。
+    setUp(() => SharedPreferences.setMockInitialValues({'rss.seeded.v1': true}));
 
     test('导入 legado rssSource 数组，按 url 去重', () async {
       final store = RssStore(await SharedPreferences.getInstance());

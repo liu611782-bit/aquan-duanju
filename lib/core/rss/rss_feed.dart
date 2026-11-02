@@ -5,6 +5,7 @@ import 'dart:convert';
 
 import 'package:xml/xml.dart';
 
+import '../books/book_rule.dart';
 import '../sources/source_fetch.dart';
 import '../sources/source_import.dart';
 import 'rss_models.dart';
@@ -28,7 +29,49 @@ Future<List<RssArticle>> fetchRssFeed(
     throw RssException('抓取失败：${result.error.isEmpty ? '无响应' : result.error}');
   }
   final text = utf8.decode(result.bytes!, allowMalformed: true);
+  if (source.isRuleBased) return parseRuleBasedArticles(source, text);
   return parseRssArticles(text);
+}
+
+/// 网页规则订阅源（legado `ruleArticles`）：抓列表页 → 逐条取标题/链接/正文。
+///
+/// 复用书源的规则求值器（CSS / XPath / JSON 都支持），不引入第二套解析。
+List<RssArticle> parseRuleBasedArticles(RssSource source, String page) {
+  final nodes = BookRule.evalList(page, source.ruleArticles);
+  if (nodes.isEmpty) {
+    throw const RssException('规则没有匹配到条目（页面结构可能变了）');
+  }
+  final out = <RssArticle>[];
+  for (final node in nodes) {
+    final title = _eval(node, source.ruleTitle);
+    final link = _absolute(source.url, _eval(node, source.ruleLink));
+    final content = _eval(node, source.ruleContent);
+    if (title.isEmpty && link.isEmpty) continue;
+    out.add(RssArticle(
+      title: title.isEmpty ? link : title,
+      link: link,
+      summary: title,
+      content: content,
+    ));
+  }
+  return out;
+}
+
+String _eval(Object node, String rule) =>
+    rule.trim().isEmpty ? '' : BookRule.evalString(node, rule);
+
+String _absolute(String base, String href) {
+  if (href.isEmpty) return '';
+  final uri = Uri.tryParse(href);
+  if (uri == null) return href;
+  if (uri.hasScheme) return href;
+  final baseUri = Uri.tryParse(base);
+  if (baseUri == null) return href;
+  try {
+    return baseUri.resolveUri(uri).toString();
+  } catch (_) {
+    return href;
+  }
 }
 
 class RssException implements Exception {
