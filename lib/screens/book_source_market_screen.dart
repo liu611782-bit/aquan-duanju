@@ -104,22 +104,20 @@ class _BookSourceMarketScreenState extends State<BookSourceMarketScreen> {
       _snack('没有勾选任何书源');
       return;
     }
-    final usable = selected.where((c) => c.ok).toList();
-    final skipped = selected.length - usable.length;
-    if (usable.isEmpty) {
-      _snack('勾选的 $skipped 个源都不可用，已全部跳过');
-      return;
-    }
+    // 校验只是「探测」，不是裁决：搜索无结果/超时的源在人工手里可能仍然能用。
+    // 因此**全部导入**——验证通过的启用，没通过的停用（留着，随时能开）。
+    final okCount = selected.where((c) => c.ok).length;
     setState(() => _importing = true);
     final added = await _store.importAll([
-      for (final c in usable) c.source.copyWithEnabled(true),
+      for (final c in selected) c.source.copyWithEnabled(c.ok),
     ]);
     if (!mounted) return;
     setState(() => _importing = false);
     Navigator.pop(context);
     _snack(added == 0
         ? '这些源已在书源列表里（重复导入已去重）'
-        : '导入 $added 个可用书源${skipped > 0 ? '，跳过 $skipped 个不可用' : ''}');
+        : '导入 $added 个源：$okCount 个校验通过已启用，'
+            '${selected.length - okCount} 个未通过已停用（可在书源管理里手动开启）');
   }
 
   /// 站点入口：用系统浏览器打开，用户自己找 JSON 地址。

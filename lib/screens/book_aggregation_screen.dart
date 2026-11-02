@@ -13,6 +13,7 @@ import '../widgets/common.dart';
 import '../widgets/cookie_dialog.dart';
 import 'book_source_book_page.dart';
 import 'book_source_market_screen.dart';
+import 'rss_screen.dart';
 import 'wenku8_browse_screen.dart';
 
 /// 小说聚合：legado 书源聚合搜索 → 书详情/目录 → 接现有阅读器。
@@ -102,6 +103,13 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
       appBar: AppBar(
         title: const Text('小说聚合'),
         actions: [
+          IconButton(
+            tooltip: '订阅（RSS/Atom）',
+            icon: const Icon(Icons.rss_feed),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const RssScreen()),
+            ),
+          ),
           IconButton(
             tooltip: '轻小说文库（内置书城）',
             icon: const Icon(Icons.local_library_outlined),
