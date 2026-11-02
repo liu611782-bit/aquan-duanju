@@ -170,6 +170,9 @@ class ReaderSpeechController extends ChangeNotifier {
   AudioTones? _tones;
   AudioTone? _tone;
 
+  /// 音色表属于哪本书（null = 未探测/已失效）。
+  String? _tonesBookId;
+
   /// 时间点真值源：音轨路径 = [ParagraphTimelineAdapter]（委托既有 [AudioTimepoints]，
   /// 逐项行为不变），TTS 路径 = [SpeechTimeline]。高亮与跳段只认这一个抽象。
   SpeechPositions _positions = const ParagraphTimelineAdapter(
@@ -466,9 +469,17 @@ class ReaderSpeechController extends ChangeNotifier {
     // 新会话（含换书）：预取去重按 chapterId、不含书号，不同书恰好同名的章 id
     // 不能隔空挡掉本次预取，会话起点统一清空。
     _prefetcher.invalidate();
+    // 音色表按**书**缓存：控制器是全局单例，听过的番茄书会留下 _tones；
+    // 若不按 bookId 失效，换到第三方书时会直接跳过探测、拿 URL 当章节 id
+    // 去请求音轨，报 `invalid chapter id "https://…"`。
+    if (_tones != null && _tonesBookId != bookId) {
+      _tones = null;
+      _tone = null;
+    }
     if (_tones == null) {
       try {
         _tones = await _api.audioTones(bookId);
+        _tonesBookId = bookId;
       } catch (e) {
         // 第三方书源 / 本地书：id 不是番茄的，音轨接口必然拒绝。
         // 这不是错误，直接按「没有平台音轨」继续走本地合成（TTS）。
@@ -1348,6 +1359,26 @@ class ReaderSpeechController extends ChangeNotifier {
     notify();
     final chapter = _chapters[index];
     final resumeMs = keepPosition ? _position.inMilliseconds : 0;
+    // 第三方书源的章节 id 是 URL / `booksrc:…`，番茄音轨接口只认纯数字。
+    // 直接改走本地合成，不再把 URL 当章节号发出去。
+    if (!RegExp(r'^\d+$').hasMatch(chapter.id.trim())) {
+      _loading = false;
+      if (!_ttsEnabled) {
+        _useTts = false;
+        _error = '这本书没有官方音轨（已改用本地朗读，可在设置里开启）';
+        notify();
+        return;
+      }
+      _useTts = true;
+      await _startTts(
+        index,
+        startParagraph: startParagraph,
+        startRatio: startRatio,
+        keepPosition: keepPosition,
+        explicitStart: explicitStart,
+      );
+      return;
+    }
     try {
       final track = await _api.audioStream(_bookId, chapter.id, tone.id);
       if (epoch != _epoch) return;
