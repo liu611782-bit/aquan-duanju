@@ -1,39 +1,61 @@
 import 'package:flutter/material.dart';
 
-/// 书源 Cookie 编辑对话框（Cloudflare `cf_clearance` / 登录态会话）。
+/// 书源鉴权编辑结果。
+typedef BookSourceAuth = ({String cookie, String userAgent});
+
+/// 书源 Cookie + User-Agent 编辑对话框。
 ///
-/// 返回编辑后的 Cookie（empty = 清空）；取消返回 null。
-Future<String?> showBookSourceCookieDialog(
+/// Cloudflare 的 `cf_clearance` 与 UA 绑定，两者必须成对填写，否则依旧 403；
+/// 登录态站点只需要 Cookie。返回 null 表示取消。
+Future<BookSourceAuth?> showBookSourceAuthDialog(
   BuildContext context, {
   required String title,
-  required String initial,
+  String cookie = '',
+  String userAgent = '',
 }) async {
-  final controller = TextEditingController(text: initial);
-  final result = await showDialog<String>(
+  final cookieController = TextEditingController(text: cookie);
+  final uaController = TextEditingController(text: userAgent);
+  final result = await showDialog<BookSourceAuth>(
     context: context,
     builder: (dialogContext) => AlertDialog(
-      title: Text('Cookie · $title'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            '粘贴浏览器里的 Cookie（形如 `cf_clearance=xxx; other=yyy`）。'
-            '站点有 Cloudflare 人机校验时，这一步能绕过 403；'
-            'Cookie 过期后需重新复制。留空表示不发送 Cookie。',
-            style: TextStyle(fontSize: 12, height: 1.5),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: controller,
-            minLines: 3,
-            maxLines: 6,
-            decoration: const InputDecoration(
-              hintText: 'cf_clearance=...',
-              border: OutlineInputBorder(),
+      title: Text('Cookie / UA · $title'),
+      content: SizedBox(
+        width: 520,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '站点有 Cloudflare 人机校验时（返回 403「Just a moment」）：\n'
+              '1. 用浏览器打开该站点并通过校验；\n'
+              '2. F12 → Application → Cookies，复制 cf_clearance 等整行；\n'
+              '3. 同一次请求的 User-Agent 也一并粘贴（Cookie 与 UA 绑定）。',
+              style: TextStyle(fontSize: 12, height: 1.5),
             ),
-          ),
-        ],
+            const SizedBox(height: 12),
+            TextField(
+              controller: cookieController,
+              minLines: 2,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                labelText: 'Cookie',
+                hintText: 'cf_clearance=...',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: uaController,
+              minLines: 1,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: 'User-Agent（留空用内置 Chrome UA）',
+                hintText: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
       ),
       actions: [
         TextButton(
@@ -41,12 +63,16 @@ Future<String?> showBookSourceCookieDialog(
           child: const Text('取消'),
         ),
         FilledButton(
-          onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+          onPressed: () => Navigator.of(dialogContext).pop((
+            cookie: cookieController.text.trim(),
+            userAgent: uaController.text.trim(),
+          )),
           child: const Text('保存'),
         ),
       ],
     ),
   );
-  controller.dispose();
+  cookieController.dispose();
+  uaController.dispose();
   return result;
 }

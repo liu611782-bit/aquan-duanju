@@ -85,6 +85,7 @@ class BookSourceStore extends ChangeNotifier {
           ruleContent: existing.ruleContent,
           jsLib: existing.jsLib,
           cookie: existing.cookie,
+          userAgent: existing.userAgent,
           format: builtin.format,
           rawRuleJson: existing.rawRuleJson,
         );

@@ -180,5 +180,27 @@ void main() {
       expect(source.copyWithCookie('').cookie, isEmpty);
       expect(source.copyWithCookie('a=1').cookie, 'a=1');
     });
+
+    test('Cookie 与 UA 成对往返（Cloudflare cf_clearance 绑定 UA）', () {
+      const source = BookSource(
+        url: 'https://www.wenku8.net',
+        name: 'Wenku8',
+        format: BookSourceFormat.wenku8,
+      );
+      final withAuth = source.copyWithAuth(
+        cookie: 'cf_clearance=abc',
+        userAgent: 'Mozilla/5.0 TestUA',
+      );
+      expect(withAuth.cookie, 'cf_clearance=abc');
+      expect(withAuth.userAgent, 'Mozilla/5.0 TestUA');
+
+      final restored = BookSource.fromJson(withAuth.toJson());
+      expect(restored.cookie, 'cf_clearance=abc');
+      expect(restored.userAgent, 'Mozilla/5.0 TestUA');
+
+      // 只改 Cookie 不丢 UA
+      expect(withAuth.copyWithCookie('x=1').userAgent, 'Mozilla/5.0 TestUA');
+      expect(withAuth.copyWithEnabled(true).userAgent, 'Mozilla/5.0 TestUA');
+    });
   });
 }

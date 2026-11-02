@@ -454,17 +454,19 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
   /// 编辑 Cookie：Cloudflare 站点（如 Wenku8）需要浏览器通过校验后的
   /// `cf_clearance`，登录态站点需要会话 Cookie。
   Future<void> _editCookie(BookSource source) async {
-    final result = await showBookSourceCookieDialog(
+    final result = await showBookSourceAuthDialog(
       context,
       title: source.name.isEmpty ? source.url : source.name,
-      initial: source.cookie,
+      cookie: source.cookie,
+      userAgent: source.userAgent,
     );
     if (result == null) return;
-    await _store.update(source.copyWithCookie(result.trim()));
+    await _store.update(
+        source.copyWithAuth(cookie: result.cookie, userAgent: result.userAgent));
     if (!mounted) return;
     setState(() {});
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(result.trim().isEmpty ? '已清空 Cookie' : '已保存 Cookie')));
+        content: Text(result.cookie.isEmpty ? '已清空 Cookie' : '已保存 Cookie')));
   }
 
   @override

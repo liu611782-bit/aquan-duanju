@@ -42,6 +42,7 @@ class BookSource {
     this.ruleContent = const BookContentRule.empty(),
     this.jsLib = '',
     this.cookie = '',
+    this.userAgent = '',
     this.format = BookSourceFormat.legado,
     this.rawRuleJson = '',
   });
@@ -68,6 +69,12 @@ class BookSource {
   /// 用于 Cloudflare 人机校验后的 `cf_clearance`、或站点强制登录态的场景：
   /// 从浏览器开发者工具复制后填入，provider 每次请求带上。
   final String cookie;
+
+  /// 自定义 User-Agent。
+  ///
+  /// Cloudflare 的 `cf_clearance` 与 UA **绑定**：Cookie 来自哪个浏览器，
+  /// 请求就必须用同一个 UA，否则依旧 403（所以这两项要一起填）。
+  final String userAgent;
 
   /// 方言：legado 走 `BookSourceRuntime`；soNovel 走 `SoNovelRuntime`（用 [rawRuleJson]）。
   final BookSourceFormat format;
@@ -111,12 +118,16 @@ class BookSource {
         ruleContent: ruleContent,
         jsLib: jsLib,
         cookie: cookie,
+        userAgent: userAgent,
         format: format,
         rawRuleJson: rawRuleJson,
       );
 
   /// 换 Cookie（书源管理里粘贴 cf_clearance 用）。
-  BookSource copyWithCookie(String cookie) => BookSource(
+  BookSource copyWithCookie(String cookie) => copyWithAuth(cookie: cookie);
+
+  /// 换 Cookie + UA（Cloudflare 场景两者必须成对）。
+  BookSource copyWithAuth({String? cookie, String? userAgent}) => BookSource(
         url: url,
         name: name,
         group: group,
@@ -127,7 +138,8 @@ class BookSource {
         ruleToc: ruleToc,
         ruleContent: ruleContent,
         jsLib: jsLib,
-        cookie: cookie,
+        cookie: cookie ?? this.cookie,
+        userAgent: userAgent ?? this.userAgent,
         format: format,
         rawRuleJson: rawRuleJson,
       );
@@ -162,6 +174,7 @@ class BookSource {
       ruleContent: BookContentRule.fromJson(group(json['ruleContent'])),
       jsLib: json['jsLib']?.toString() ?? '',
       cookie: json['aquanCookie']?.toString() ?? '',
+      userAgent: json['aquanUserAgent']?.toString() ?? '',
     );
   }
 
@@ -219,6 +232,7 @@ class BookSource {
         'ruleContent': ruleContent.toJson(),
         if (jsLib.isNotEmpty) 'jsLib': jsLib,
         if (cookie.isNotEmpty) 'aquanCookie': cookie,
+        if (userAgent.isNotEmpty) 'aquanUserAgent': userAgent,
         // 方言往返：legado 键名与其它方言不相交，靠显式字段保真（本地/内置源必需）。
         if (format != BookSourceFormat.legado) 'aquanFormat': format.name,
       };

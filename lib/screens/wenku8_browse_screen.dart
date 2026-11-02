@@ -95,16 +95,18 @@ class _Wenku8BrowseScreenState extends State<Wenku8BrowseScreen>
   Future<void> _editCookie() async {
     final store = AppScope.read(context).bookSources;
     final current = store.byUrl(widget.source.url) ?? widget.source;
-    final cookie = await showBookSourceCookieDialog(
+    final auth = await showBookSourceAuthDialog(
       context,
       title: current.name.isEmpty ? current.url : current.name,
-      initial: current.cookie,
+      cookie: current.cookie,
+      userAgent: current.userAgent,
     );
-    if (cookie == null) return;
-    await store.update(current.copyWithCookie(cookie.trim()));
+    if (auth == null) return;
+    await store.update(
+        current.copyWithAuth(cookie: auth.cookie, userAgent: auth.userAgent));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(cookie.trim().isEmpty ? '已清空 Cookie' : '已保存 Cookie，正在重试…')));
+        content: Text(auth.cookie.isEmpty ? '已清空 Cookie' : '已保存，正在重试…')));
     await _loadRank(reset: true);
     await _loadClasses();
   }

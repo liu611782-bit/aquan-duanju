@@ -262,13 +262,15 @@ class Wenku8Provider implements BookSourceProvider {
     final url = uri.toString();
     if (enforceSsrf) SourceImporter.validateImportUrl(url);
     final cookie = (source?.cookie ?? '').trim();
+    // Cloudflare 的 cf_clearance 与 UA 绑定：用户填了 UA 就必须用它。
+    final ua = (source?.userAgent ?? '').trim();
     final base = source == null ? baseUrl : _baseOf(source);
     final result = await fetchProbe(
       url,
       enforceSsrf: enforceSsrf,
       maxBytes: 2 * 1024 * 1024,
       headers: {
-        'User-Agent': _kWenku8UserAgent,
+        'User-Agent': ua.isNotEmpty ? ua : _kWenku8UserAgent,
         'Accept':
             'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.6',
@@ -282,11 +284,12 @@ class Wenku8Provider implements BookSourceProvider {
       if (result.statusCode == 403) {
         throw BookSourceException(cookie.isEmpty
             ? 'HTTP 403：站点启用了 Cloudflare 人机校验，普通请求会被拦。'
-                '解决办法：① 浏览器打开站点并通过校验后，把 Cookie 里的 '
-                'cf_clearance 复制到「书源管理 → 轻小说文库 → 设置 Cookie」；'
-                '② 或把书源地址换成可直连的镜像域名。'
-            : 'HTTP 403：Cookie 可能已过期（cf_clearance 有效期通常几小时）。'
-                '请重新从浏览器复制 Cookie 后再试。');
+                '解决办法：浏览器打开站点并通过校验后，把 Cookie 里的 '
+                'cf_clearance 与该浏览器的 User-Agent 一起填到'
+                '「书源管理 → 轻小说文库 → Cookie」；或把书源地址换成可直连的镜像域名。'
+            : 'HTTP 403：Cookie 已失效或与 UA 不匹配。'
+                '注意 cf_clearance 同时绑定浏览器 UA 与出口 IP（有效期通常几小时）：'
+                '请用同一个浏览器重新复制 Cookie，并把它的 User-Agent 一起填入。');
       }
       throw BookSourceException(result.error.isEmpty ? '请求失败' : result.error);
     }
