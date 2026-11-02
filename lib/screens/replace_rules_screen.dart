@@ -32,6 +32,33 @@ class ReplaceRulesScreen extends StatelessWidget {
                 tooltip: '导入导出',
                 icon: const Icon(Icons.swap_vert),
                 onSelected: (value) async {
+                  if (value == 'legado') {
+                    // 吸收「阅读」净化规则：剪贴板里的 legado 净化 JSON。
+                    final data = await Clipboard.getData(Clipboard.kTextPlain);
+                    final text = data?.text ?? '';
+                    final parsed = parseLegadoPurificationRules(text);
+                    if (parsed.isEmpty) {
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                        const SnackBar(
+                            content: Text('剪贴板里没有可识别的净化规则 JSON')),
+                      );
+                      return;
+                    }
+                    for (final rule in parsed) {
+                      await store.add(
+                        name: rule.name,
+                        pattern: rule.pattern,
+                        replacement: rule.replacement,
+                        isRegex: rule.isRegex,
+                      );
+                    }
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                      SnackBar(content: Text('已导入 ${parsed.length} 条净化规则')),
+                    );
+                    return;
+                  }
                   if (value == 'export') {
                     final json = const JsonEncoder.withIndent('  ').convert(
                       <String, dynamic>{
@@ -78,6 +105,10 @@ class ReplaceRulesScreen extends StatelessWidget {
                 itemBuilder: (context) => const [
                   PopupMenuItem(value: 'export', child: Text('复制自定义规则')),
                   PopupMenuItem(value: 'import', child: Text('从剪贴板导入')),
+                  PopupMenuItem(
+                    value: 'legado',
+                    child: Text('导入 legado 净化规则'),
+                  ),
                 ],
               ),
               TextButton(

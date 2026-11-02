@@ -4,6 +4,8 @@
 /// 一条规则命中后段落变空就把整段丢掉，这样分页不会留下空白行。
 library;
 
+import 'dart:convert';
+
 /// 规则作用域。
 enum ReplaceScope {
   global('全部书籍'),
@@ -180,6 +182,54 @@ RegExp? _compile(String pattern) {
   }
   _cache[pattern] = compiled;
   return compiled;
+}
+
+/// 解析 legado/阅读 的「净化规则」JSON，转成本工程的 [ReplaceRule]。
+///
+/// 兼容字段：`name`/`rule`（正则）/`replacement`/`isRegex`/`isEnabled`，
+/// 也接受 `pattern` 与 `{replaceRules:[...]}` 包装；无法识别的条目跳过。
+List<ReplaceRule> parseLegadoPurificationRules(String text) {
+  final trimmed = text.trim();
+  if (trimmed.isEmpty) return const [];
+  Object? decoded;
+  try {
+    decoded = jsonDecode(trimmed);
+  } catch (_) {
+    return const [];
+  }
+  final List<dynamic> items;
+  if (decoded is List) {
+    items = decoded;
+  } else if (decoded is Map<String, dynamic>) {
+    final list = decoded['replaceRules'] ?? decoded['rules'];
+    if (list is List) {
+      items = list;
+    } else {
+      items = [decoded];
+    }
+  } else {
+    return const [];
+  }
+
+  final out = <ReplaceRule>[];
+  for (var i = 0; i < items.length; i++) {
+    final item = items[i];
+    if (item is! Map) continue;
+    final name = (item['name'] ?? '净化规则 ${i + 1}').toString();
+    final pattern = (item['rule'] ?? item['pattern'] ?? '').toString();
+    if (pattern.isEmpty) continue;
+    // 只收能编译的正则：坏规则塞进去只会静默失效。
+    if (!isValidPattern(pattern)) continue;
+    out.add(ReplaceRule(
+      id: 'imp_${name.hashCode.toRadixString(36)}_$i',
+      name: name,
+      pattern: pattern,
+      replacement: (item['replacement'] ?? '').toString(),
+      isRegex: item['isRegex'] is bool ? item['isRegex'] as bool : true,
+      enabled: item['isEnabled'] is bool ? item['isEnabled'] as bool : true,
+    ));
+  }
+  return out;
 }
 
 /// 校验一条正则是否可用（规则编辑页用）。

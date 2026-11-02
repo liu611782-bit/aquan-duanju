@@ -6,6 +6,7 @@ import 'book_source_checker.dart';
 import 'book_source_model.dart';
 import 'book_source_runtime.dart';
 import 'book_source_seed.dart';
+import 'seed_parsing.dart';
 
 /// 书源仓库扫描事件（对齐影视 `source_market` 的事件流范式）。
 sealed class BookMarketEvent {}
@@ -110,21 +111,45 @@ class BookSourceMarket {
   }
 
   /// 依次试种子的等价地址，取第一个能连通且可 JSON 解析的。
+  ///
+  /// 兼容两种种子形态：
+  /// - 直读 JSON（GitHub raw / jsdelivr / bitbucket / 自建）；
+  /// - **HTML 索引页**（aoaostar、喵公子这类）：页面里给出 `.json` 下载链接，
+  ///   抓页面 → 抽链接 → 再取 JSON（最多试 3 个链接）。
   Future<Object?> _fetchSeed(BookSeed seed) async {
     for (final url in seed.urls) {
-      final result = await fetchProbe(
-        url,
-        enforceSsrf: enforceSsrf,
-        connectTimeout: connectTimeout ?? const Duration(seconds: 8),
-        readTimeout: readTimeout ?? const Duration(seconds: 12),
-        maxBytes: 8 * 1024 * 1024,
-      );
-      if (!result.ok || result.bytes == null) continue;
-      try {
-        return jsonDecode(utf8.decode(result.bytes!, allowMalformed: true));
-      } catch (_) {/* 换下一个镜像再试 */}
+      final text = await _fetchText(url);
+      if (text == null) continue;
+      final direct = tryDecodeBookSourceJson(text);
+      if (direct != null) return direct;
+      // HTML 索引页：可能给的是「一条源一个 json」（aoaostar），合并多份再返回。
+      final merged = <dynamic>[];
+      for (final link in jsonLinksInHtml(text, baseUrl: url).take(8)) {
+        final nested = await _fetchText(link);
+        if (nested == null) continue;
+        final parsed = tryDecodeBookSourceJson(nested);
+        if (parsed is List) {
+          merged.addAll(parsed);
+        } else if (parsed != null) {
+          merged.add(parsed);
+        }
+        if (merged.length >= 200) break;
+      }
+      if (merged.isNotEmpty) return merged;
     }
     return null;
+  }
+
+  Future<String?> _fetchText(String url) async {
+    final result = await fetchProbe(
+      url,
+      enforceSsrf: enforceSsrf,
+      connectTimeout: connectTimeout ?? const Duration(seconds: 8),
+      readTimeout: readTimeout ?? const Duration(seconds: 12),
+      maxBytes: 8 * 1024 * 1024,
+    );
+    if (!result.ok || result.bytes == null) return null;
+    return utf8.decode(result.bytes!, allowMalformed: true);
   }
 
   Stream<BookSourceCheck> _checkAll(

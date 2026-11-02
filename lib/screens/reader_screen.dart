@@ -1726,6 +1726,31 @@ class _ReaderScreenState extends State<ReaderScreen>
           child: Stack(
             children: [
               Positioned.fill(child: _buildBody(theme)),
+              // 常驻返回按钮：翻页模式下菜单是隐藏的，只靠「点中间弹菜单」找返回
+              // 很容易迷路（用户实测反馈）。这里给一个低存在感的小返回键，
+              // 菜单展开时让位给顶栏。
+              if (!_chrome)
+                Positioned(
+                  top: 6,
+                  left: 6,
+                  child: SafeArea(
+                    bottom: false,
+                    child: Opacity(
+                      opacity: 0.62,
+                      child: Material(
+                        color: theme.background.withValues(alpha: 0.72),
+                        shape: const CircleBorder(),
+                        child: IconButton(
+                          tooltip: '返回书架',
+                          visualDensity: VisualDensity.compact,
+                          iconSize: 20,
+                          icon: Icon(Icons.arrow_back, color: theme.foreground),
+                          onPressed: () => Navigator.of(context).maybePop(),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               AnimatedPositioned(
                 duration: const Duration(milliseconds: 180),
                 curve: Curves.easeOut,

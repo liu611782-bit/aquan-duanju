@@ -98,6 +98,9 @@ class _BookAudioScreenState extends State<BookAudioScreen>
   bool _loadingTrack = false;
   bool _playing = false;
 
+  /// 非番茄书（第三方书源/本地书）：没有官方音轨，改走阅读页朗读。
+  bool _notTomatoBook = false;
+
   /// 语速（番茄的听书语速 = 播放倍速）与自动连播。
   static const _speedKey = 'listen.speed';
   static const _autoNextKey = 'listen.autoNext';
@@ -258,6 +261,16 @@ class _BookAudioScreenState extends State<BookAudioScreen>
   }
 
   Future<void> _loadTones() async {
+    // 番茄官方音轨只认数字 bookId；第三方书源/本地书的 id 是
+    // `booksrc:…` / `local:…`，调用会被 Go 侧判为 INVALID_OPTIONS。
+    // 这类书走阅读页的朗读（TTS），不要在这里发请求。
+    if (!RegExp(r'^\d+$').hasMatch(widget.bookId.trim())) {
+      setState(() {
+        _notTomatoBook = true;
+        _loadingTones = false;
+      });
+      return;
+    }
     try {
       final tones = await AppScope.read(context).api.audioTones(widget.bookId);
       if (!mounted) return;
@@ -863,7 +876,36 @@ class _BookAudioScreenState extends State<BookAudioScreen>
           ),
         ],
       ),
-      body: _loadingTones
+      body: _notTomatoBook
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(28),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.headphones_outlined,
+                        size: 52, color: theme.colorScheme.outline),
+                    const SizedBox(height: 14),
+                    Text('这本书没有官方音轨',
+                        style: theme.textTheme.titleSmall),
+                    const SizedBox(height: 8),
+                    Text(
+                      '番茄音轨只适用于书城内的书；第三方书源与本地书请用'
+                      '阅读页顶部的「听书」按钮（系统 / 在线语音合成）。',
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.bodySmall
+                          ?.copyWith(color: theme.colorScheme.outline, height: 1.6),
+                    ),
+                    const SizedBox(height: 18),
+                    FilledButton.tonal(
+                      onPressed: () => Navigator.of(context).maybePop(),
+                      child: const Text('返回'),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          : _loadingTones
           ? const Center(child: CircularProgressIndicator())
           : (_error != null && _tones == null)
               ? ErrorRetryView(error: _error!, onRetry: _loadTones)

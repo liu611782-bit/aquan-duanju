@@ -29,12 +29,14 @@ class BookSeed {
   static const _jsdelivr = 'https://cdn.jsdelivr.net/gh';
   static const _fastly = 'https://fastly.jsdelivr.net/gh';
 
-  /// 生成 GitHub raw + jsdelivr + fastly 三个等价地址（owner/repo@ref/path）。
+  /// 生成 GitHub 多镜像等价地址（owner/repo/branch/path）。
+  ///
+  /// 顺序按「国内可达性」排：jsdelivr 系在两网都较稳，raw.githubusercontent 常被重置，
+  /// 放最后兜底。扫描时命中即用，不会全部请求一遍。
   static List<String> github(String ownerRepoRefPath) => [
-        '$_ghRaw/$ownerRepoRefPath',
-        // raw 用 /owner/repo/branch/path；jsdelivr 用 /gh/owner/repo@branch/path
-        '$_jsdelivr/${_toJsdelivr(ownerRepoRefPath)}',
         '$_fastly/${_toJsdelivr(ownerRepoRefPath)}',
+        '$_jsdelivr/${_toJsdelivr(ownerRepoRefPath)}',
+        '$_ghRaw/$ownerRepoRefPath',
       ];
 
   static String _toJsdelivr(String rawPath) {
@@ -53,6 +55,8 @@ final List<BookSeed> builtinBookSeeds = [
     id: 'xiu2-yuedu',
     name: '「阅读」APP 精品书源 (XIU2)',
     urls: [
+      // 实测：bitbucket 镜像在国内网络可直连（GitHub raw / jsdelivr 多被重置）。
+      'https://bitbucket.org/xiu2/yuedu/raw/master/shuyuan',
       'https://fastly.jsdelivr.net/gh/XIU2/Yuedu@master/shuyuan',
       'https://cdn.jsdelivr.net/gh/XIU2/Yuedu@master/shuyuan',
       'https://raw.githubusercontent.com/XIU2/Yuedu/master/shuyuan',
@@ -67,6 +71,17 @@ final List<BookSeed> builtinBookSeeds = [
     id: 'zgq-inc-source',
     name: 'zgq-inc 源整合',
     urls: BookSeed.github('zgq-inc/source/master/data/source_url.json'),
+  ),
+  // HTML 索引页：页面里给出 .json 导出链接，扫描器会抓页面再取 JSON。
+  BookSeed(
+    id: 'aoaostar-legado',
+    name: 'legado 源 (aoaostar)',
+    urls: ['https://legado.aoaostar.com/'],
+  ),
+  BookSeed(
+    id: 'miaogongzi-yuedu',
+    name: '喵公子阅读书源',
+    urls: ['https://yuedu.miaogongzi.net/'],
   ),
 ];
 

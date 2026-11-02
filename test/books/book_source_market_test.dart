@@ -117,11 +117,12 @@ void main() {
     expect(events.whereType<BookScanDone>().single.stats.failedSeeds, 1);
   });
 
-  test('BookSeed.github 生成 raw + jsdelivr + fastly 三等价地址', () {
+  test('BookSeed.github 生成三镜像，raw 垫底（国内常被重置）', () {
     final urls = BookSeed.github('o/r/br/path.json');
     expect(urls, hasLength(3));
-    expect(urls[0], 'https://raw.githubusercontent.com/o/r/br/path.json');
+    // 顺序：fastly → cdn → raw（命中即用，不会全跑一遍）
+    expect(urls[0], 'https://fastly.jsdelivr.net/gh/o/r@br/path.json');
     expect(urls[1], 'https://cdn.jsdelivr.net/gh/o/r@br/path.json');
-    expect(urls[2], 'https://fastly.jsdelivr.net/gh/o/r@br/path.json');
+    expect(urls[2], 'https://raw.githubusercontent.com/o/r/br/path.json');
   });
 }

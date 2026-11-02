@@ -1,6 +1,8 @@
 import 'dart:io';
 
+import 'package:aquan_duanju/core/books/book_source_market.dart';
 import 'package:aquan_duanju/core/books/book_source_runtime.dart';
+import 'package:aquan_duanju/core/books/book_source_seed.dart';
 import 'package:aquan_duanju/core/books/builtin_sources.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -38,6 +40,21 @@ void main() {
       // `@html` 保留段落：应当还能看到标签（阅读器随后切段）。
       expect(text.contains('<p') || text.contains('\n'), isTrue);
     }, skip: _netEnabled ? false : '设 AQUAN_NET_TESTS=1 才跑真站测试', timeout: const Timeout(Duration(minutes: 2)));
+
+    test('书源仓库种子（XIU2 镜像）能拉到并解析出源', () async {
+      final seed = builtinBookSeeds.firstWhere((s) => s.id == 'xiu2-yuedu');
+      final market = BookSourceMarket(
+        connectTimeout: const Duration(seconds: 15),
+        readTimeout: const Duration(seconds: 30),
+      );
+      final events = await market
+          .scan(seeds: [seed], query: '斗破', fetchContent: false, concurrency: 12)
+          .toList();
+      final parsed = events.whereType<BookSeedParsed>().toList();
+      expect(parsed, isNotEmpty, reason: '种子应能拉到 JSON 并解析');
+      expect(parsed.first.sourceCount, greaterThan(0));
+    }, skip: _netEnabled ? false : '设 AQUAN_NET_TESTS=1 才跑真站测试',
+        timeout: const Timeout(Duration(minutes: 3)));
 
     test('每个内置源都能被注册表识别为 legado', () {
       for (final source in builtinBookSources()) {
