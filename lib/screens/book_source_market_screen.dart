@@ -6,6 +6,7 @@ import '../core/books/book_source_market.dart';
 import '../core/books/book_source_model.dart';
 import '../core/books/book_source_seed.dart';
 import '../core/books/book_source_store.dart';
+import '../core/books/builtin_sources.dart';
 import '../widgets/common.dart';
 
 /// 书源仓库：扫描内置种子 → 逐源三连校验（搜书/详情/目录）→ 勾选导入。
@@ -120,6 +121,20 @@ class _BookSourceMarketScreenState extends State<BookSourceMarketScreen> {
         : '导入 $added 个可用书源${skipped > 0 ? '，跳过 $skipped 个不可用' : ''}');
   }
 
+  /// 导入随应用附带的可用源（用户删过内置源后想找回来）。
+  Future<void> _importBundled() async {
+    final sources = builtinBookSources();
+    if (sources.isEmpty) {
+      _snack('没有内置源');
+      return;
+    }
+    setState(() => _importing = true);
+    final added = await _store.importAll(sources);
+    if (!mounted) return;
+    setState(() => _importing = false);
+    _snack('内置可用源：新增 $added 个（已存在则刷新规则）');
+  }
+
   void _snack(String text) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
@@ -148,6 +163,24 @@ class _BookSourceMarketScreenState extends State<BookSourceMarketScreen> {
           TextButton(
             onPressed: (_importing || _selected.isEmpty) ? null : _import,
             child: Text('导入(${_selected.length})'),
+          ),
+          PopupMenuButton<String>(
+            tooltip: '更多',
+            onSelected: (value) {
+              if (value == 'bundled') _importBundled();
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'bundled',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.verified_outlined),
+                  title: Text('导入内置可用源'),
+                  subtitle: Text('随应用附带、免登录实测可用的源'),
+                ),
+              ),
+            ],
           ),
         ],
       ),

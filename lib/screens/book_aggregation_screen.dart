@@ -223,8 +223,9 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    '常见原因：源站已失效 / 被墙 / 需要 Cloudflare 校验。'
-                    '可在「书源管理」里给源填 Cookie，或导入新的书源。',
+                    '常见原因：源站已失效 / 被墙 / 需要登录或 Cloudflare 校验。\n'
+                    '处理：打开「书源管理 → 清理失效源」一键删除不可用的源；'
+                    '内置的「轻之文库」免登录可用（删掉后不会自动恢复）。',
                     style: theme.textTheme.bodySmall
                         ?.copyWith(color: theme.colorScheme.outline),
                   ),

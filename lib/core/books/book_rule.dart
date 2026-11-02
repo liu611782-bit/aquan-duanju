@@ -488,6 +488,10 @@ class BookRule {
     if (attr == 'text' || attr == 'textNodes') {
       return root.text.trim();
     }
+    // `@html`：保留段落的正文（大量真实源用 `@html`，再交给阅读器切段）。
+    if (attr == 'html' || attr == 'innerHtml') {
+      return root.innerHtml.trim();
+    }
     if (_attrLike(attr)) {
       return root.attributes[attr] ?? '';
     }

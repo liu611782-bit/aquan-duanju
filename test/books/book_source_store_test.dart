@@ -8,9 +8,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  Future<BookSourceStore> newStore() async {
+  // 默认关掉「随应用内置的规则源」，让用例只考察 provider 内置源与用户源。
+  Future<BookSourceStore> newStore({bool withBundled = false}) async {
     final prefs = await SharedPreferences.getInstance();
-    final store = BookSourceStore(prefs);
+    final store = BookSourceStore(
+      prefs,
+      bundled: withBundled ? null : () => const [],
+    );
     await store.ensureLoaded();
     return store;
   }
@@ -45,27 +49,27 @@ void main() {
 
     test('内置源可删除，删后重启不再自动注入', () async {
       final prefs = await SharedPreferences.getInstance();
-      final first = BookSourceStore(prefs);
+      final first = BookSourceStore(prefs, bundled: () => const []);
       await first.ensureLoaded();
       expect(await first.remove(kWenku8DefaultBase), isTrue);
       expect(first.byUrl(kWenku8DefaultBase), isNull);
       expect(first.isDismissed(kWenku8DefaultBase), isTrue);
 
-      final reopened = BookSourceStore(prefs);
+      final reopened = BookSourceStore(prefs, bundled: () => const []);
       await reopened.ensureLoaded();
       expect(reopened.byUrl(kWenku8DefaultBase), isNull, reason: '删过的不再注入');
     });
 
     test('内置源可启停，重启后保持用户选择', () async {
       final prefs = await SharedPreferences.getInstance();
-      final store = BookSourceStore(prefs);
+      final store = BookSourceStore(prefs, bundled: () => const []);
       await store.ensureLoaded();
       await store.setEnabled(kWenku8DefaultBase, true);
       expect(store.byUrl(kWenku8DefaultBase)!.enabled, isTrue);
       await store.setEnabled(kWenku8DefaultBase, false);
       expect(store.byUrl(kWenku8DefaultBase)!.enabled, isFalse);
 
-      final reopened = BookSourceStore(prefs);
+      final reopened = BookSourceStore(prefs, bundled: () => const []);
       await reopened.ensureLoaded();
       expect(reopened.byUrl(kWenku8DefaultBase)!.enabled, isFalse);
     });
@@ -99,10 +103,23 @@ void main() {
         registry: BookSourceProviderRegistry([
           _BuiltinOnlyProvider(fakeBuiltin),
         ]),
+        bundled: () => const [],
       );
       await store.ensureLoaded();
       expect(store.sources.single.url, 'https://fake.example');
       expect(store.builtinUrls, {'https://fake.example'});
+    });
+
+    test('随应用内置的规则源会被注入且可停用', () async {
+      final store = await newStore(withBundled: true);
+      final bundled = store.sources.where((s) => s.url == 'https://www.linovel.net');
+      expect(bundled, hasLength(1));
+      expect(bundled.single.format, BookSourceFormat.legado);
+      expect(bundled.single.enabled, isTrue);
+      expect(bundled.single.requiresJs, isFalse);
+
+      await store.setEnabled('https://www.linovel.net', false);
+      expect(store.byUrl('https://www.linovel.net')!.enabled, isFalse);
     });
   });
 }

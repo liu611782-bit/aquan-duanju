@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'book_source_model.dart';
 import 'book_source_service.dart';
+import 'builtin_sources.dart';
 import 'provider/book_source_provider.dart';
 
 /// 已导入书源注册表：增删改查 + 启停（ChangeNotifier 供 UI 订阅）。
@@ -12,14 +13,21 @@ import 'provider/book_source_provider.dart';
 /// 内置源（provider 声明的，如 Wenku8）首次加载时注入；用户停用或删除后
 /// **不再重复注入**（`bookSource.builtinDismissed`），可完全按自己的源表使用。
 class BookSourceStore extends ChangeNotifier {
-  BookSourceStore(this._prefs, {BookSourceProviderRegistry? registry})
-      : _registry = registry ?? BookSourceService().registry;
+  BookSourceStore(
+    this._prefs, {
+    BookSourceProviderRegistry? registry,
+    List<BookSource> Function()? bundled,
+  })  : _registry = registry ?? BookSourceService().registry,
+        _bundled = bundled ?? builtinBookSources;
 
   static const String _key = 'bookSource.enabled';
   static const String _dismissedKey = 'bookSource.builtinDismissed';
 
   final SharedPreferences _prefs;
   final BookSourceProviderRegistry _registry;
+
+  /// 随应用内置的规则源（测试可注入空表）。
+  final List<BookSource> Function() _bundled;
 
   final _sources = <BookSource>[];
   bool _loaded = false;
@@ -81,10 +89,18 @@ class BookSourceStore extends ChangeNotifier {
     }
 
     var changed = false;
+    // 1) provider 声明的内置源（如 Wenku8，默认停用）
     for (final builtin in _registry.builtinSources) {
       if (_dismissed.contains(builtin.url)) continue;
       if (byUrl(builtin.url) != null) continue;
       _sources.add(builtin);
+      changed = true;
+    }
+    // 2) 随应用内置的**实测可用**规则源（免登录站点）
+    for (final bundled in _bundled()) {
+      if (_dismissed.contains(bundled.url)) continue;
+      if (byUrl(bundled.url) != null) continue;
+      _sources.add(bundled);
       changed = true;
     }
     if (changed) {
