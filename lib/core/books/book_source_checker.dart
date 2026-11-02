@@ -4,6 +4,7 @@ import 'provider/book_source_provider.dart';
 import 'provider/legado_provider.dart';
 import 'provider/source_probe.dart';
 import 'provider/so_novel_provider.dart';
+import 'provider/wenku8_provider.dart';
 import 'so_novel_runtime.dart';
 
 export 'provider/source_probe.dart' show kDefaultProbeQuery, describeProbeFailure;
@@ -21,6 +22,7 @@ class BookSourceChecker {
             BookSourceProviderRegistry(<BookSourceProvider>[
               LegadoProvider(runtime: runtime),
               SoNovelProvider(runtime: soNovelRuntime),
+              Wenku8Provider(),
             ]);
 
   /// 注入的 legado 运行时（测试用；null = provider 自建默认实例）。

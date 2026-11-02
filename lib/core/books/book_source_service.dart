@@ -3,6 +3,7 @@ import 'book_source_runtime.dart';
 import 'provider/book_source_provider.dart';
 import 'provider/legado_provider.dart';
 import 'provider/so_novel_provider.dart';
+import 'provider/wenku8_provider.dart';
 import 'so_novel_runtime.dart';
 
 export 'book_source_model.dart' show BookDetailData;
@@ -15,11 +16,13 @@ class BookSourceService {
   BookSourceService({
     BookSourceRuntime? legado,
     SoNovelRuntime? soNovel,
+    Wenku8Provider? wenku8,
     BookSourceProviderRegistry? registry,
   }) : registry = registry ??
             BookSourceProviderRegistry(<BookSourceProvider>[
               LegadoProvider(runtime: legado),
               SoNovelProvider(runtime: soNovel),
+              wenku8 ?? Wenku8Provider(),
             ]);
 
   final BookSourceProviderRegistry registry;

@@ -8,10 +8,10 @@ import '../core/books/book_source_store.dart';
 import '../core/books/so_novel_seed.dart';
 import '../core/error_log.dart';
 import '../core/sources/source_fetch.dart';
-import '../models/book.dart';
 import '../widgets/common.dart';
+import 'book_source_book_page.dart';
 import 'book_source_market_screen.dart';
-import 'reader_screen.dart';
+import 'wenku8_browse_screen.dart';
 
 /// 小说聚合：legado 书源聚合搜索 → 书详情/目录 → 接现有阅读器。
 ///
@@ -90,6 +90,11 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
       appBar: AppBar(
         title: const Text('小说聚合'),
         actions: [
+          IconButton(
+            tooltip: '轻小说文库（内置书城）',
+            icon: const Icon(Icons.local_library_outlined),
+            onPressed: _openWenku8,
+          ),
           IconButton(
             tooltip: '书源仓库',
             icon: const Icon(Icons.storefront_outlined),
@@ -202,10 +207,27 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
 
   Future<void> _openBook(BookSource source, BookHit hit) async {
     Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => _BookSourceBookPage(
+      builder: (_) => BookSourceBookPage(
         service: _service,
         source: source,
         hit: hit,
+      ),
+    ));
+  }
+
+  /// 内置 Wenku8 书城（分类 / 排行）。
+  Future<void> _openWenku8() async {
+    final builtin = _store.sources
+        .where((s) => s.format == BookSourceFormat.wenku8)
+        .toList();
+    if (builtin.isEmpty) {
+      _snack('内置 Wenku8 源未就绪，请稍后重试');
+      return;
+    }
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => Wenku8BrowseScreen(
+        service: _service,
+        source: builtin.first,
       ),
     ));
   }
@@ -427,8 +449,12 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
                                 overflow: TextOverflow.ellipsis),
                             subtitle: Text(
                                 [
-                                  if (s.format == BookSourceFormat.soNovel)
-                                    'so-novel',
+                                  switch (s.format) {
+                                    BookSourceFormat.soNovel => 'so-novel',
+                                    BookSourceFormat.wenku8 => '内置站点',
+                                    BookSourceFormat.local => '本地书',
+                                    BookSourceFormat.legado => '',
+                                  },
                                   if (s.group.isNotEmpty) s.group,
                                   s.url,
                                 ]
@@ -439,22 +465,34 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
                             trailing: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Switch(
-                                  value: s.enabled,
-                                  onChanged: (v) async {
-                                    await store.setEnabled(s.url, v);
-                                    if (mounted) setState(() {});
-                                  },
-                                ),
-                                IconButton(
-                                  tooltip: '删除',
-                                  icon: const Icon(Icons.delete_outline,
-                                      size: 20),
-                                  onPressed: () async {
-                                    await store.remove(s.url);
-                                    if (mounted) setState(() {});
-                                  },
-                                ),
+                                if (store.isBuiltin(s.url))
+                                  Padding(
+                                    padding: const EdgeInsets.only(right: 6),
+                                    child: Tooltip(
+                                      message: '内置源，常驻启用且不可删除',
+                                      child: Icon(Icons.lock_outline,
+                                          size: 16,
+                                          color: theme.colorScheme.primary),
+                                    ),
+                                  )
+                                else
+                                  Switch(
+                                    value: s.enabled,
+                                    onChanged: (v) async {
+                                      await store.setEnabled(s.url, v);
+                                      if (mounted) setState(() {});
+                                    },
+                                  ),
+                                if (!store.isBuiltin(s.url))
+                                  IconButton(
+                                    tooltip: '删除',
+                                    icon: const Icon(Icons.delete_outline,
+                                        size: 20),
+                                    onPressed: () async {
+                                      await store.remove(s.url);
+                                      if (mounted) setState(() {});
+                                    },
+                                  ),
                               ],
                             ),
                           ),
@@ -519,150 +557,4 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
   }
 }
 
-/// 外部书源的书详情：封面/简介/目录 → 点章进阅读器（textLoader 注入）。
-class _BookSourceBookPage extends StatefulWidget {
-  const _BookSourceBookPage({
-    required this.service,
-    required this.source,
-    required this.hit,
-  });
-
-  final BookSourceService service;
-  final BookSource source;
-  final BookHit hit;
-
-  @override
-  State<_BookSourceBookPage> createState() => _BookSourceBookPageState();
-}
-
-class _BookSourceBookPageState extends State<_BookSourceBookPage> {
-  BookDetailData? _info;
-  Object? _error;
-  bool _loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    try {
-      final info = await widget.service
-          .detail(widget.source, widget.hit.bookUrl)
-          .timeout(const Duration(seconds: 30));
-      if (!mounted) return;
-      setState(() {
-        _info = info;
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = e;
-        _loading = false;
-      });
-    }
-  }
-
-  String get _readerBookId =>
-      'booksrc:${widget.source.url}:${widget.hit.bookUrl}';
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final chapters = _info?.chapters ?? const <BookTocItem>[];
-    return Scaffold(
-      appBar: AppBar(title: Text(widget.hit.name.isEmpty
-          ? '书籍详情' : widget.hit.name)),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? ErrorRetryView(error: _error!, onRetry: _load)
-              : ListView(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-                  children: [
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(10),
-                          child: SizedBox(
-                            width: 104,
-                            height: 140,
-                            child: (widget.hit.coverUrl.isNotEmpty)
-                                ? Image.network(widget.hit.coverUrl,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (_, _, _) => Container(
-                                        color: theme.colorScheme
-                                            .surfaceContainerHighest))
-                                : Container(
-                                    color: theme
-                                        .colorScheme.surfaceContainerHighest,
-                                    child: const Icon(Icons.menu_book)),
-                          ),
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(_info?.name.isEmpty == false
-                                  ? _info!.name
-                                  : widget.hit.name,
-                                  style: theme.textTheme.titleLarge),
-                              const SizedBox(height: 4),
-                              Text(widget.hit.author,
-                                  style: theme.textTheme.bodySmall
-                                      ?.copyWith(
-                                          color: theme.colorScheme.outline)),
-                              if ((_info?.intro ?? widget.hit.intro)
-                                  .isNotEmpty) ...[
-                                const SizedBox(height: 8),
-                                Text(_info?.intro ?? widget.hit.intro,
-                                    style: theme.textTheme.bodyMedium
-                                        ?.copyWith(height: 1.4)),
-                              ],
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    Text('目录（${chapters.length} 章）',
-                        style: theme.textTheme.titleMedium),
-                    for (final c in chapters)
-                      ListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        title: Text(c.title,
-                            maxLines: 1, overflow: TextOverflow.ellipsis),
-                        onTap: c.url.isEmpty
-                            ? null
-                            : () {
-                                final bookChapters = [
-                                  for (final t in chapters)
-                                    BookChapter(
-                                        id: t.url, title: t.title),
-                                ];
-                                Navigator.of(context).push(MaterialPageRoute(
-                                  builder: (_) => ReaderScreen(
-                                    bookId: _readerBookId,
-                                    bookTitle: _info?.name.isEmpty == false
-                                        ? _info!.name
-                                        : widget.hit.name,
-                                    chapters: bookChapters,
-                                    initialIndex: bookChapters
-                                        .indexWhere((b) => b.id == c.url)
-                                        .clamp(0, bookChapters.length - 1),
-                                    textLoader: (chapter) => widget.service
-                                        .content(widget.source, chapter.id),
-                                  ),
-                                ));
-                              },
-                      ),
-                  ],
-                ),
-    );
-  }
-}
+// 书籍详情页已抽到 book_source_book_page.dart（Wenku8 浏览页复用同一实现）。
