@@ -278,5 +278,4 @@ void main() {
   });
 }
 
-/// 让 analyzer 知道 Uint8List 被用到（BytesBuilder.toBytes 返回类型）。
-typedef _Bytes = Uint8List;
+
