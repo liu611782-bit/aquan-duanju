@@ -60,6 +60,27 @@ final List<BookSeed> builtinBookSeeds = [
     name: 'legado 源站合集 (aoaostar)',
     urls: ['https://legado.aoaostar.com/'],
   ),
+  // 以下三条取自喵公子更新页的「一键导入」直链，本机实测可解析：
+  BookSeed(
+    id: 'xiu2-ns114',
+    name: 'XIU2 精品书源（镜像）',
+    urls: [
+      'https://gh.ns114.cc/github.com/XIU2/Yuedu/raw/refs/heads/master/shuyuan',
+    ],
+  ),
+  BookSeed(
+    id: 'pobing-miaogongzi',
+    name: '破冰书源 (91 个)',
+    urls: ['https://legado.miaogongzi.org/阅读书源/sy.json'],
+  ),
+  BookSeed(
+    id: 'yiove-stable-collection',
+    name: 'Yiove 稳定书源合集',
+    urls: [
+      'https://shuyuan-api.yiove.com/import/book-source-collection/'
+          'eaedccd4-1252-4962-a565-c7a342f95f90',
+    ],
+  ),
 ];
 
 /// 净化规则源（P3 吸收进 replace_rules，不参与书源三连校验）。

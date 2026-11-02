@@ -1,8 +1,11 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/book_text.dart';
+import '../core/sources/source_fetch.dart';
 import '../core/rss/rss_feed.dart';
 import '../core/rss/rss_models.dart';
 import '../core/rss/rss_store.dart';
@@ -54,6 +57,66 @@ class _RssScreenState extends State<RssScreen> {
         content: Text(added == 0 ? '没有新增（重复或不是订阅源 JSON）' : '已导入 $added 个订阅源')));
   }
 
+  /// 从 URL 导入：输入框填 JSON 地址，抓下来后按同样规则解析入库。
+  Future<void> _importFromUrl() async {
+    final store = _store;
+    if (store == null) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final controller = TextEditingController();
+    final url = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('从地址导入订阅源'),
+        content: SizedBox(
+          width: 460,
+          child: TextField(
+            controller: controller,
+            autofocus: true,
+            minLines: 1,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              labelText: '订阅源 JSON 地址',
+              hintText: 'https://…/sub.json',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+            child: const Text('导入'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    final trimmed = (url ?? '').trim();
+    if (trimmed.isEmpty) return;
+
+    final result = await fetchProbe(
+      trimmed,
+      maxBytes: 8 * 1024 * 1024,
+      connectTimeout: const Duration(seconds: 10),
+      readTimeout: const Duration(seconds: 20),
+    );
+    if (!mounted) return;
+    if (!result.ok || result.bytes == null) {
+      messenger.showSnackBar(SnackBar(
+          content: Text('抓取失败：${result.error.isEmpty ? '无响应' : result.error}')));
+      return;
+    }
+    final added =
+        await store.importJson(utf8.decode(result.bytes!, allowMalformed: true));
+    if (!mounted) return;
+    setState(() {});
+    messenger.showSnackBar(SnackBar(
+        content: Text(added == 0 ? '没有新增（重复或不是订阅源 JSON）' : '已导入 $added 个订阅源')));
+  }
+
   @override
   Widget build(BuildContext context) {
     final store = _store;
@@ -62,6 +125,11 @@ class _RssScreenState extends State<RssScreen> {
       appBar: AppBar(
         title: const Text('订阅'),
         actions: [
+          IconButton(
+            tooltip: '从地址导入（URL）',
+            icon: const Icon(Icons.link),
+            onPressed: _importFromUrl,
+          ),
           IconButton(
             tooltip: '从剪贴板导入订阅源',
             icon: const Icon(Icons.playlist_add),

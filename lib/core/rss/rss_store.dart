@@ -10,13 +10,15 @@ import 'rss_models.dart';
 
 /// 内置订阅源（首次启动注入一次；删除后不再出现）。
 const List<RssSource> kBuiltinRssSources = [
+  // 结构（2026-11 实测）：每个书源条目是 `.aui-flex` 块，标题在
+  // `.aui-flex-box h1`，直链在块内 `<a href="yuedu://...src=...json">`。
   RssSource(
     url: 'http://yuedu.miaogongzi.net/gx.html',
     name: '喵公子书源管理（更新页）',
     group: '内置 · 网页规则',
-    ruleArticles: 'id.content@h3',
-    ruleTitle: 'a@textNodes',
-    ruleLink: 'a@href',
+    ruleArticles: 'class.tab-panel-item@class.aui-flex',
+    ruleTitle: 'class.aui-flex-box@tag.h1@text',
+    ruleLink: 'tag.a@href',
   ),
 ];
 
