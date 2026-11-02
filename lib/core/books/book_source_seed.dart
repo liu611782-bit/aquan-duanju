@@ -98,3 +98,39 @@ final List<BookSeed> bookSourceAggregators = [
   BookSeed(id: 'yckceo', name: '源仓库 (yckceo)', urls: ['https://www.yckceo.com/yuedu/shuyuan/index.html']),
   BookSeed(id: 'aoaostar', name: 'legado (aoaostar)', urls: ['https://legado.aoaostar.com/']),
 ];
+
+/// 站点入口（UI 直接打开浏览器，方便用户自己复制 JSON 地址）。
+class BookSourceHub {
+  const BookSourceHub({
+    required this.name,
+    required this.url,
+    this.note = '',
+  });
+
+  final String name;
+  final String url;
+  final String note;
+}
+
+const List<BookSourceHub> bookSourceHubs = [
+  BookSourceHub(
+    name: 'Yiove 书源仓库',
+    url: 'https://shuyuan.yiove.com/book-sources',
+    note: '书源列表 / 合集（数据走 API，页面需浏览器执行 JS）',
+  ),
+  BookSourceHub(
+    name: '源仓库（防失联）',
+    url: 'https://yckceo.vip/',
+    note: '阅读 / TVBox / 搜书大师等分类入口',
+  ),
+  BookSourceHub(
+    name: 'legado 源站（aoaostar）',
+    url: 'https://legado.aoaostar.com/',
+    note: '书源 / 订阅源 / 净化规则 / TTS 引擎，含直链',
+  ),
+  BookSourceHub(
+    name: '喵公子阅读',
+    url: 'https://yuedu.miaogongzi.net/',
+    note: '书源管理与订阅源导出',
+  ),
+];

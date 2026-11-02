@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/books/book_source_market.dart';
 import '../core/books/book_source_model.dart';
@@ -121,6 +122,43 @@ class _BookSourceMarketScreenState extends State<BookSourceMarketScreen> {
         : '导入 $added 个可用书源${skipped > 0 ? '，跳过 $skipped 个不可用' : ''}');
   }
 
+  /// 站点入口：用系统浏览器打开，用户自己找 JSON 地址。
+  Future<void> _openHubs() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('源站入口'),
+        content: SizedBox(
+          width: 460,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              for (final hub in bookSourceHubs)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.public),
+                  title: Text(hub.name),
+                  subtitle: Text(hub.note),
+                  trailing: const Icon(Icons.open_in_new, size: 18),
+                  onTap: () async {
+                    final uri = Uri.tryParse(hub.url);
+                    if (uri == null) return;
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  },
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 导入随应用附带的可用源（用户删过内置源后想找回来）。
   Future<void> _importBundled() async {
     final sources = builtinBookSources();
@@ -168,8 +206,19 @@ class _BookSourceMarketScreenState extends State<BookSourceMarketScreen> {
             tooltip: '更多',
             onSelected: (value) {
               if (value == 'bundled') _importBundled();
+              if (value == 'hubs') _openHubs();
             },
             itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'hubs',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.travel_explore_outlined),
+                  title: Text('打开源站（找 JSON 用）'),
+                  subtitle: Text('Yiove / 源仓库 / aoaostar / 喵公子'),
+                ),
+              ),
               PopupMenuItem(
                 value: 'bundled',
                 child: ListTile(
