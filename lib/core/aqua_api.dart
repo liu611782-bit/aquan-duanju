@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import '../models/audio.dart';
 import '../models/book.dart';
+import 'error_log.dart';
 import '../models/manga.dart';
 import '../models/models.dart';
 import '../models/post.dart';
@@ -285,26 +286,50 @@ class AquaApi implements AquaImageFetcher, MangaPageFetcher {
       CommunityPost.fromJson(_map(await _client.call('postDetail', [postId])));
 
   /// 一本书可用的音色（智能朗读 / 真人讲书）。
-  Future<AudioTones> audioTones(String bookId) async =>
-      AudioTones.fromJson(_map(await _client.call('audioTones', [bookId])));
+  /// 音轨类接口只对番茄书有效（bookId/itemId 必须是纯数字）。
+  /// 非数字时记录**调用栈**并短路，避免把 URL 章节 id 发给 Go 侧。
+  static final RegExp _numericId = RegExp(r'^\d+$');
+
+  void _guardAudioIds(String what, String bookId, String itemId) {
+    if (_numericId.hasMatch(bookId.trim()) &&
+        (itemId.isEmpty || _numericId.hasMatch(itemId.trim()))) {
+      return;
+    }
+    ErrorLog.instance.record(
+      '音轨调用被拦截：$what bookId=$bookId itemId=$itemId',
+      StackTrace.current,
+    );
+    throw StateError('这本书没有官方音轨（非番茄书），请使用本地朗读');
+  }
+
+  Future<AudioTones> audioTones(String bookId) async {
+    _guardAudioIds('audioTones', bookId, '');
+    return AudioTones.fromJson(_map(await _client.call('audioTones', [bookId])));
+  }
 
   /// 取一条音轨的播放地址与内容密钥。
   Future<AudioTrack> audioPlay(
-          String bookId, String itemId, int toneId) async =>
-      AudioTrack.fromJson(
-          _map(await _client.call('audioPlay', [bookId, itemId, '$toneId'])));
+      String bookId, String itemId, int toneId) async {
+    _guardAudioIds('audioPlay', bookId, itemId);
+    return AudioTrack.fromJson(
+        _map(await _client.call('audioPlay', [bookId, itemId, '$toneId'])));
+  }
 
   /// 取音轨并落盘到本地（core 用阅读客户端请求头下载，避开 CDN 的 403）。
   Future<AudioStream> audioStream(
-          String bookId, String itemId, int toneId) async =>
-      AudioStream.fromJson(
-          _map(await _client.call('audioStream', [bookId, itemId, '$toneId'])));
+      String bookId, String itemId, int toneId) async {
+    _guardAudioIds('audioStream', bookId, itemId);
+    return AudioStream.fromJson(
+        _map(await _client.call('audioStream', [bookId, itemId, '$toneId'])));
+  }
 
   /// 音频时间点（段落 ↔ 毫秒），用于把阅读位置对齐到听书位置。
   Future<AudioTimepoints> audioTimepoints(
-          String bookId, String itemId, int toneId) async =>
-      AudioTimepoints.fromJson(_map(
-          await _client.call('audioTimepoints', [bookId, itemId, '$toneId'])));
+      String bookId, String itemId, int toneId) async {
+    _guardAudioIds('audioTimepoints', bookId, itemId);
+    return AudioTimepoints.fromJson(_map(
+        await _client.call('audioTimepoints', [bookId, itemId, '$toneId'])));
+  }
 
   /// 设备的内容密钥（首次调用会注册并落盘 sidecar）。
   Future<String> secretKey() async =>
