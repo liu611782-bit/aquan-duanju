@@ -1535,15 +1535,31 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     // 用户主动起朗读 = 明确要跟随：清掉可能挂着的「暂停跟随」与药丸。
     _follow.resume();
-    await speech.start(
-      bookId: widget.bookId,
-      bookTitle: widget.bookTitle,
-      coverUrl: widget.coverUrl,
-      chapters: widget.chapters,
-      chapterIndex: _index,
-      startParagraph: _speechParagraphIndex,
-      startRatio: _offsetRatio,
-    );
+    try {
+      await speech.start(
+        bookId: widget.bookId,
+        bookTitle: widget.bookTitle,
+        coverUrl: widget.coverUrl,
+        chapters: widget.chapters,
+        chapterIndex: _index,
+        startParagraph: _speechParagraphIndex,
+        startRatio: _offsetRatio,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      final message = e.toString();
+      // 第三方书源/本地书没有番茄音轨；即便下游还有漏网的音轨请求，
+      // 也不要把错误码糊到朗读条上。
+      if (message.contains('INVALID_OPTIONS') ||
+          message.contains('invalid client options') ||
+          message.contains('invalid chapter id')) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(
+          content: Text('这本书没有官方音轨（第三方书源），已跳过音轨直接朗读'),
+        ));
+        return;
+      }
+      rethrow;
+    }
     speech.setParagraphCount(_displayParagraphs.length);
     if (!mounted) return;
     setState(() {});
