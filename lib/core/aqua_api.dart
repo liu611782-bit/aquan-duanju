@@ -5,6 +5,14 @@ import 'dart:typed_data';
 import '../models/audio.dart';
 import '../models/book.dart';
 import 'error_log.dart';
+
+/// 非番茄书请求官方音轨（无音轨可用）。UI 应降级为本地朗读，不要当错误弹红字。
+class NoOfficialTrackException implements Exception {
+  const NoOfficialTrackException();
+
+  @override
+  String toString() => '这本书没有官方音轨（非番茄书），已改用本地朗读';
+}
 import '../models/manga.dart';
 import '../models/models.dart';
 import '../models/post.dart';
@@ -299,7 +307,7 @@ class AquaApi implements AquaImageFetcher, MangaPageFetcher {
       '音轨调用被拦截：$what bookId=$bookId itemId=$itemId',
       StackTrace.current,
     );
-    throw StateError('这本书没有官方音轨（非番茄书），请使用本地朗读');
+    throw const NoOfficialTrackException();
   }
 
   Future<AudioTones> audioTones(String bookId) async {
