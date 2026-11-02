@@ -480,6 +480,10 @@ class ReaderSpeechController extends ChangeNotifier {
       try {
         _tones = await _api.audioTones(bookId);
         _tonesBookId = bookId;
+      } on NoOfficialTrackException {
+        // API 层已判定非番茄书（并记了调用栈日志）：按「无音轨」继续走 TTS。
+        _tones = null;
+        _tone = null;
       } catch (e) {
         // 第三方书源 / 本地书：id 不是番茄的，音轨接口必然拒绝。
         // 这不是错误，直接按「没有平台音轨」继续走本地合成（TTS）。

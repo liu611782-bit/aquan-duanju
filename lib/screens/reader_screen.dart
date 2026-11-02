@@ -2035,8 +2035,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     final chapter = widget.chapters[index];
     final cached = _cache[chapter.id];
     if (cached != null) return cached;
-    final raw = _rawCache[chapter.id] ??
-        await AppScope.read(context).api.chapterText(chapter.id);
+    // 第三方书源/本地书的正文来自注入的 textLoader；只有番茄自家书才走
+    // api.chapterText（它只认番茄数字章节 id，传 URL 会 INVALID_OPTIONS）。
+    final loader = widget.textLoader;
+    final api = loader == null ? AppScope.read(context).api : null;
+    final raw =
+        _rawCache[chapter.id] ?? (loader != null ? await loader(chapter) : await api!.chapterText(chapter.id));
     _rawCache[chapter.id] = raw;
     final ps = _deriveParagraphs(chapter, raw);
     _cache[chapter.id] = ps;
