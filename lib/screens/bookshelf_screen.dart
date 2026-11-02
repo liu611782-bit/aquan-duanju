@@ -18,6 +18,7 @@ import 'dictionary_screen.dart';
 import 'mini_reading_window.dart';
 import 'reader_screen.dart';
 import 'reading_stats_screen.dart';
+import 'rss_screen.dart';
 import 'sync_screen.dart';
 
 /// 书架：在读的小说与漫画，可继续、可移除、可排序。
@@ -616,6 +617,11 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                     if (value == 'mini') {
                       MiniReadingWindow.open(context);
                     }
+                    if (value == 'rss') {
+                      Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) => const RssScreen(),
+                      ));
+                    }
                     if (value == 'clear') _clearAll(context);
                   },
                   itemBuilder: (context) => const [
@@ -677,6 +683,16 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                         leading: Icon(Icons.picture_in_picture_alt_outlined),
                         title: Text('阅读浮窗'),
                         subtitle: Text('置顶迷你窗：今日时长与在读进度'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'rss',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.rss_feed),
+                        title: Text('订阅'),
+                        subtitle: Text('导入 RSS/Atom 订阅源，读文章'),
                       ),
                     ),
                     PopupMenuItem(
