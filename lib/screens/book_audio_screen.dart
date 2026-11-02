@@ -264,7 +264,12 @@ class _BookAudioScreenState extends State<BookAudioScreen>
     // 番茄官方音轨只认数字 bookId；第三方书源/本地书的 id 是
     // `booksrc:…` / `local:…`，调用会被 Go 侧判为 INVALID_OPTIONS。
     // 这类书走阅读页的朗读（TTS），不要在这里发请求。
-    if (!RegExp(r'^\d+$').hasMatch(widget.bookId.trim())) {
+    // 番茄的书 id 与章节 id 都是纯数字；第三方书源的书 id 也可能是数字，
+    // 但章节 id 一定是 URL/自定义串 —— 两个都必须是数字才走官方音轨。
+    final chapterId = widget.chapters.isEmpty ? '' : widget.chapters.first.id;
+    final isTomato = RegExp(r'^\d+$').hasMatch(widget.bookId.trim()) &&
+        RegExp(r'^\d+$').hasMatch(chapterId.trim());
+    if (!isTomato) {
       setState(() {
         _notTomatoBook = true;
         _loadingTones = false;
@@ -351,6 +356,14 @@ class _BookAudioScreenState extends State<BookAudioScreen>
       }
     } catch (e) {
       if (!mounted || epoch != _playEpoch) return;
+      if (e.toString().contains('INVALID_OPTIONS') ||
+          e.toString().contains('invalid client options')) {
+        setState(() {
+          _notTomatoBook = true;
+          _loadingTrack = false;
+        });
+        return;
+      }
       setState(() {
         _error = e;
         _loadingTrack = false;
