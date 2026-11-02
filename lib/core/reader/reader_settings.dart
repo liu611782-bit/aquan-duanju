@@ -86,6 +86,7 @@ class ReaderSettings {
     this.hapticOnTurn = true,
     this.soundOnTurn = false,
     this.doublePage = false,
+    this.vertical = false,
     this.bookOverrides = const <String, Map<String, Object?>>{},
   });
 
@@ -149,6 +150,9 @@ class ReaderSettings {
 
   /// 横屏/平板双页并排（宽度不足 600 时自动退回单页）。
   final bool doublePage;
+
+  /// 竖排右起阅读（翻页模式生效；竖排下 `doublePage` 表示一页两栏）。
+  final bool vertical;
 
   /// 按书覆盖：bookId → {bookField*: value}；空 = 全部跟随全局。
   final Map<String, Map<String, Object?>> bookOverrides;
@@ -236,6 +240,7 @@ class ReaderSettings {
     bool? hapticOnTurn,
     bool? soundOnTurn,
     bool? doublePage,
+    bool? vertical,
     Map<String, Map<String, Object?>>? bookOverrides,
   }) =>
       ReaderSettings(
@@ -260,6 +265,7 @@ class ReaderSettings {
         hapticOnTurn: hapticOnTurn ?? this.hapticOnTurn,
         soundOnTurn: soundOnTurn ?? this.soundOnTurn,
         doublePage: doublePage ?? this.doublePage,
+        vertical: vertical ?? this.vertical,
         bookOverrides: bookOverrides ?? this.bookOverrides,
         );
 
@@ -295,6 +301,7 @@ class ReaderSettings {
         'haptic_on_turn': hapticOnTurn,
         'sound_on_turn': soundOnTurn,
         'double_page': doublePage,
+        'vertical': vertical,
         if (bookOverrides.isNotEmpty)
           'book_overrides': {
             for (final e in bookOverrides.entries) e.key: e.value,
@@ -374,6 +381,7 @@ class ReaderSettings {
           : false,
       doublePage:
           json['double_page'] is bool ? json['double_page'] as bool : false,
+      vertical: json['vertical'] is bool ? json['vertical'] as bool : false,
       bookOverrides: _parseBookOverrides(json['book_overrides']),
     );
   }

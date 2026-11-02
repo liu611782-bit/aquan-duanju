@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +8,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/aqua_error.dart';
+import '../core/books/formats/book_block.dart';
+import '../core/reader/rich_paragraph.dart';
+import '../widgets/rich_reader_view.dart';
 import '../core/reader/reader_click_action.dart';
 import '../core/reader/reader_page_metrics.dart';
 import '../core/reader/reader_paginator.dart';
@@ -423,11 +427,20 @@ class ReaderScreen extends StatefulWidget {
     this.restoreCharOffset = -1,
     this.autoListen = false,
     this.textLoader,
+    this.blocksLoader,
+    this.imageLoader,
   });
 
   /// 外部书源正文加载器：给了就优先走它（书源聚合链路），
   /// 不给退回番茄 core 的 chapterText。
   final Future<String> Function(BookChapter chapter)? textLoader;
+
+  /// 富文本正文加载器（本地 EPUB/HTML）：给了就走富文本渲染
+  /// （注音/脚注/插图/对齐），并且翻页支持竖排。
+  final Future<ChapterBlocks> Function(BookChapter chapter)? blocksLoader;
+
+  /// 富文本里的插图字节加载（EPUB 包内资源）。
+  final RichImageLoader? imageLoader;
 
   final String bookId;
   final String bookTitle;
@@ -455,6 +468,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     with WidgetsBindingObserver {
   final _scroll = ScrollController();
   final _cache = <String, List<String>>{};
+
+  /// 当前章富文本（本地 EPUB/HTML 才有；其余源为 null）。
+  RichChapter? _rich;
+  int _richPage = 0;
+  int _richPageCount = 1;
 
   /// 自绘翻页容器：6 种动画与手势都在 [ReaderPager] 内部。
   final _pager = ReaderPagerController();
@@ -560,6 +578,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   int get _autoInterval => _settings.autoIntervalSec;
 
   bool get _paged => _settings.modeFor(widget.bookId) == ReaderMode.paged;
+
+  /// 走富文本翻页链路（结构化区块，或纯文本 + 竖排）。
+  bool get _richPagedActive => _paged && (_rich != null || _settings.vertical);
 
   /// 双页并排是否生效：翻页模式 + 开关打开 + 屏幕够宽（窄屏自动退回单页）。
   bool get _spreadEnabled =>
@@ -725,6 +746,17 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   /// 翻到相邻页；返回是否真的翻动了（到边界返回 false，调用方据此换章）。
   bool _turnPage(int delta) {
+    if (_richPagedActive) {
+      final step = _settings.vertical ? 1 : (_spreadEnabled ? 2 : 1);
+      final target =
+          (_richPage + delta * step).clamp(0, _richPageCount - 1).toInt();
+      if (target == _richPage) return false;
+      _feedbackOnTurn();
+      setState(() => _richPage = target);
+      // ignore: discarded_futures
+      _persist();
+      return true;
+    }
     final pagination = _pagination;
     if (pagination == null || pagination.isEmpty) return false;
     final step = _spreadEnabled ? 2 : 1;
@@ -1209,9 +1241,28 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
+  /// 富文本加载：失败降级纯文本（不阻断阅读，也不静默假装成功）。
+  Future<void> _loadRich(BookChapter chapter) async {
+    final loader = widget.blocksLoader;
+    if (loader == null) {
+      _rich = null;
+      return;
+    }
+    try {
+      final blocks = await loader(chapter);
+      _rich = richChapterFrom(blocks);
+      _richPage = 0;
+      _richPageCount = 1;
+    } catch (_) {
+      _rich = null;
+    }
+  }
+
   Future<void> _load(int index, {bool restore = false}) async {
     if (widget.chapters.isEmpty) return;
     final chapter = widget.chapters[index];
+    await _loadRich(chapter);
+    if (!mounted) return;
     // 滚动模式的 ContinuousChapters 会复用同一个 State：目录/上下章跳转必须
     // 显式通知它换章，否则界面仍停在旧章内容上。
     if (!_paged) _continuous.jumpToChapter(index);
@@ -1371,6 +1422,9 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   double get _offsetRatio {
     if (!_paged) return _continuousRatio;
+    if (_richPagedActive) {
+      return ((_richPage + 1) / math.max(1, _richPageCount)).clamp(0.0, 1.0);
+    }
     final pagination = _pagination;
     if (pagination == null || pagination.isEmpty) return 0;
     return ((_currentPage + 1) / pagination.pageCount).clamp(0.0, 1.0);
@@ -1384,6 +1438,12 @@ class _ReaderScreenState extends State<ReaderScreen>
   /// 当前阅读位置的章内字符偏移；拿不到返回 -1。
   int get _currentCharOffset {
     if (_paged) {
+      if (_richPagedActive) {
+        final total = _richPlainText.length;
+        if (total == 0) return 0;
+        final ratio = _richPage / math.max(1, _richPageCount);
+        return (total * ratio).round().clamp(0, total);
+      }
       final pagination = _pagination;
       if (pagination == null || pagination.isEmpty) return -1;
       final index = _currentPage.clamp(0, pagination.pageCount - 1);
@@ -1687,6 +1747,13 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   /// 底栏页码：双页显示区间（`3-4 / 20 页`）。
   String get _pageLabel {
+    if (_richPagedActive) {
+      final left = (_richPage + 1).clamp(1, math.max(1, _richPageCount));
+      final total = math.max(1, _richPageCount);
+      if (!_spreadEnabled) return '$left / $total 页';
+      final right = (left + 1).clamp(left, total);
+      return right == left ? '$left / $total 页' : '$left-$right / $total 页';
+    }
     final total = _pagination?.pageCount ?? 0;
     if (!_paged || total <= 0) {
       return '${_index + 1} / ${widget.chapters.length}';
@@ -1960,7 +2027,81 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
+  /// 当前章的富文本视图：有结构化区块就用它；否则把纯文本段落包成富文本
+  /// （竖排模式对 TXT/在线源同样生效）。
+  RichChapter get _richChapter {
+    final rich = _rich;
+    if (rich != null) return rich;
+    return RichChapter(
+      title: _chapter.title,
+      paragraphs: [
+        for (final p in _displayParagraphs)
+          if (p.trim().isNotEmpty)
+            RichParagraph(spans: [RichSpan.text(p)]),
+      ],
+    );
+  }
+
+  String get _richPlainText => _richChapter.plainText;
+
+  /// 富文本翻页（本地 EPUB/HTML）：横排按段落分页，竖排走自绘竖行。
+  Widget _buildRichPaged(_ReaderTheme theme) {
+    final rich = _richChapter;
+    return SafeArea(
+      bottom: false,
+      child: RichPagedView(
+        chapter: rich,
+        typography: _type,
+        color: theme.foreground,
+        backgroundColor: theme.background,
+        pageIndex: _richPage,
+        vertical: _settings.vertical,
+        doublePage: _spreadEnabled,
+        padding: EdgeInsets.only(
+          top: _type.paddingTop,
+          bottom: _type.paddingBottom,
+          left: _type.paddingLeft,
+          right: _type.paddingRight,
+        ),
+        onPageCount: (count) {
+          if (!mounted || count == _richPageCount) return;
+          setState(() => _richPageCount = count);
+        },
+        onPageChanged: (page) {
+          if (!mounted || page == _richPage) return;
+          setState(() => _richPage = page);
+          // ignore: discarded_futures
+          _persist();
+        },
+        onNoteTap: (note) => _showNote(note),
+        imageLoader: widget.imageLoader,
+      ),
+    );
+  }
+
+  void _showNote(String note) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('注释'),
+        content: SingleChildScrollView(child: Text(note)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildBody(_ReaderTheme theme) {
+    if (_paged &&
+        (_rich != null || _settings.vertical) &&
+        !_loading &&
+        _error == null) {
+      return _buildRichPaged(theme);
+    }
     if (_paged && !_loading && _error == null && (_paragraphs?.isNotEmpty ?? false)) {
       return _buildPaged(theme);
     }

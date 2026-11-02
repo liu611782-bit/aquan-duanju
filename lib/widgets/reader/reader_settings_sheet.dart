@@ -839,6 +839,13 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
         ),
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
+          title: const Text('竖排右起'),
+          subtitle: const Text('仿日式文库：右起竖行、行首行末禁则；翻页模式生效'),
+          value: settings.vertical,
+          onChanged: (v) => _apply(settings.copyWith(vertical: v)),
+        ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
           title: const Text('翻页震动'),
           subtitle: const Text('每次翻页给一次轻触反馈'),
           value: settings.hapticOnTurn,

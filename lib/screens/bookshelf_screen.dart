@@ -261,6 +261,15 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
           chapters: chapters,
           initialIndex: initialIndex,
           textLoader: (chapter) => runtime.content(chapter.id),
+          // 富文本：EPUB 注音/脚注/插图在翻页模式下生效。
+          blocksLoader: (chapter) => runtime.blocks(chapter.id),
+          imageLoader: (href) {
+            final chapter = scope.reading.entry(bookId);
+            final chapterUrl = chapter == null
+                ? ''
+                : 'localchapter:${entry.id}:${chapter.chapterIndex}';
+            return runtime.resource(chapterUrl, href);
+          },
         ),
       ));
     } catch (e) {
