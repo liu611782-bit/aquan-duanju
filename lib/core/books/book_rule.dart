@@ -4,6 +4,7 @@ import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 import 'package:xpath_selector_html_parser/xpath_selector_html_parser.dart';
 
+import '../error_log.dart';
 import 'legado_js/legado_js_rewrite.dart';
 
 /// js 求值接缝（legado_js 引擎注入；测试注入桩）。
@@ -101,7 +102,10 @@ class BookRule {
 
   /// 列表规则：从页面（HTML 或 JSON）求出一批节点（js 无关路径，行为不变）。
   static List<dynamic> evalList(Object page, String rule) {
-    final expr = _splitAlternatives(rule).first;
+    // 空规则（很多真实源的书单字段就是空的）不能崩，按「无匹配」处理。
+    final alternatives = _splitAlternatives(rule).toList();
+    if (alternatives.isEmpty) return const [];
+    final expr = alternatives.first;
     // legado 前缀与 XPath 判定（SourceRule.init）。
     if (expr.startsWith('@XPath:')) {
       return _xpathList(page, expr.substring(7).trim());
@@ -373,19 +377,7 @@ class BookRule {
   }
 
   static dom.Element? _query(dom.Document doc, String sel) {
-    // `id.xxx` / `class.xxx` 简写。
-    if (sel.startsWith('id.')) {
-      return doc.getElementById(sel.substring(3));
-    }
-    if (sel.startsWith('class.')) {
-      final items = doc.getElementsByClassName(sel.substring(6));
-      return items.isEmpty ? null : items.first;
-    }
-    if (sel.startsWith('tag.')) {
-      final items = doc.getElementsByTagName(sel.substring(4));
-      return items.isEmpty ? null : items.first;
-    }
-    final items = doc.querySelectorAll(sel);
+    final items = _queryAll(doc, sel);
     return items.isEmpty ? null : items.first;
   }
 
@@ -393,17 +385,39 @@ class BookRule {
     dom.Document doc,
     String sel,
   ) {
-    if (sel.startsWith('class.')) {
-      return doc.getElementsByClassName(sel.substring(6)).toList();
+    final selector = sel.trim();
+    if (selector.isEmpty) return const [];
+    if (selector.startsWith('class.')) {
+      return doc.getElementsByClassName(selector.substring(6)).toList();
     }
-    if (sel.startsWith('tag.')) {
-      return doc.getElementsByTagName(sel.substring(4)).toList();
+    if (selector.startsWith('tag.')) {
+      return doc.getElementsByTagName(selector.substring(4)).toList();
     }
-    if (sel.startsWith('id.')) {
-      final e = doc.getElementById(sel.substring(3));
+    if (selector.startsWith('id.')) {
+      final e = doc.getElementById(selector.substring(3));
       return e == null ? const [] : [e];
     }
-    return doc.querySelectorAll(sel).toList();
+    return _safeSelector(doc, selector);
+  }
+
+  /// CSS 选择器容错：规则里的 `[]`、`''` 这类非法选择器不该让整本源崩掉，
+  /// 也不该静默——记一条错误日志并当作「无匹配」。
+  static List<dom.Element> _safeSelector(Object root, String selector) {
+    try {
+      if (root is dom.Document) {
+        return root.querySelectorAll(selector).toList();
+      }
+      if (root is dom.Element) {
+        return root.querySelectorAll(selector).toList();
+      }
+      return const [];
+    } on FormatException catch (e) {
+      ErrorLog.instance.record('书源规则选择器无效（$selector）', e);
+      return const [];
+    } catch (e) {
+      ErrorLog.instance.record('书源规则选择器异常（$selector）', e);
+      return const [];
+    }
   }
 
   static List<dynamic> _cssList(Object page, String expr) {
@@ -421,7 +435,7 @@ class BookRule {
         } else if (seg.startsWith('tag.')) {
           next.addAll(node.getElementsByTagName(seg.substring(4)));
         } else {
-          next.addAll(node.querySelectorAll(seg));
+          next.addAll(_safeSelector(node, seg));
         }
       }
       nodes = next;

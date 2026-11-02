@@ -41,6 +41,7 @@ class BookSource {
     this.ruleToc = const BookTocRule.empty(),
     this.ruleContent = const BookContentRule.empty(),
     this.jsLib = '',
+    this.cookie = '',
     this.format = BookSourceFormat.legado,
     this.rawRuleJson = '',
   });
@@ -61,6 +62,12 @@ class BookSource {
   /// 共享 JS 库（legado `jsLib`）：大量真实源的函数定义在此；js 求值前注入全局。
   /// 仅支持文本形态；`{name:url}` 远程形态诚实拒绝（供应链风险，见 spec）。
   final String jsLib;
+
+  /// 手动补充的 Cookie（`k=v; k2=v2`）。
+  ///
+  /// 用于 Cloudflare 人机校验后的 `cf_clearance`、或站点强制登录态的场景：
+  /// 从浏览器开发者工具复制后填入，provider 每次请求带上。
+  final String cookie;
 
   /// 方言：legado 走 `BookSourceRuntime`；soNovel 走 `SoNovelRuntime`（用 [rawRuleJson]）。
   final BookSourceFormat format;
@@ -103,6 +110,24 @@ class BookSource {
         ruleToc: ruleToc,
         ruleContent: ruleContent,
         jsLib: jsLib,
+        cookie: cookie,
+        format: format,
+        rawRuleJson: rawRuleJson,
+      );
+
+  /// 换 Cookie（书源管理里粘贴 cf_clearance 用）。
+  BookSource copyWithCookie(String cookie) => BookSource(
+        url: url,
+        name: name,
+        group: group,
+        enabled: enabled,
+        searchUrl: searchUrl,
+        ruleSearch: ruleSearch,
+        ruleBookInfo: ruleBookInfo,
+        ruleToc: ruleToc,
+        ruleContent: ruleContent,
+        jsLib: jsLib,
+        cookie: cookie,
         format: format,
         rawRuleJson: rawRuleJson,
       );
@@ -136,6 +161,7 @@ class BookSource {
       ruleToc: BookTocRule.fromJson(group(json['ruleToc'])),
       ruleContent: BookContentRule.fromJson(group(json['ruleContent'])),
       jsLib: json['jsLib']?.toString() ?? '',
+      cookie: json['aquanCookie']?.toString() ?? '',
     );
   }
 
@@ -192,6 +218,7 @@ class BookSource {
         'ruleToc': ruleToc.toJson(),
         'ruleContent': ruleContent.toJson(),
         if (jsLib.isNotEmpty) 'jsLib': jsLib,
+        if (cookie.isNotEmpty) 'aquanCookie': cookie,
         // 方言往返：legado 键名与其它方言不相交，靠显式字段保真（本地/内置源必需）。
         if (format != BookSourceFormat.legado) 'aquanFormat': format.name,
       };

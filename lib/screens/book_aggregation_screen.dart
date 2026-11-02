@@ -9,6 +9,7 @@ import '../core/books/so_novel_seed.dart';
 import '../core/error_log.dart';
 import '../core/sources/source_fetch.dart';
 import '../widgets/common.dart';
+import '../widgets/cookie_dialog.dart';
 import 'book_source_book_page.dart';
 import 'book_source_market_screen.dart';
 import 'wenku8_browse_screen.dart';
@@ -55,7 +56,9 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
     setState(() {
       _searching = true;
       _hits.clear();
+      _lastFailure = '';
     });
+    final failures = <String>[];
     final results = await Future.wait([
       for (final s in sources)
         () async {
@@ -63,6 +66,7 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
             return (s, await _service.search(s, query));
           } catch (e) {
             ErrorLog.instance.record('书源搜索', '${s.name}：$e');
+            failures.add('${s.name}：$e');
             return (s, const <BookHit>[]);
           }
         }(),
@@ -75,8 +79,15 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
         }
       }
       _searching = false;
+      // 只在「一条结果都没搜到」时把失败原因摆到页面上，避免刷屏。
+      if (_hits.isEmpty && failures.isNotEmpty) {
+        _lastFailure = failures.take(3).join('\n');
+      }
     });
   }
+
+  /// 上一次搜索全灭时的原因摘要（页面顶部提示）。
+  String _lastFailure = '';
 
   void _snack(String text) {
     if (!mounted) return;
@@ -187,6 +198,39 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
             _store.enabled.isEmpty ? '还没有书源' : '输入关键词开始聚合搜索',
             style: theme.textTheme.bodyMedium,
           ),
+          if (_lastFailure.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Container(
+              constraints: const BoxConstraints(maxWidth: 520),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.errorContainer.withValues(alpha: 0.35),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('所有源都没有结果，失败原因：',
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: theme.colorScheme.error,
+                        fontWeight: FontWeight.w600,
+                      )),
+                  const SizedBox(height: 6),
+                  Text(
+                    _lastFailure,
+                    style: theme.textTheme.bodySmall?.copyWith(height: 1.5),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '常见原因：源站已失效 / 被墙 / 需要 Cloudflare 校验。'
+                    '可在「书源管理」里给源填 Cookie，或导入新的书源。',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.outline),
+                  ),
+                ],
+              ),
+            ),
+          ],
           if (_store.enabled.isEmpty) ...[
             const SizedBox(height: 8),
             Text('支持粘贴 legado（含 js 规则）/ so-novel 书源 JSON（自动识别方言），或从书源仓库拉取',
@@ -407,6 +451,22 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
     }
   }
 
+  /// 编辑 Cookie：Cloudflare 站点（如 Wenku8）需要浏览器通过校验后的
+  /// `cf_clearance`，登录态站点需要会话 Cookie。
+  Future<void> _editCookie(BookSource source) async {
+    final result = await showBookSourceCookieDialog(
+      context,
+      title: source.name.isEmpty ? source.url : source.name,
+      initial: source.cookie,
+    );
+    if (result == null) return;
+    await _store.update(source.copyWithCookie(result.trim()));
+    if (!mounted) return;
+    setState(() {});
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(result.trim().isEmpty ? '已清空 Cookie' : '已保存 Cookie')));
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -483,6 +543,16 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
                                       if (mounted) setState(() {});
                                     },
                                   ),
+                                IconButton(
+                                  tooltip: 'Cookie（Cloudflare / 登录态）',
+                                  icon: Icon(
+                                    s.cookie.isEmpty
+                                        ? Icons.cookie_outlined
+                                        : Icons.cookie,
+                                    size: 20,
+                                  ),
+                                  onPressed: () => _editCookie(s),
+                                ),
                                 if (!store.isBuiltin(s.url))
                                   IconButton(
                                     tooltip: '删除',

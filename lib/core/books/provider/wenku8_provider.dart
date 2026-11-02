@@ -75,7 +75,7 @@ class Wenku8Provider implements BookSourceProvider {
       '$base/modules/article/search.php'
       '?searchtype=articlename&searchkey=$encoded&page=$page',
     );
-    final html = await _get(uri);
+    final html = await _get(uri, source: source);
     return parseWenku8ListPage(html, baseUrl: base);
   }
 
@@ -86,7 +86,7 @@ class Wenku8Provider implements BookSourceProvider {
       throw BookSourceException('不是 Wenku8 书籍地址：$bookUrl');
     }
     final base = _baseOf(source);
-    final html = await _get(Uri.parse('$base${ref.pagePath}'));
+    final html = await _get(Uri.parse('$base${ref.pagePath}'), source: source);
     final info = parseWenku8Detail(html, baseUrl: base);
     final chapters = parseWenku8Toc(html, baseUrl: base);
     if (info.name.isEmpty && chapters.isEmpty) {
@@ -108,7 +108,7 @@ class Wenku8Provider implements BookSourceProvider {
       throw BookSourceException('不是 Wenku8 章节地址：$chapterUrl');
     }
     final base = _baseOf(source);
-    final html = await _get(Uri.parse('$base${ref.pagePath}'));
+    final html = await _get(Uri.parse('$base${ref.pagePath}'), source: source);
     return parseWenku8Content(html);
   }
 
@@ -213,7 +213,7 @@ class Wenku8Provider implements BookSourceProvider {
   /// 站点真实分类（首页导航解析；解析不到返回空表，UI 隐藏分类入口）。
   Future<List<Wenku8Class>> classes({BookSource? source}) async {
     final base = source == null ? baseUrl : _baseOf(source);
-    final html = await _get(Uri.parse('$base/index.php'));
+    final html = await _get(Uri.parse('$base/index.php'), source: source);
     return parseWenku8Classes(html);
   }
 
@@ -224,8 +224,11 @@ class Wenku8Provider implements BookSourceProvider {
     BookSource? source,
   }) async {
     final base = source == null ? baseUrl : _baseOf(source);
-    final html = await _get(Uri.parse(
-        '$base/modules/article/articlelist.php?class=$classId&page=$page'));
+    final html = await _get(
+      Uri.parse(
+          '$base/modules/article/articlelist.php?class=$classId&page=$page'),
+      source: source,
+    );
     return parseWenku8ListPage(html, baseUrl: base);
   }
 
@@ -236,8 +239,11 @@ class Wenku8Provider implements BookSourceProvider {
     BookSource? source,
   }) async {
     final base = source == null ? baseUrl : _baseOf(source);
-    final html = await _get(Uri.parse(
-        '$base/modules/article/toplist.php?sort=${rank.sort}&page=$page'));
+    final html = await _get(
+      Uri.parse(
+          '$base/modules/article/toplist.php?sort=${rank.sort}&page=$page'),
+      source: source,
+    );
     return parseWenku8ListPage(html, baseUrl: base);
   }
 
@@ -249,24 +255,39 @@ class Wenku8Provider implements BookSourceProvider {
     return raw.endsWith('/') ? raw.substring(0, raw.length - 1) : raw;
   }
 
-  Future<String> _get(Uri uri) async {
+  Future<String> _get(Uri uri, {BookSource? source}) async {
     final injected = fetch;
     if (injected != null) return injected(uri);
 
     final url = uri.toString();
     if (enforceSsrf) SourceImporter.validateImportUrl(url);
+    final cookie = (source?.cookie ?? '').trim();
+    final base = source == null ? baseUrl : _baseOf(source);
     final result = await fetchProbe(
       url,
       enforceSsrf: enforceSsrf,
       maxBytes: 2 * 1024 * 1024,
-      headers: const {
+      headers: {
         'User-Agent': _kWenku8UserAgent,
-        'Accept': 'text/html,application/xhtml+xml',
+        'Accept':
+            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.6',
+        'Referer': '$base/index.php',
+        if (cookie.isNotEmpty) 'Cookie': cookie,
       },
       connectTimeout: const Duration(seconds: 8),
       readTimeout: const Duration(seconds: 15),
     );
     if (!result.ok) {
+      if (result.statusCode == 403) {
+        throw BookSourceException(cookie.isEmpty
+            ? 'HTTP 403：站点启用了 Cloudflare 人机校验，普通请求会被拦。'
+                '解决办法：① 浏览器打开站点并通过校验后，把 Cookie 里的 '
+                'cf_clearance 复制到「书源管理 → 轻小说文库 → 设置 Cookie」；'
+                '② 或把书源地址换成可直连的镜像域名。'
+            : 'HTTP 403：Cookie 可能已过期（cf_clearance 有效期通常几小时）。'
+                '请重新从浏览器复制 Cookie 后再试。');
+      }
       throw BookSourceException(result.error.isEmpty ? '请求失败' : result.error);
     }
     final bytes = result.bytes;

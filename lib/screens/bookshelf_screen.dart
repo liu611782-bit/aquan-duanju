@@ -561,36 +561,6 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                       : Icons.view_carousel_outlined),
                   onPressed: _toggleView,
                 ),
-                PopupMenuButton<String>(
-                  tooltip: '导入本地书',
-                  icon: const Icon(Icons.file_open_outlined),
-                  onSelected: (value) {
-                    if (value == 'files') _importLocalBooks();
-                    if (value == 'folder') _importLocalFolder();
-                  },
-                  itemBuilder: (context) => const [
-                    PopupMenuItem(
-                      value: 'files',
-                      child: ListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        leading: Icon(Icons.library_add_outlined),
-                        title: Text('导入文件'),
-                        subtitle: Text('TXT / EPUB / HTML / MD / ZIP，可多选'),
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'folder',
-                      child: ListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        leading: Icon(Icons.folder_open_outlined),
-                        title: Text('扫描文件夹'),
-                        subtitle: Text('递归扫描并逐本导入'),
-                      ),
-                    ),
-                  ],
-                ),
                 PopupMenuButton<ReadingSort>(
                   tooltip: '排序',
                   icon: const Icon(Icons.sort),
@@ -612,15 +582,22 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                       ),
                   ],
                 ),
-                IconButton(
-                  tooltip: '清空',
-                  icon: const Icon(Icons.delete_sweep_outlined),
-                  onPressed: () => _clearAll(context),
-                ),
+                // 单一「菜单」入口：入口过多时用户找不到，这里收成一处并带文字标签。
                 PopupMenuButton<String>(
-                  tooltip: '更多',
-                  icon: const Icon(Icons.more_vert),
+                  tooltip: '更多功能（导入 / 统计 / 词典 / 同步 / 浮窗）',
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    child: Row(
+                      children: [
+                        Icon(Icons.menu, size: 20),
+                        SizedBox(width: 4),
+                        Text('菜单'),
+                      ],
+                    ),
+                  ),
                   onSelected: (value) {
+                    if (value == 'files') _importLocalBooks();
+                    if (value == 'folder') _importLocalFolder();
                     if (value == 'stats') {
                       Navigator.of(context).push(MaterialPageRoute(
                         builder: (_) => const ReadingStatsScreen(),
@@ -639,8 +616,29 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                     if (value == 'mini') {
                       MiniReadingWindow.open(context);
                     }
+                    if (value == 'clear') _clearAll(context);
                   },
                   itemBuilder: (context) => const [
+                    PopupMenuItem(
+                      value: 'files',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.library_add_outlined),
+                        title: Text('导入文件'),
+                        subtitle: Text('TXT / EPUB / HTML / MD / ZIP，可多选'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'folder',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.folder_open_outlined),
+                        title: Text('扫描文件夹'),
+                        subtitle: Text('递归扫描并逐本导入（也可直接拖文件进窗口）'),
+                      ),
+                    ),
                     PopupMenuItem(
                       value: 'stats',
                       child: ListTile(
@@ -679,6 +677,16 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                         leading: Icon(Icons.picture_in_picture_alt_outlined),
                         title: Text('阅读浮窗'),
                         subtitle: Text('置顶迷你窗：今日时长与在读进度'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'clear',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.delete_sweep_outlined),
+                        title: Text('清空阅读记录'),
+                        subtitle: Text('只删书架条目，不删已导入的本地书'),
                       ),
                     ),
                   ],

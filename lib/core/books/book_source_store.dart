@@ -84,6 +84,7 @@ class BookSourceStore extends ChangeNotifier {
           ruleToc: existing.ruleToc,
           ruleContent: existing.ruleContent,
           jsLib: existing.jsLib,
+          cookie: existing.cookie,
           format: builtin.format,
           rawRuleJson: existing.rawRuleJson,
         );
@@ -113,6 +114,15 @@ class BookSourceStore extends ChangeNotifier {
     }
     await _persist();
     return added;
+  }
+
+  /// 替换同 url 的源（改 Cookie/命名等元数据；内置源也允许，url 不变）。
+  Future<void> update(BookSource source) async {
+    final existing = byUrl(source.url);
+    if (existing == null) return;
+    final index = _sources.indexOf(existing);
+    _sources[index] = source;
+    await _persist();
   }
 
   /// 切启停；内置源常驻启用（传入 false 被忽略）。

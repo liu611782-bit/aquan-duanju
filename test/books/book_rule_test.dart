@@ -152,5 +152,33 @@ void main() {
       );
       expect(plain.requiresJs, isFalse);
     });
+
+    test('非法选择器不崩：当作无匹配（[] / 空串）', () {
+      const html = '<html><body><div class="x"><a href="/1">甲</a></div></body></html>';
+      // 真实源里出现过 `[]` 这种坏规则，之前会抛 FormatException 把整个源打断。
+      expect(BookRule.evalList(html, '[]'), isEmpty);
+      expect(BookRule.evalList(html, ''), isEmpty);
+      expect(BookRule.evalString(html, '[]'), '');
+      // 正常选择器不受影响
+      expect(BookRule.evalList(html, 'class.x@tag.a'), hasLength(1));
+    });
+
+    test('cookie 随书源往返，启停切换不丢', () {
+      const source = BookSource(
+        url: 'https://www.wenku8.net',
+        name: 'Wenku8',
+        format: BookSourceFormat.wenku8,
+        cookie: 'cf_clearance=abc',
+      );
+      final restored = BookSource.fromJson(source.toJson());
+      expect(restored.cookie, 'cf_clearance=abc');
+
+      final toggled = source.copyWithEnabled(false);
+      expect(toggled.cookie, 'cf_clearance=abc');
+      expect(toggled.format, BookSourceFormat.wenku8);
+
+      expect(source.copyWithCookie('').cookie, isEmpty);
+      expect(source.copyWithCookie('a=1').cookie, 'a=1');
+    });
   });
 }

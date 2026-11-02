@@ -162,9 +162,13 @@ class ErrorRetryView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 展示真实原因：吞成「出了点小问题」会让书源/网络问题无从排查。
+    final raw = error.toString().replaceFirst(RegExp(r'^Exception: '), '').trim();
     final text = error is AquaException
         ? (error as AquaException).friendlyText
-        : '出了点小问题，请稍后再试';
+        : (raw.isEmpty || raw == 'Exception'
+            ? '出了点小问题，请稍后再试'
+            : (raw.length > 260 ? '${raw.substring(0, 260)}…' : raw));
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,

@@ -5,6 +5,7 @@ import '../core/books/book_source_service.dart';
 import '../core/books/provider/wenku8_page.dart';
 import '../core/books/provider/wenku8_provider.dart';
 import '../widgets/common.dart';
+import '../widgets/cookie_dialog.dart';
 import 'book_source_book_page.dart';
 
 /// 内置 Wenku8 书城：**排行 / 分类** 两个维度浏览，点书进详情。
@@ -88,6 +89,24 @@ class _Wenku8BrowseScreenState extends State<Wenku8BrowseScreen>
         _loadingRank = false;
       });
     }
+  }
+
+  /// 就地填 Cookie：403 时不用去别的页面找设置。
+  Future<void> _editCookie() async {
+    final store = AppScope.read(context).bookSources;
+    final current = store.byUrl(widget.source.url) ?? widget.source;
+    final cookie = await showBookSourceCookieDialog(
+      context,
+      title: current.name.isEmpty ? current.url : current.name,
+      initial: current.cookie,
+    );
+    if (cookie == null) return;
+    await store.update(current.copyWithCookie(cookie.trim()));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(cookie.trim().isEmpty ? '已清空 Cookie' : '已保存 Cookie，正在重试…')));
+    await _loadRank(reset: true);
+    await _loadClasses();
   }
 
   Future<void> _loadClasses() async {
@@ -207,12 +226,37 @@ class _Wenku8BrowseScreenState extends State<Wenku8BrowseScreen>
       return const Center(child: CircularProgressIndicator());
     }
     if (_classes.isEmpty) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Text(
-            '未能从站点解析出分类列表（站点可能改版）。\n可先用「排行」浏览，或在书源管理里把 Wenku8 换成镜像域名。',
-            textAlign: TextAlign.center,
+      final error = _classError;
+      return Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                error is StateError || error == null
+                    ? '未能从站点解析出分类列表（站点可能改版）。\n可先用「排行」浏览。'
+                    : '拉取分类失败：\n$error',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _editCookie,
+                    icon: const Icon(Icons.cookie_outlined, size: 18),
+                    label: const Text('填入 Cookie'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _loadClasses,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('重试'),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
       );
@@ -271,7 +315,23 @@ class _Wenku8BrowseScreenState extends State<Wenku8BrowseScreen>
     }
     if (hits.isEmpty) {
       if (error != null && error is! StateError) {
-        return ErrorRetryView(error: error, onRetry: onRetry);
+        return Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ErrorRetryView(error: error, onRetry: onRetry),
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: _editCookie,
+                  icon: const Icon(Icons.cookie_outlined, size: 18),
+                  label: const Text('填入浏览器 Cookie（绕过 Cloudflare 403）'),
+                ),
+              ],
+            ),
+          ),
+        );
       }
       return Center(
         child: Text('没有结果', style: theme.textTheme.bodyMedium),
