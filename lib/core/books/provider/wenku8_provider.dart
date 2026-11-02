@@ -54,12 +54,15 @@ class Wenku8Provider implements BookSourceProvider {
   @override
   bool get builtin => true;
 
+  /// 内置源**默认停用**：站点 2026 起要求登录 + Cloudflare 校验，未填 Cookie 时
+  /// 每次请求只会 403 污染聚合搜索。有账号的用户可启用并填 Cookie/UA。
   @override
   List<BookSource> get builtinSources => const [
         BookSource(
           url: kWenku8DefaultBase,
           name: '轻小说文库（Wenku8）',
-          group: '内置',
+          group: '内置 · 需登录',
+          enabled: false,
           format: BookSourceFormat.wenku8,
         ),
       ];

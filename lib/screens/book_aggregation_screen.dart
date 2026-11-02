@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'dart:convert';
 
 
+import '../core/books/book_source_checker.dart';
 import '../core/books/book_source_model.dart';
 import '../core/books/book_source_service.dart';
 import '../core/books/book_source_store.dart';
@@ -469,6 +470,78 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
         content: Text(result.cookie.isEmpty ? '已清空 Cookie' : '已保存 Cookie')));
   }
 
+  bool _cleaning = false;
+  int _cleanTotal = 0;
+  int _cleanProgress = 0;
+
+  void _snack(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  /// 逐源实测并删除不可用的源（含内置源；删掉的内置源不再自动注入）。
+  ///
+  /// 探测只做「搜索」一步（不拉正文），单源 20s 超时，避免清理一次要几分钟。
+  Future<void> _cleanBroken() async {
+    final store = _store;
+    final targets = store.sources.where((s) => s.enabled).toList();
+    if (targets.isEmpty) {
+      _snack('没有启用的书源');
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('清理失效源'),
+        content: Text(
+          '将逐个实测 ${targets.length} 个启用源（只测搜索，单源最多 20 秒），'
+          '把不可用的源直接删除（含内置源）。\n\n'
+          '源站被墙/需要登录的源也会被判定为失效——删掉后需要时可以从「书源仓库」重新导入。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('开始检测'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() {
+      _cleaning = true;
+      _cleanTotal = targets.length;
+      _cleanProgress = 0;
+    });
+
+    final checker = BookSourceChecker();
+    final broken = <String>[];
+    for (final source in targets) {
+      try {
+        final check = await checker
+            .check(source, kDefaultProbeQuery, fetchContent: false)
+            .timeout(const Duration(seconds: 20));
+        if (!check.ok) broken.add(source.url);
+      } catch (e) {
+        broken.add(source.url);
+        ErrorLog.instance.record('清理失效源', '${source.name}：$e');
+      }
+      if (!mounted) break;
+      setState(() => _cleanProgress++);
+    }
+
+    final removed = await store.removeAll(broken);
+    if (!mounted) return;
+    setState(() => _cleaning = false);
+    _snack(removed == 0
+        ? '全部可用，未删除任何源'
+        : '已删除 $removed 个失效源，剩余 ${store.sources.length} 个');
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -484,6 +557,26 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
               children: [
                 Text('书源管理', style: theme.textTheme.titleMedium),
                 const Spacer(),
+                if (_cleaning)
+                  Row(
+                    children: [
+                      const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      const SizedBox(width: 6),
+                      Text('检测 $_cleanProgress/$_cleanTotal',
+                          style: theme.textTheme.bodySmall),
+                    ],
+                  )
+                else
+                  TextButton.icon(
+                    onPressed: store.sources.isEmpty ? null : _cleanBroken,
+                    icon: const Icon(Icons.cleaning_services_outlined, size: 16),
+                    label: const Text('清理失效源'),
+                  ),
+                const SizedBox(width: 6),
                 Text('${store.enabled.length} 启用 / ${store.sources.length} 总数',
                     style: theme.textTheme.bodySmall
                         ?.copyWith(color: theme.colorScheme.outline)),
@@ -529,24 +622,23 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
                               children: [
                                 if (store.isBuiltin(s.url))
                                   Padding(
-                                    padding: const EdgeInsets.only(right: 6),
+                                    padding: const EdgeInsets.only(right: 4),
                                     child: Tooltip(
-                                      message: '内置源，常驻启用且不可删除',
-                                      child: Icon(Icons.lock_outline,
-                                          size: 16,
+                                      message: '内置源（可停用/删除，删后不再自动出现）',
+                                      child: Icon(Icons.bookmark_outline,
+                                          size: 15,
                                           color: theme.colorScheme.primary),
                                     ),
-                                  )
-                                else
-                                  Switch(
-                                    value: s.enabled,
-                                    onChanged: (v) async {
-                                      await store.setEnabled(s.url, v);
-                                      if (mounted) setState(() {});
-                                    },
                                   ),
+                                Switch(
+                                  value: s.enabled,
+                                  onChanged: (v) async {
+                                    await store.setEnabled(s.url, v);
+                                    if (mounted) setState(() {});
+                                  },
+                                ),
                                 IconButton(
-                                  tooltip: 'Cookie（Cloudflare / 登录态）',
+                                  tooltip: 'Cookie / UA（Cloudflare · 登录态）',
                                   icon: Icon(
                                     s.cookie.isEmpty
                                         ? Icons.cookie_outlined
@@ -555,16 +647,15 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
                                   ),
                                   onPressed: () => _editCookie(s),
                                 ),
-                                if (!store.isBuiltin(s.url))
-                                  IconButton(
-                                    tooltip: '删除',
-                                    icon: const Icon(Icons.delete_outline,
-                                        size: 20),
-                                    onPressed: () async {
-                                      await store.remove(s.url);
-                                      if (mounted) setState(() {});
-                                    },
-                                  ),
+                                IconButton(
+                                  tooltip: '删除',
+                                  icon: const Icon(Icons.delete_outline,
+                                      size: 20),
+                                  onPressed: () async {
+                                    await store.remove(s.url);
+                                    if (mounted) setState(() {});
+                                  },
+                                ),
                               ],
                             ),
                           ),

@@ -93,20 +93,31 @@ class _BookSourceMarketScreenState extends State<BookSourceMarketScreen> {
     if (mounted) setState(() => _scanning = false);
   }
 
+  /// 只导入**校验通过**的源：失败的源（域名失效/403/被墙）导进来只会污染书架与
+  /// 聚合搜索，一律跳过并如实告知跳过数量。
   Future<void> _import() async {
-    final chosen =
+    final selected =
         _results.where((c) => _selected.contains(c.source.url)).toList();
-    if (chosen.isEmpty) {
+    if (selected.isEmpty) {
       _snack('没有勾选任何书源');
       return;
     }
+    final usable = selected.where((c) => c.ok).toList();
+    final skipped = selected.length - usable.length;
+    if (usable.isEmpty) {
+      _snack('勾选的 $skipped 个源都不可用，已全部跳过');
+      return;
+    }
     setState(() => _importing = true);
-    final added = await _store
-        .importAll([for (final c in chosen) c.source.copyWithEnabled(c.ok)]);
+    final added = await _store.importAll([
+      for (final c in usable) c.source.copyWithEnabled(true),
+    ]);
     if (!mounted) return;
     setState(() => _importing = false);
     Navigator.pop(context);
-    _snack('导入 $added 个书源（可用即启用，失败源已导入但停用）');
+    _snack(added == 0
+        ? '这些源已在书源列表里（重复导入已去重）'
+        : '导入 $added 个可用书源${skipped > 0 ? '，跳过 $skipped 个不可用' : ''}');
   }
 
   void _snack(String text) {

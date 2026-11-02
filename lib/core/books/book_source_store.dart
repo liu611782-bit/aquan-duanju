@@ -9,13 +9,14 @@ import 'provider/book_source_provider.dart';
 
 /// 已导入书源注册表：增删改查 + 启停（ChangeNotifier 供 UI 订阅）。
 ///
-/// 除用户导入的源，还会常驻**内置源**（provider 声明的，如 Wenku8）：
-/// 加载时自动注入、强制启用、不允许删除/停用。
+/// 内置源（provider 声明的，如 Wenku8）首次加载时注入；用户停用或删除后
+/// **不再重复注入**（`bookSource.builtinDismissed`），可完全按自己的源表使用。
 class BookSourceStore extends ChangeNotifier {
   BookSourceStore(this._prefs, {BookSourceProviderRegistry? registry})
       : _registry = registry ?? BookSourceService().registry;
 
   static const String _key = 'bookSource.enabled';
+  static const String _dismissedKey = 'bookSource.builtinDismissed';
 
   final SharedPreferences _prefs;
   final BookSourceProviderRegistry _registry;
@@ -35,10 +36,15 @@ class BookSourceStore extends ChangeNotifier {
     return null;
   }
 
-  /// 内置源 url 集合（UI 据此隐藏删除/启停按钮）。
+  /// 内置源 url 集合（UI 用它打「内置」标记，不再限制操作）。
   Set<String> get builtinUrls => _registry.builtinUrls;
 
   bool isBuiltin(String url) => builtinUrls.contains(url);
+
+  /// 用户删掉/关掉过的内置源（不再自动注入）。
+  final Set<String> _dismissed = <String>{};
+
+  bool isDismissed(String url) => _dismissed.contains(url);
 
   Future<void> ensureLoaded() async {
     if (_loaded) return;
@@ -58,39 +64,28 @@ class BookSourceStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 注入内置源：缺失则补、已存在则刷新元数据并强制启用。
+  /// 注入内置源：**只补缺失**，不覆盖用户的启停与编辑；被删过的不再注入。
   void _ensureBuiltins() {
+    final rawDismissed = _prefs.getString(_dismissedKey);
+    if (rawDismissed != null && rawDismissed.isNotEmpty) {
+      try {
+        final list = jsonDecode(rawDismissed);
+        if (list is List) {
+          _dismissed
+            ..clear()
+            ..addAll(list.map((e) => e.toString()));
+        }
+      } catch (_) {
+        // 坏数据当没删过。
+      }
+    }
+
     var changed = false;
     for (final builtin in _registry.builtinSources) {
-      final existing = byUrl(builtin.url);
-      if (existing == null) {
-        _sources.add(builtin);
-        changed = true;
-        continue;
-      }
-      if (!existing.enabled ||
-          existing.name != builtin.name ||
-          existing.group != builtin.group ||
-          existing.format != builtin.format) {
-        final index = _sources.indexOf(existing);
-        _sources[index] = BookSource(
-          url: builtin.url,
-          name: builtin.name,
-          group: builtin.group,
-          enabled: true,
-          searchUrl: existing.searchUrl,
-          ruleSearch: existing.ruleSearch,
-          ruleBookInfo: existing.ruleBookInfo,
-          ruleToc: existing.ruleToc,
-          ruleContent: existing.ruleContent,
-          jsLib: existing.jsLib,
-          cookie: existing.cookie,
-          userAgent: existing.userAgent,
-          format: builtin.format,
-          rawRuleJson: existing.rawRuleJson,
-        );
-        changed = true;
-      }
+      if (_dismissed.contains(builtin.url)) continue;
+      if (byUrl(builtin.url) != null) continue;
+      _sources.add(builtin);
+      changed = true;
     }
     if (changed) {
       // 不 await：ensureLoaded 的调用方不关心落盘时机，但不能丢状态。
@@ -126,23 +121,47 @@ class BookSourceStore extends ChangeNotifier {
     await _persist();
   }
 
-  /// 切启停；内置源常驻启用（传入 false 被忽略）。
+  /// 切启停（内置源同样可以关；关掉后不再自动注入）。
   Future<void> setEnabled(String url, bool enabled) async {
     final source = byUrl(url);
     if (source == null) return;
-    if (isBuiltin(url) && !enabled) return;
     final index = _sources.indexOf(source);
     // 必须经 copyWithEnabled：手工重建会丢掉 format/rawRuleJson（方言源切启停即坏）。
     _sources[index] = source.copyWithEnabled(enabled);
+    if (isBuiltin(url) && !enabled) _dismissed.add(url);
+    if (isBuiltin(url) && enabled) _dismissed.remove(url);
     await _persist();
+    await _persistDismissed();
   }
 
-  /// 删除源；内置源拒绝删除并返回 false。
+  /// 删除源（内置源也可删，删后不再自动注入）。
   Future<bool> remove(String url) async {
-    if (isBuiltin(url)) return false;
+    final removed = _sources.any((s) => s.url == url);
     _sources.removeWhere((s) => s.url == url);
+    if (isBuiltin(url)) _dismissed.add(url);
     await _persist();
-    return true;
+    await _persistDismissed();
+    return removed;
+  }
+
+  /// 一键清理：删除校验失败的源（[urls] 由调用方探测得到）。
+  ///
+  /// 内置源一并删除并记为「已忽略」，避免下次启动又被注入。
+  Future<int> removeAll(Iterable<String> urls) async {
+    final targets = urls.toSet();
+    if (targets.isEmpty) return 0;
+    final before = _sources.length;
+    for (final url in targets) {
+      if (isBuiltin(url)) _dismissed.add(url);
+    }
+    _sources.removeWhere((s) => targets.contains(s.url));
+    await _persist();
+    await _persistDismissed();
+    return before - _sources.length;
+  }
+
+  Future<void> _persistDismissed() async {
+    await _prefs.setString(_dismissedKey, jsonEncode(_dismissed.toList()));
   }
 
   Future<void> _persist() async {

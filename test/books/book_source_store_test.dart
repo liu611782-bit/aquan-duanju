@@ -16,38 +16,62 @@ void main() {
   }
 
   group('内置源注入', () {
-    test('首次加载自动注入 Wenku8 且启用', () async {
+    test('首次加载注入 Wenku8，但默认停用（站点需登录）', () async {
       final store = await newStore();
       final builtin = store.sources
           .where((s) => s.format == BookSourceFormat.wenku8)
           .toList();
       expect(builtin, hasLength(1));
       expect(builtin.single.url, kWenku8DefaultBase);
-      expect(builtin.single.enabled, isTrue);
+      expect(builtin.single.enabled, isFalse);
       expect(store.isBuiltin(kWenku8DefaultBase), isTrue);
       expect(store.enabled.any((s) => s.format == BookSourceFormat.wenku8),
-          isTrue);
+          isFalse);
     });
 
-    test('重启后不重复注入，且停用状态被强制恢复', () async {
+    test('用户改过/停用过的内置源不被覆盖（只补缺失）', () async {
       SharedPreferences.setMockInitialValues({
         'bookSource.enabled':
-            '[{"bookSourceUrl":"https://www.wenku8.net","bookSourceName":"旧名",'
+            '[{"bookSourceUrl":"https://www.wenku8.net","bookSourceName":"我改的名字",'
                 '"enabled":false,"aquanFormat":"wenku8"}]',
       });
       final store = await newStore();
       expect(store.sources, hasLength(1));
       final s = store.sources.single;
-      expect(s.enabled, isTrue, reason: '内置源必须常驻启用');
-      expect(s.name, '轻小说文库（Wenku8）', reason: '元数据应刷新');
+      expect(s.enabled, isFalse, reason: '不能强行把用户关掉的源打开');
+      expect(s.name, '我改的名字', reason: '不能覆盖用户编辑');
       expect(s.format, BookSourceFormat.wenku8);
     });
 
-    test('内置源拒绝删除，普通源可删', () async {
-      final store = await newStore();
-      expect(await store.remove(kWenku8DefaultBase), isFalse);
-      expect(store.byUrl(kWenku8DefaultBase), isNotNull);
+    test('内置源可删除，删后重启不再自动注入', () async {
+      final prefs = await SharedPreferences.getInstance();
+      final first = BookSourceStore(prefs);
+      await first.ensureLoaded();
+      expect(await first.remove(kWenku8DefaultBase), isTrue);
+      expect(first.byUrl(kWenku8DefaultBase), isNull);
+      expect(first.isDismissed(kWenku8DefaultBase), isTrue);
 
+      final reopened = BookSourceStore(prefs);
+      await reopened.ensureLoaded();
+      expect(reopened.byUrl(kWenku8DefaultBase), isNull, reason: '删过的不再注入');
+    });
+
+    test('内置源可启停，重启后保持用户选择', () async {
+      final prefs = await SharedPreferences.getInstance();
+      final store = BookSourceStore(prefs);
+      await store.ensureLoaded();
+      await store.setEnabled(kWenku8DefaultBase, true);
+      expect(store.byUrl(kWenku8DefaultBase)!.enabled, isTrue);
+      await store.setEnabled(kWenku8DefaultBase, false);
+      expect(store.byUrl(kWenku8DefaultBase)!.enabled, isFalse);
+
+      final reopened = BookSourceStore(prefs);
+      await reopened.ensureLoaded();
+      expect(reopened.byUrl(kWenku8DefaultBase)!.enabled, isFalse);
+    });
+
+    test('普通源可删；removeAll 批量删并记 dismiss', () async {
+      final store = await newStore();
       const userSource = BookSource(
         url: 'https://user.example',
         name: '用户源',
@@ -56,12 +80,11 @@ void main() {
       await store.importAll([userSource]);
       expect(await store.remove('https://user.example'), isTrue);
       expect(store.byUrl('https://user.example'), isNull);
-    });
 
-    test('内置源停用被忽略', () async {
-      final store = await newStore();
-      await store.setEnabled(kWenku8DefaultBase, false);
-      expect(store.byUrl(kWenku8DefaultBase)!.enabled, isTrue);
+      final removed = await store.removeAll([kWenku8DefaultBase, '不存在']);
+      expect(removed, 1);
+      expect(store.sources, isEmpty);
+      expect(store.isDismissed(kWenku8DefaultBase), isTrue);
     });
 
     test('可注入自定义注册表（测试替身）', () async {

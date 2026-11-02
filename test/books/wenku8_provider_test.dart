@@ -60,7 +60,8 @@ void main() {
       expect(p.builtinSources, hasLength(1));
       expect(p.builtinSources.single.url, 'https://www.wenku8.net');
       expect(p.builtinSources.single.format, BookSourceFormat.wenku8);
-      expect(p.builtinSources.single.enabled, isTrue);
+      // 站点需登录：内置源默认停用，避免污染聚合搜索。
+      expect(p.builtinSources.single.enabled, isFalse);
     });
   });
 
