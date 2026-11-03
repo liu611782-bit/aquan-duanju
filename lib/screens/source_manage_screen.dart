@@ -29,6 +29,15 @@ class _SourceManageScreenState extends State<SourceManageScreen> {
   final Set<String> _probing = {};
   bool _probingAll = false;
 
+  /// 测完重排后回到顶部：好源在最上面，不用再自己往下找。
+  final ScrollController _listController = ScrollController();
+
+  @override
+  void dispose() {
+    _listController.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final scope = AppScope.of(context);
@@ -37,6 +46,10 @@ class _SourceManageScreenState extends State<SourceManageScreen> {
       scope.sources.all,
       scoreOf: (s) => health.scoreOf(s.id),
       latencyOf: (s) => health.latencyOf(s.id),
+      // 批量测速进行中不重排（只更新行内结果文本），测完一次性重排。
+      // 边测边重排会让列表在用户眼皮底下反复跳动（MoonTVPlus 同款门控）。
+      // 结论存在 SourceHealthStore 里：back 回影视聚合后排序口径不变。
+      probeOf: _probingAll ? null : (s) => health.probeOf(s.id),
     );
     final theme = Theme.of(context);
     return Scaffold(
@@ -103,6 +116,7 @@ class _SourceManageScreenState extends State<SourceManageScreen> {
               ),
             )
           : ListView.builder(
+              controller: _listController,
               padding: const EdgeInsets.only(bottom: 24),
               itemCount: sorted.length,
               itemBuilder: (context, index) {
@@ -234,9 +248,13 @@ class _SourceManageScreenState extends State<SourceManageScreen> {
   }
 
   /// 主动测速也是一次真实命中：成功写延迟，失败写原因，健康分才有区分度。
+  ///
+  /// 爬虫源恒返回失败（需 JVM 引擎），写进去会让它永久垫底并进入冷却，故跳过；
+  /// 其余方言（cmsJson / cmsXml / spiderJs）都记，测速排序才对所有源一致。
   Future<void> _recordProbeHealth(
       AppScope scope, SourceKind? kind, ProbeOutcome outcome) async {
-    if (kind != SourceKind.cmsJson) return;
+    if (kind == null || kind == SourceKind.spider) return;
+    scope.sourceHealth.rememberProbe(outcome);
     if (outcome.isOk) {
       await scope.sourceHealth.recordSuccess(
           outcome.sourceId, outcome.latencyMs ?? 0);
@@ -268,16 +286,32 @@ class _SourceManageScreenState extends State<SourceManageScreen> {
     setState(() => _probingAll = true);
     final scope = AppScope.read(context);
     final kinds = {for (final s in sources) s.id: s.kind};
+    var ok = 0;
+    var timeout = 0;
+    var failed = 0;
     await for (final e in probeSources(sources,
         timeout: Duration(milliseconds: scope.settings.sourcesProbeTimeoutMs))) {
       if (e is ProbeProgress) {
         await _recordProbeHealth(scope, kinds[e.outcome.sourceId], e.outcome);
+        if (e.outcome.state == ProbeState.ok) {
+          ok++;
+        } else if (e.outcome.state == ProbeState.timeout) {
+          timeout++;
+        } else {
+          failed++;
+        }
         if (!mounted) return;
         setState(() => _probe[e.outcome.sourceId] = e.outcome);
       }
     }
     if (!mounted) return;
+    // 全部测完才重排（此时 probeOf 生效），并回到顶部让最快的源直接可见。
     setState(() => _probingAll = false);
+    if (_listController.hasClients) _listController.jumpTo(0);
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
+      content: Text('测速完成：$ok 成功 / $timeout 超时 / $failed 失败，已按速度排序'),
+      duration: const Duration(seconds: 3),
+    ));
   }
 
   Future<void> _checkOne(AppScope scope, SourceConfig s) async {

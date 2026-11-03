@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import '../core/sources/source_adapter_factory.dart';
 import '../core/sources/search_orchestrator.dart';
 import '../core/sources/source_adapter.dart';
+import '../core/sources/source_probe.dart';
+import '../core/sources/source_registry.dart';
 import '../widgets/common.dart';
 import '../widgets/voice_button.dart';
 import 'bili_home_screen.dart';
@@ -39,7 +41,10 @@ class _MediaHubScreenState extends State<MediaHubScreen>
     _searchSeed = widget.initialQuery;
     _tabs = TabController(
         length: 2, vsync: this, initialIndex: _searchSeed != null ? 1 : 0);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _pickDefaultSource());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(_pickDefaultSource);
+    });
   }
 
   @override
@@ -48,14 +53,27 @@ class _MediaHubScreenState extends State<MediaHubScreen>
     super.dispose();
   }
 
+  /// 启用源按「本轮测速 + 健康分」排序：源管理批量测速 back 回来，好源在前。
+  List<SourceConfig> _rankedSources(AppScope scope) => sortSourcesForDisplay(
+        scope.sources.enabled,
+        scoreOf: (s) => scope.sourceHealth.scoreOf(s.id),
+        latencyOf: (s) => scope.sourceHealth.latencyOf(s.id),
+        probeOf: (s) => scope.sourceHealth.probeOf(s.id),
+      );
+
+  /// 选默认源：只补空缺，不覆盖用户已选的源（从源管理/源市场返回时保持原选择）。
   void _pickDefaultSource() {
-    final sources = AppScope.read(context).sources.enabled;
-    if (sources.isEmpty) return;
-    setState(() => _currentSourceId = sources.first.id);
+    final sources = _rankedSources(AppScope.read(context));
+    if (sources.isEmpty) {
+      _currentSourceId = '';
+      return;
+    }
+    if (sources.any((s) => s.id == _currentSourceId)) return;
+    _currentSourceId = sources.first.id;
   }
 
   void _ensureCurrentSource() {
-    final sources = AppScope.read(context).sources.enabled;
+    final sources = _rankedSources(AppScope.read(context));
     if (_currentSourceId.isEmpty ||
         !sources.any((s) => s.id == _currentSourceId)) {
       _currentSourceId = sources.isEmpty ? '' : sources.first.id;
@@ -71,7 +89,7 @@ class _MediaHubScreenState extends State<MediaHubScreen>
   @override
   Widget build(BuildContext context) {
     final scope = AppScope.of(context);
-    final sources = scope.sources.enabled;
+    final sources = _rankedSources(scope);
     _ensureCurrentSource();
     final current = _currentSource;
     return Scaffold(
@@ -84,7 +102,9 @@ class _MediaHubScreenState extends State<MediaHubScreen>
             onPressed: () async {
               await Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => const SourceMarketScreen()));
-              if (mounted) setState(() => _pickDefaultSource());
+              if (!mounted) return;
+              // 健康分/源列表可能已变：无条件重建，但保留用户已选的源。
+              setState(_pickDefaultSource);
             },
           ),
           IconButton(
@@ -93,7 +113,9 @@ class _MediaHubScreenState extends State<MediaHubScreen>
             onPressed: () async {
               await Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => const SourceManageScreen()));
-              if (mounted) setState(() {});
+              if (!mounted) return;
+              // 批量测速写的是健康分，回来必须重建才能看到新排序。
+              setState(_pickDefaultSource);
             },
           ),
         ],
@@ -107,6 +129,7 @@ class _MediaHubScreenState extends State<MediaHubScreen>
           _SourceChipBar(
             sources: sources,
             currentId: current?.id ?? '',
+            latencyOf: (s) => scope.sourceHealth.latencyOf(s.id),
             onSelect: (id) => setState(() => _currentSourceId = id),
           ),
           Expanded(
@@ -114,7 +137,8 @@ class _MediaHubScreenState extends State<MediaHubScreen>
                 ? _EmptySourcesView(onOpenMarket: () async {
                     await Navigator.of(context).push(MaterialPageRoute(
                         builder: (_) => const SourceMarketScreen()));
-                    if (mounted) setState(() => _pickDefaultSource());
+                    if (!mounted) return;
+                    setState(_pickDefaultSource);
                   })
                 : TabBarView(
                     controller: _tabs,
@@ -135,64 +159,86 @@ class _MediaHubScreenState extends State<MediaHubScreen>
   }
 }
 
-/// 源切换条：横滑 chip，末尾一个「管理」入口。
+/// 源切换条：横滑 chip（按健康分排序，好源在前），末尾一个「管理」入口。
 class _SourceChipBar extends StatelessWidget {
   const _SourceChipBar({
     required this.sources,
     required this.currentId,
+    required this.latencyOf,
     required this.onSelect,
   });
 
   final List<SourceConfig> sources;
   final String currentId;
+  final int Function(SourceConfig config) latencyOf;
   final ValueChanged<String> onSelect;
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
+    final theme = Theme.of(context);
+    // 桌面端：常显滚动条 + 鼠标拖拽 + 滚轮转横向（源多时滚不到右侧的主诉）。
+    return HorizontalScrollStrip(
       height: 52,
-      // 桌面端垂直滚轮转横向滚动：源多时鼠标用户滚不到右侧（主诉）。
-      child: HorizontalWheelScroll(
-        child: ListView(
-          scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: ActionChip(
-              avatar: Icon(Icons.settings_input_antenna_outlined,
-                  size: 18, color: Theme.of(context).colorScheme.primary),
-              label: const Text('直播'),
-              tooltip: 'TVBox lives 直播频道',
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const LiveScreen()),
-              ),
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: ActionChip(
+            avatar: Icon(Icons.settings_input_antenna_outlined,
+                size: 18, color: theme.colorScheme.primary),
+            label: const Text('直播'),
+            tooltip: 'TVBox lives 直播频道',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const LiveScreen()),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: ActionChip(
-              avatar: Icon(Icons.smart_display_outlined,
-                  size: 18, color: Theme.of(context).colorScheme.primary),
-              label: const Text('B 站'),
-              tooltip: '哔哩哔哩（登录后推荐/搜索/番剧/弹幕）',
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const BiliHomeScreen()),
-              ),
-            ),
-          ),
-          for (final s in sources)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: ChoiceChip(
-                label: Text(s.shortDrama ? '${s.name} · 短剧' : s.name),
-                selected: s.id == currentId,
-                onSelected: (_) => onSelect(s.id),
-              ),
-            ),
-        ],
         ),
-      ),
+        Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: ActionChip(
+            avatar: Icon(Icons.smart_display_outlined,
+                size: 18, color: theme.colorScheme.primary),
+            label: const Text('B 站'),
+            tooltip: '哔哩哔哩（登录后推荐/搜索/番剧/弹幕）',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const BiliHomeScreen()),
+            ),
+          ),
+        ),
+        for (final s in sources)
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: ChoiceChip(
+              label: _chipLabel(theme, s),
+              selected: s.id == currentId,
+              onSelected: (_) => onSelect(s.id),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// 名字 + 健康延迟：让「哪个源快」在条上直接可读。
+  Widget _chipLabel(ThemeData theme, SourceConfig s) {
+    final latency = latencyOf(s);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(s.shortDrama ? '${s.name} · 短剧' : s.name),
+        if (latency > 0) ...[
+          const SizedBox(width: 6),
+          Text(
+            '${latency}ms',
+            style: TextStyle(
+              fontSize: 10,
+              color: switch (probeLevel(latency)) {
+                ProbeLevel.fast => Colors.green,
+                ProbeLevel.normal => Colors.orange,
+                ProbeLevel.slow => theme.colorScheme.error,
+              },
+            ),
+          ),
+        ],
+      ],
     );
   }
 }
@@ -343,28 +389,22 @@ class _BrowseTabState extends State<_BrowseTab>
     return Column(
       children: [
         if (_categories.isNotEmpty)
-          SizedBox(
+          HorizontalScrollStrip(
             height: 44,
-            child: HorizontalWheelScroll(
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                children: [
-                  for (final c in _categories)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: ChoiceChip(
-                        label: Text(c.name),
-                        selected: c.id == _categoryId,
-                        onSelected: (_) {
-                          setState(() => _categoryId = c.id);
-                          _reload();
-                        },
-                    ),
+            children: [
+              for (final c in _categories)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    label: Text(c.name),
+                    selected: c.id == _categoryId,
+                    onSelected: (_) {
+                      setState(() => _categoryId = c.id);
+                      _reload();
+                    },
                   ),
-              ],
-            ),
-            ),
+                ),
+            ],
           ),
         Expanded(
           child: LoadView(

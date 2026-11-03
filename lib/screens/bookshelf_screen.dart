@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart';
@@ -414,14 +415,8 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
     }
     for (final e in entries) {
       if (e.bookId != book.id) continue;
-      Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => BookDetailScreen(
-          bookId: e.bookId,
-          title: e.title,
-          coverUrl: e.coverUrl,
-          manga: e.manga,
-        ),
-      ));
+      // 统一入口：第三方书源的书籍要还原书源后走书源详情页。
+      unawaited(openBook(context, e));
       return;
     }
   }
@@ -813,14 +808,8 @@ class _BookshelfScreenState extends State<BookshelfScreen> {
                     _toggleSelected(entry.bookId);
                     return;
                   }
-                  Navigator.of(context).push(MaterialPageRoute(
-                    builder: (_) => BookDetailScreen(
-                      bookId: entry.bookId,
-                      title: entry.title,
-                      coverUrl: entry.coverUrl,
-                      manga: entry.manga,
-                    ),
-                  ));
+                  // 统一入口：第三方书源的书籍要还原书源后走书源详情页。
+                  unawaited(openBook(context, entry));
                 },
               );
             },

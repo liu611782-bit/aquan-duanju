@@ -3,7 +3,7 @@
 /// 与整章缓存（`tts_cache.dart`）并存，布局：
 /// ```
 /// <root>/<bookId>/<chapterId>-<engineId>-<voiceId>/
-///     index.json      {unitCount, textSignature, units:[{durationMs, bytes, timeline?}]}
+///     index.json      {format, unitCount, textSignature, units:[{durationMs, bytes, timeline?}]}
 ///     u000.<ext>      单元音频
 /// ```
 /// 规则：
@@ -18,6 +18,13 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:path_provider/path_provider.dart';
+
+/// 单元缓存的格式版本。
+///
+/// 只要「产物口径」变了就必须 +1：静音裁剪余量、时间轴含义、字节清洗规则都算。
+/// 旧格式的目录会在 `lookup` 处判为未命中、在 `pruneOrphans` 里被删掉 ——
+/// 否则改了裁剪余量之后，用户听到的还是上一版裁得太狠的旧音频。
+const int kTtsUnitCacheFormat = 2;
 
 /// 一个章目录的键（与整章缓存的键语义保持一致：含引擎与音色，不含倍速）。
 class TtsUnitKey {
@@ -181,6 +188,7 @@ class TtsUnitCache {
     }
 
     final payload = jsonEncode({
+      'format': kTtsUnitCacheFormat,
       'unitCount': chapter.unitCount,
       'textSignature': chapter.textSignature,
       'totalDurationMs': total,
@@ -209,6 +217,8 @@ class TtsUnitCache {
     } catch (_) {
       return null;
     }
+    // 格式版本不符 = 上一版产物（例如裁剪余量不同）：整章重建，绝不混用。
+    if ((index['format'] as num?)?.toInt() != kTtsUnitCacheFormat) return null;
     if ((index['textSignature'] ?? '').toString() != textSignature) return null;
 
     final units = <TtsUnitHit>[];
@@ -234,7 +244,7 @@ class TtsUnitCache {
     return TtsChapterHit(units: units, totalDurationMs: total);
   }
 
-  /// 清掉没有 `index.json` 的章目录（合成中断留下的半成品）。
+  /// 清掉没有 `index.json`（合成中断的半成品）或格式版本过期的章目录。
   ///
   /// 返回删除的目录数；`keepKeys` 里的章即使未完成也保留（正在合成）。
   Future<int> pruneOrphans({Set<String> keepKeys = const {}}) async {
@@ -245,7 +255,7 @@ class TtsUnitCache {
         final key = '${bookDir.path.split(RegExp(r'[/\\]')).last}/'
             '${chapterDir.path.split(RegExp(r'[/\\]')).last}';
         if (keepKeys.contains(key)) continue;
-        if (File('${chapterDir.path}/index.json').existsSync()) continue;
+        if (await _isCurrentFormat(chapterDir)) continue;
         try {
           await chapterDir.delete(recursive: true);
           removed++;
@@ -260,5 +270,18 @@ class TtsUnitCache {
       }
     }
     return removed;
+  }
+
+  /// 目录里的 index.json 是否存在且格式版本是当前版本。
+  Future<bool> _isCurrentFormat(Directory dir) async {
+    final file = File('${dir.path}/index.json');
+    if (!file.existsSync()) return false;
+    try {
+      final json = jsonDecode(await file.readAsString());
+      if (json is! Map<String, dynamic>) return false;
+      return (json['format'] as num?)?.toInt() == kTtsUnitCacheFormat;
+    } catch (_) {
+      return false;
+    }
   }
 }

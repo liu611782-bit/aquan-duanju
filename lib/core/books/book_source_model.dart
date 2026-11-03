@@ -390,6 +390,40 @@ class BookHit {
   bool get isMeaningful => name.trim().isNotEmpty && bookUrl.trim().isNotEmpty;
 }
 
+/// 第三方书源书籍在阅读/听书链路上的 bookId 前缀：`booksrc:<源url>:<书url>`。
+///
+/// 番茄的书 id 是纯数字、音轨接口只认数字；这个前缀就是「这不是原生书」的标记，
+/// 也是「最近在读/书架」重新打开时还原书源的唯一线索。
+const String kBookSourceBookIdPrefix = 'booksrc:';
+
+/// 拼出第三方书源的 booksrc bookId。
+String bookSourceBookId(BookSource source, String bookUrl) =>
+    '$kBookSourceBookIdPrefix${source.url}:$bookUrl';
+
+/// 从 booksrc bookId 还原所属书源；源被删/改地址时返回 null。
+///
+/// **只能靠已存源表匹配前缀**：源 url 与书 url 都含 `://`，按 `:` 数着拆必然拆错。
+/// 多个源 url 互为前缀时取最长的那个（更具体的源）。
+BookSource? bookSourceOf(List<BookSource> sources, String bookId) {
+  if (!bookId.startsWith(kBookSourceBookIdPrefix)) return null;
+  BookSource? match;
+  for (final source in sources) {
+    final url = source.url.trim();
+    if (url.isEmpty) continue;
+    if (!bookId.startsWith('$kBookSourceBookIdPrefix$url:')) continue;
+    if (match == null || url.length > match.url.length) match = source;
+  }
+  return match;
+}
+
+/// 从 booksrc bookId 还原书 URL；[source] 不匹配时返回 null。
+String? bookUrlOf(BookSource source, String bookId) {
+  final prefix = '$kBookSourceBookIdPrefix${source.url}:';
+  if (!bookId.startsWith(prefix)) return null;
+  final bookUrl = bookId.substring(prefix.length);
+  return bookUrl.isEmpty ? null : bookUrl;
+}
+
 /// 一章目录项。
 class BookTocItem {
   const BookTocItem({this.title = '', this.url = '', this.isVolume = false});

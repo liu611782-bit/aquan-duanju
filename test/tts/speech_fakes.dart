@@ -18,6 +18,7 @@ import 'package:aquan_duanju/core/tts/speech_engine.dart';
 import 'package:aquan_duanju/core/tts/tts_cache.dart';
 import 'package:aquan_duanju/core/tts/tts_composer.dart';
 import 'package:aquan_duanju/core/tts/tts_models.dart';
+import 'package:aquan_duanju/core/tts/tts_unit_cache.dart';
 import 'package:aquan_duanju/models/audio.dart';
 import 'package:aquan_duanju/models/book.dart';
 import 'package:aquan_duanju/store/stores.dart';
@@ -263,6 +264,9 @@ class SpeechHarness {
       player = FakePlayer(),
       store = RecordingStore() {
     cache = TtsCache(rootDirectory: () async => root);
+    unitCache = TtsUnitCache(
+      root: Directory('${root.path}/audio_cache_units'),
+    );
   }
 
   final Directory root;
@@ -271,12 +275,16 @@ class SpeechHarness {
   final RecordingStore store;
   late final TtsCache cache;
 
+  /// 流式链路的单元缓存：与整章缓存同根（临时目录），测试之间互不污染。
+  late final TtsUnitCache unitCache;
+
   final List<ReaderSpeechController> controllers = <ReaderSpeechController>[];
 
   ReaderSpeechController build(
     SpeechEngine engine, {
     ReplaceRuleStore? rules,
     ReaderSettingsStore? settings,
+    TtsUnitCache? ttsUnitCache,
   }) {
     final controller = ReaderSpeechController(
       api: api,
@@ -285,6 +293,7 @@ class SpeechHarness {
       ttsEngine: engine,
       ttsCache: cache,
       ttsComposer: TtsComposer(),
+      ttsUnitCache: ttsUnitCache ?? unitCache,
       rules: rules,
       settings: settings,
     );

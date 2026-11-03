@@ -88,12 +88,14 @@ const TtsVoice _voice = TtsVoice(id: 'zh-CN-XiaoxiaoNeural');
 Future<TtsComposition> _compose(
   SpeechEngine engine, {
   bool trimSilence = true,
+  int tailKeepMs = 160,
 }) => TtsComposer().composeChapter(
   engine: engine,
   paragraphs: const <String>['你好世界'],
   voice: _voice,
   epoch: 1,
   trimSilence: trimSilence,
+  tailKeepMs: tailKeepMs,
 );
 
 void main() {
@@ -213,6 +215,21 @@ void main() {
       final last = composition.timeline.words.last;
       expect(last.endMs, 800);
       expect(last.endMs, lessThanOrEqualTo(composition.timeline.audioMs));
+    });
+
+    test('流式尾部余量：静音不够余量大时不裁，最后一个字得以保留', () async {
+      // 尾静音 400ms：默认 160 会裁掉 240ms（切段时缓冲一冲就吃到语音）；
+      // 流式用 480 余量 → 目标超出段尾 → 原样保留。
+      final safe = await _compose(
+        _PaddedEngine(leadMs: 0, tailMs: 400),
+        tailKeepMs: 480,
+      );
+      expect(safe.audio.length, 50 * _frameBytes);
+      expect(safe.audioMsFromBytes, 1200);
+      expect(safe.timeline.words.last.endMs, 800);
+
+      final tight = await _compose(_PaddedEngine(leadMs: 0, tailMs: 400));
+      expect(tight.audio.length, 40 * _frameBytes, reason: '默认余量仍是 160ms');
     });
 
     test('trimSilence=false 与裁剪前逐字节一致', () async {

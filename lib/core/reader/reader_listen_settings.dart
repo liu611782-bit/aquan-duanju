@@ -62,6 +62,12 @@ class ReaderListenSettings {
   /// 段首尾静音裁剪开关（默认**开**）：关掉回到「原样拼接」，用于试听对比。
   static const String trimSilenceKey = 'listen.trim.silence';
 
+  /// 流式朗读开关（默认**关**）：按单元合成、首段先播；关掉完全走整章合成老路径。
+  ///
+  /// 它是本任务唯一的回滚闸：新链路（单元缓存/队列/切段）全部挂在它后面，
+  /// 出问题只翻这一个键就能回到「整章一个产物」的行为。
+  static const String streamingTtsKey = 'listen.tts.streaming';
+
   /// 按书语速键：`listen.speed.<bookId>`。**缺键回落全局 `listen.speed`**，
   /// 老用户的既有偏好因此继续生效（迁移零成本）；全局键仍是「新书的默认值」。
   static String speedKeyOf(String bookId) => 'listen.speed.$bookId';
@@ -169,6 +175,12 @@ class ReaderListenSettings {
   bool get trimSilenceEnabled => _prefs.getBool(trimSilenceKey) ?? true;
   Future<void> setTrimSilenceEnabled(bool value) =>
       _prefs.setBool(trimSilenceKey, value);
+
+  /// 流式朗读。缺键按**关**：先让老路径兜底，实测通过后再决定是否默认开。
+  bool get streamingTtsEnabled =>
+      _prefs.getBool(streamingTtsKey) ?? false;
+  Future<void> setStreamingTtsEnabled(bool value) =>
+      _prefs.setBool(streamingTtsKey, value);
 
   /// 背景音乐文件路径；空串 = 关闭。清空时删键，不留空串残留。
   String get bgmFile => _prefs.getString(bgmFileKey) ?? '';

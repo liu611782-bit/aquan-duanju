@@ -2,25 +2,74 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../core/books/book_source_model.dart';
+import '../core/books/book_source_service.dart';
 import '../models/book.dart';
 import '../store/stores.dart';
 import '../widgets/book_directory_sheet.dart';
 import '../widgets/common.dart';
 import 'book_audio_screen.dart';
 import 'book_category_screen.dart';
+import 'book_source_book_page.dart';
 import 'manga_reader_screen.dart';
 import 'reader_screen.dart';
 
 /// 从阅读进度打开一本书（统一入口，便于以后加转场/埋点）。
-void openBook(BuildContext context, ReadingEntry entry) {
-  Navigator.of(context).push(MaterialPageRoute(
-    builder: (_) => BookDetailScreen(
+Future<void> openBook(BuildContext context, ReadingEntry entry) => openBookEntry(
+      context,
       bookId: entry.bookId,
       title: entry.title,
       coverUrl: entry.coverUrl,
       manga: entry.manga,
+    );
+
+/// 按 bookId 形态选择详情入口（「最近在读」/ 书架 /「继续阅读」共用）。
+///
+/// 第三方书源的书籍 id 形如 `booksrc:<源url>:<书url>`：原生 `bookDetail` 只认
+/// 番茄的数字 id，直接打开必然报「出了点小问题」。这里还原书源后改走
+/// [BookSourceBookPage]；书源被删则给一句能看懂的话，而不是一个通用错误。
+Future<void> openBookEntry(
+  BuildContext context, {
+  required String bookId,
+  String title = '',
+  String coverUrl = '',
+  bool manga = false,
+}) async {
+  // await 之前把要用的对象取齐：之后不再摸 context。
+  final navigator = Navigator.of(context);
+  final messenger = ScaffoldMessenger.of(context);
+  final sources = AppScope.read(context).bookSources;
+  if (!manga && bookId.startsWith(kBookSourceBookIdPrefix)) {
+    await sources.ensureLoaded();
+    final source = bookSourceOf(sources.sources, bookId);
+    final bookUrl = source == null ? null : bookUrlOf(source, bookId);
+    if (source == null || bookUrl == null) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('这本书的书源已被删除，无法重新打开')),
+      );
+      return;
+    }
+    await navigator.push(
+      MaterialPageRoute<void>(
+        builder: (_) => BookSourceBookPage(
+          service: BookSourceService(),
+          source: source,
+          hit: BookHit(bookUrl: bookUrl, name: title, coverUrl: coverUrl),
+        ),
+      ),
+    );
+    return;
+  }
+  await navigator.push(
+    MaterialPageRoute<void>(
+      builder: (_) => BookDetailScreen(
+        bookId: bookId,
+        title: title,
+        coverUrl: coverUrl,
+        manga: manga,
+      ),
     ),
-  ));
+  );
 }
 
 /// 书籍详情：封面/简介/目录入口/继续阅读。

@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:aquan_duanju/core/sources/source_adapter.dart';
+import 'package:aquan_duanju/core/sources/source_probe.dart';
 import 'package:aquan_duanju/core/sources/source_registry.dart';
 
 SourceConfig _cfg(String id,
@@ -34,6 +35,78 @@ void main() {
           latencyOf: (s) => s.id == 'd' ? 50 : s.id == 'e' ? 10 : 100);
 
       expect(sorted.map((s) => s.id).toList(), ['b', 'e', 'd', 'a', 'c']);
+    });
+
+    test('本轮测速成功排到历史高分源之前', () {
+      final old = _cfg('old');
+      final fast = _cfg('fast');
+      final sorted = sortSourcesForDisplay([old, fast],
+          scoreOf: (s) => s.id == 'old' ? 9000 : 0,
+          latencyOf: (s) => s.id == 'old' ? 20 : 0,
+          probeOf: (s) => s.id == 'fast'
+              ? const ProbeOutcome(
+                  sourceId: 'fast', state: ProbeState.ok, ttfbMs: 800)
+              : null);
+      expect(sorted.map((s) => s.id).toList(), ['fast', 'old']);
+    });
+
+    test('本轮测速状态序：成功 > 超时 > 失败 > 未测', () {
+      final ok = _cfg('ok');
+      final timeout = _cfg('timeout');
+      final failed = _cfg('failed');
+      final none = _cfg('none');
+      final probes = <String, ProbeOutcome>{
+        'ok': const ProbeOutcome(
+            sourceId: 'ok', state: ProbeState.ok, ttfbMs: 1500),
+        'timeout': const ProbeOutcome(
+            sourceId: 'timeout', state: ProbeState.timeout, reason: '超时'),
+        'failed': const ProbeOutcome(
+            sourceId: 'failed', state: ProbeState.failed, reason: '失败'),
+      };
+      final sorted = sortSourcesForDisplay([none, failed, timeout, ok],
+          // 未测源健康分最高，也不能插到测过的源前面。
+          scoreOf: (s) => s.id == 'none' ? 9999 : 0,
+          latencyOf: (_) => 0,
+          probeOf: (s) => probes[s.id]);
+      expect(
+          sorted.map((s) => s.id).toList(), ['ok', 'timeout', 'failed', 'none']);
+    });
+
+    test('同为成功按 TTFB 升序，健康分不参与', () {
+      final slow = _cfg('slow');
+      final fast = _cfg('fast');
+      final sorted = sortSourcesForDisplay([slow, fast],
+          scoreOf: (s) => s.id == 'slow' ? 9000 : 0,
+          latencyOf: (_) => 0,
+          probeOf: (s) => ProbeOutcome(
+              sourceId: s.id,
+              state: ProbeState.ok,
+              ttfbMs: s.id == 'slow' ? 900 : 120));
+      expect(sorted.map((s) => s.id).toList(), ['fast', 'slow']);
+    });
+
+    test('钉选源即使测速失败也排最前', () {
+      final pinned = _cfg('pinned', pinned: true);
+      final ok = _cfg('ok');
+      final sorted = sortSourcesForDisplay([ok, pinned],
+          scoreOf: (_) => 0,
+          latencyOf: (_) => 0,
+          probeOf: (s) => ProbeOutcome(
+              sourceId: s.id,
+              state: s.id == 'ok' ? ProbeState.ok : ProbeState.failed));
+      expect(sorted.map((s) => s.id).toList(), ['pinned', 'ok']);
+    });
+
+    test('完全同分时保持入参顺序（稳定 tie-break）', () {
+      final x = _cfg('x');
+      final y = _cfg('y');
+      final z = _cfg('z');
+      List<String> run(List<SourceConfig> input) => sortSourcesForDisplay(input,
+              scoreOf: (_) => 0, latencyOf: (_) => 0)
+          .map((s) => s.id)
+          .toList();
+      expect(run([x, y, z]), ['x', 'y', 'z']);
+      expect(run([z, x, y]), ['z', 'x', 'y']);
     });
   });
 

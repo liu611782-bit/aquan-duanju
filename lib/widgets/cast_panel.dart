@@ -446,6 +446,44 @@ class _CastSessionSheetState extends State<_CastSessionSheet> {
   }
 }
 
+/// 播放器常驻投屏按钮：控件条 3–4 秒自动隐藏后，投屏入口不能跟着消失。
+///
+/// 与播放器左上角的「常驻返回」同一套视觉（半透明黑底 + 圆形 + 白色图标）；
+/// 只在控件条隐藏时由调用方显示，避免与顶栏投屏按钮重复。
+class CastFabButton extends StatelessWidget {
+  const CastFabButton({super.key, required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.black.withValues(alpha: 0.45),
+      shape: const CircleBorder(),
+      child: ListenableBuilder(
+        listenable: castController,
+        builder: (context, _) => Tooltip(
+          message: castController.isCasting ? '投屏管理' : '投屏到电视',
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onPressed,
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Icon(
+                castController.isCasting
+                    ? Icons.cast_connected
+                    : Icons.cast_outlined,
+                color: Colors.white,
+                size: 22,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// 投屏状态条：投屏中叠在播放器顶部下方（设备名 + 断开按钮）。
 class CastStatusBar extends StatelessWidget {
   const CastStatusBar({

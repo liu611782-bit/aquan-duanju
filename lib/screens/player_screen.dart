@@ -2327,6 +2327,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                 _playbackFailure == null)
               _buildBufferingBadge(),
             if (_showControls) _buildControls(context),
+            // 投屏入口常驻：控件条 4 秒自动隐藏后，顶栏按钮会一起消失。
+            if (!_showControls)
+              Positioned(
+                top: 10,
+                right: 10,
+                child: CastFabButton(onPressed: _openCastSheet),
+              ),
           ],
         ),
       ),

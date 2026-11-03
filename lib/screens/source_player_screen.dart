@@ -847,6 +847,14 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
                 ),
               ),
             ),
+            // 常驻悬浮投屏：控件条隐藏后顶栏的投屏按钮会一起消失（实测主诉），
+            // 这里补一个不随控件隐藏的入口；控件显示时由顶栏那个负责，不重复。
+            if (!_showControls)
+              Positioned(
+                top: 10,
+                right: 10,
+                child: CastFabButton(onPressed: _openCastSheet),
+              ),
             if (_loading)
               const Center(child: CircularProgressIndicator()),
             if (_error != null)

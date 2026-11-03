@@ -13,6 +13,7 @@ import '../core/reader/reader_annotations.dart';
 import '../core/reader/replace_rules.dart';
 import '../core/sources/source_adapter.dart';
 import '../core/sources/source_health.dart';
+import '../core/sources/source_probe.dart';
 import '../core/sources/source_import.dart';
 import '../core/sources/source_seed.dart';
 import '../models/models.dart';
@@ -1763,6 +1764,35 @@ class ReadingProgressStore extends _JsonFileStore {
     await _flush();
   }
 
+  /// 补齐封面：只补「已有记录且封面为空」的情况。
+  ///
+  /// 第三方书源的书籍进阅读器时还拿不到封面，历史记录里就是空串；等详情页
+  /// 拿到封面后回填一次。**不动进度、序号与更新时间** —— 它只是补字段，
+  /// 不能把自己当成一次新的阅读而把书顶到列表最前、也不能压制进度写入。
+  Future<bool> fillCover(String bookId, String coverUrl) async {
+    final cover = coverUrl.trim();
+    if (cover.isEmpty) return false;
+    await ensureLoaded();
+    final existing = _entries[bookId];
+    if (existing == null || existing.coverUrl.trim().isNotEmpty) return false;
+    _entries[bookId] = ReadingEntry(
+      bookId: bookId,
+      title: existing.title,
+      coverUrl: cover,
+      chapterId: existing.chapterId,
+      chapterTitle: existing.chapterTitle,
+      chapterIndex: existing.chapterIndex,
+      chapters: existing.chapters,
+      offset: existing.offset,
+      charOffset: existing.charOffset,
+      revision: existing.revision,
+      manga: existing.manga,
+      updatedAt: existing.updatedAt,
+    );
+    await _flush();
+    return true;
+  }
+
   /// 已存记录的写入序号；调用方据此续号，避免每次打开页面都从 0 重来。
   Future<int> revisionOf(String bookId) async {
     await ensureLoaded();
@@ -2890,12 +2920,24 @@ class SourceHealthStore extends _JsonFileStore {
 
   final Map<String, SourceHealthRecord> _health = {};
 
+  /// 本次会话内最近一次主动测速结论（不落盘）：源管理与影视聚合共用同一
+  /// 排序口径——测完 back 回影视聚合，「好源在前」仍然成立。
+  final Map<String, ProbeOutcome> _probes = {};
+
   SourceHealthRecord recordOf(String sourceId) =>
       _health.putIfAbsent(sourceId, SourceHealthRecord.new);
 
   int scoreOf(String sourceId) => recordOf(sourceId).score;
   int latencyOf(String sourceId) => recordOf(sourceId).avgLatencyMs.round();
   bool coolingDown(String sourceId) => recordOf(sourceId).isCoolingDown();
+
+  /// 最近一次主动测速结论；没测过返回 null（排序里排最后）。
+  ProbeOutcome? probeOf(String sourceId) => _probes[sourceId];
+
+  /// 记住一次主动测速结论。爬虫源的「恒失败」由调用方过滤，不进这里。
+  void rememberProbe(ProbeOutcome outcome) {
+    _probes[outcome.sourceId] = outcome;
+  }
 
   Future<void> recordSuccess(String sourceId, int latencyMs) async {
     recordOf(sourceId).recordSuccess(latencyMs);

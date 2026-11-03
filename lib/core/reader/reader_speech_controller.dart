@@ -21,6 +21,7 @@ import '../tts/speech_engine.dart';
 import '../tts/tts_cache.dart';
 import '../tts/tts_composer.dart';
 import '../tts/tts_models.dart';
+import '../tts/tts_unit_cache.dart';
 import 'reader_listen_settings.dart';
 import 'reader_paragraphs.dart';
 import 'reader_settings.dart';
@@ -36,6 +37,7 @@ import 'speech/listen_stats.dart';
 import 'speech/sleep_timer.dart';
 import 'speech/speaker_splitter.dart';
 import 'speech/speech_unit.dart';
+import 'speech/streaming_tts_session.dart';
 
 /// 端点漂移时如何重建引擎：返回替换用的引擎，`null` 表示没有下一个端点（直接报错）。
 ///
@@ -59,6 +61,14 @@ SpeechEngine? _edgePresetFallback(SpeechEngine current, String proxy) {
 /// 保持一致（design.md §6）。
 const String _kTtsDemuxerOptions =
     'protocol_whitelist=[http,https,tcp,tls,crypto,data,file]';
+
+/// 流式单元的**尾部静音余量**（毫秒）。
+///
+/// 每个单元播完都要 `open` 下一段：播放器换媒体时会丢弃音频缓冲区的尾部，
+/// 默认 160ms 余量实测不够 —— 每段最后一个字会被切掉（真机复现）。
+/// 给到 480ms 后切点结构性落在静音里：即使丢掉 300ms 也不伤语音，
+/// 代价只是段末多一口气的停顿（每段本来就该在句末换气）。
+const int kStreamUnitTailKeepMs = 480;
 
 /// 当前朗读走的是哪条路径 —— 精度徽标与「手动切换路径」的唯一真值来源。
 ///
@@ -115,6 +125,7 @@ class ReaderSpeechController extends ChangeNotifier {
     this._ttsCache,
     TtsComposer? ttsComposer,
     TtsEngineFallback? ttsEngineFallback,
+    this._ttsUnitCache,
     this._rules,
     this._settings,
     int Function()? clockMs,
@@ -141,6 +152,10 @@ class ReaderSpeechController extends ChangeNotifier {
   /// 合成引擎标识。当前只有 `edge` 一个实现，键先立住，加引擎不必改设置页。
   static const String ttsEngineKey = 'listen.tts.engine';
 
+  /// 流式朗读（按单元合成、首段先播）的回滚开关。字面值与
+  /// [ReaderListenSettings.streamingTtsKey] 相同，设置页写的是那一份。
+  static const String ttsStreamingKey = ReaderListenSettings.streamingTtsKey;
+
   late final AquaApi _api;
   late final ListenProgressStore _store;
   final PlayerEngine _engine;
@@ -154,6 +169,9 @@ class ReaderSpeechController extends ChangeNotifier {
   /// 合成引擎（懒建）；403 降级时会被替换成另一个 preset 的实例。
   SpeechEngine? _ttsEngine;
   TtsCache? _ttsCache;
+
+  /// 单元缓存（章目录 + 单元文件）。懒建，与整章缓存可注入同一临时根目录。
+  TtsUnitCache? _ttsUnitCache;
   final TtsComposer _ttsComposer;
   final TtsEngineFallback _ttsEngineFallback;
 
@@ -256,6 +274,24 @@ class ReaderSpeechController extends ChangeNotifier {
 
   /// 每次「打开某章」的代号：切章/换音色后旧请求的结果必须丢弃。
   int _epoch = 0;
+
+  /// 流式朗读开关快照（`listen.tts.streaming`）。关 → 完全走整章合成老路径。
+  bool _streamingTts = false;
+
+  /// 当前章的流式会话；非空 = 播放器正在按单元播放（位置事件需换算章内毫秒）。
+  StreamingTtsSession? _stream;
+
+  /// 会话所属世代：与 [_epoch] 不等即作废（切章/换音色/关闭）。
+  int _streamEpoch = -1;
+
+  /// 最近一次位置事件的**单元内**毫秒（预取阈值判定用）。
+  int _streamUnitMs = 0;
+
+  /// 切段互斥：`completed` 可能连发，重复 open 会让播放器丢掉正在播的单元。
+  bool _streamAdvancing = false;
+
+  /// 刚 open 新单元、还没收到第一条位置事件：此时到达的 `completed` 属于旧媒体。
+  bool _streamStarting = false;
 
   Timer? _saveTimer;
   Duration _lastSaved = Duration.zero;
@@ -812,6 +848,7 @@ class ReaderSpeechController extends ChangeNotifier {
     _ttsProxy = '';
     _ttsEngineId = kDefaultTtsEngineId;
     _ttsQuotaMb = TtsCacheLimits.defaultQuotaMb;
+    _streamingTts = false;
     await _loadPrefs();
     final old = _ttsEngine;
     _ttsEngine = null;
@@ -833,6 +870,19 @@ class ReaderSpeechController extends ChangeNotifier {
     if (_paragraphCount <= 0) return;
     final target = (_paragraphIndex + delta).clamp(0, _paragraphCount - 1);
     if (target == _paragraphIndex) return;
+    final session = _stream;
+    if (session != null && _streamEpoch == _epoch) {
+      // 流式：目标段可能还在未产出的单元里 → 先按段落定位再切单元。
+      final ms = await session.chapterMsOfParagraph(target);
+      if (session != _stream || _streamEpoch != _epoch) return;
+      if (ms <= 0) return;
+      if (!await _streamSeek(session, ms)) return;
+      _position = Duration(milliseconds: ms);
+      _paragraphIndex = target;
+      _updateHighlight();
+      notify();
+      return;
+    }
     final ms = _positions.startMsOfParagraph(
       target,
       paragraphCount: _paragraphCount,
@@ -852,6 +902,16 @@ class ReaderSpeechController extends ChangeNotifier {
     var target = position < Duration.zero ? Duration.zero : position;
     final total = _duration;
     if (total > Duration.zero && target > total) target = total;
+    final session = _stream;
+    if (session != null && _streamEpoch == _epoch) {
+      // 章内毫秒 → 目标单元：跨单元时 open，同单元时只 seek 单元内偏移。
+      if (!await _streamSeek(session, target.inMilliseconds)) return;
+      _position = target;
+      _recomputeParagraph();
+      _updateHighlight();
+      notify();
+      return;
+    }
     try {
       await _engine.seek(target);
     } catch (_) {}
@@ -866,6 +926,7 @@ class ReaderSpeechController extends ChangeNotifier {
     // 世代号 +1 就是中止信号：编排层每个 await 之后都问一次 `isCurrent`，
     // 进行中的合成会在下一段边界抛 `cancelled` 自行退出（不留半成品）。
     _epoch++;
+    _cancelStream();
     // 关闭闸先落下：isFor/isActive 随即翻 false，底部朗读条与全局迷你条立刻消失。
     // 仅把 notify 放在 `_bookId=''` 之前没用——显隐判据读的就是 `_bookId`，只要
     // `await _engine.stop()` 卡住或抛错，条就一直挂着（「结束朗读不消失」主诉）。
@@ -915,6 +976,8 @@ class ReaderSpeechController extends ChangeNotifier {
       unawaited(sub.cancel());
     }
     _subs.clear();
+    _stream?.cancel();
+    _stream = null;
     final tts = _ttsEngine;
     if (tts != null) unawaited(tts.dispose());
     unawaited(_bgm.dispose());
@@ -1073,7 +1136,14 @@ class ReaderSpeechController extends ChangeNotifier {
     _subs.add(_engine.stream.position.listen(_onPosition));
     // 时长只喂给预取阈值判定，不 notify：切章时先收到零、再收到真实时长，
     // 拿上一章的旧时长判定阈值会误触发（清零也发生在 _openChapter 成功处）。
-    _subs.add(_engine.stream.duration.listen((d) => _duration = d));
+    _subs.add(
+      _engine.stream.duration.listen((d) {
+        // 流式播放时 duration 是**单元**时长，不是章时长：章总长由会话的
+        // Σ单元时长给出，这里覆盖会让进度条每次切段都缩回一段的长度。
+        if (_stream != null && _streamEpoch == _epoch) return;
+        _duration = d;
+      }),
+    );
     _subs.add(
       _engine.stream.playing.listen((playing) {
         if (_playing == playing) return;
@@ -1084,23 +1154,15 @@ class ReaderSpeechController extends ChangeNotifier {
     _subs.add(
       _engine.stream.completed.listen((done) {
         if (!done) return;
-        // 「本章播完停」：先让定时组件判决（fire 会置连播抑制位），再决定是否
-        // 连播。抑制位必须在 `_autoNext` 早退**之前**消费 —— 它读一次即清，
-        // 被早退挡在门外会隔空误伤之后章节的连播（注意事项 2）。
-        if (_sleep.mode == SleepMode.endOfChapter) {
-          final decision = _sleep.tick(
-            position: _position,
-            chapterCompleted: true,
-          );
-          if (decision.stop) unawaited(_applySleepStop());
-        }
-        if (_sleep.consumeSleepSuppressAutoNext()) {
-          notify();
+        final stream = _stream;
+        if (stream != null && _streamEpoch == _epoch) {
+          // 刚 open 新单元时到达的 completed 属于**上一段**媒体：丢掉，
+          // 否则会一次连跳两个单元。
+          if (_streamStarting) return;
+          unawaited(_advanceStreamUnit(stream));
           return;
         }
-        if (!_autoNext) return;
-        if (_chapterIndex >= _chapters.length - 1) return;
-        unawaited(_advanceToNextChapter());
+        _onChapterAudioCompleted();
       }),
     );
     _subs.add(
@@ -1113,17 +1175,56 @@ class ReaderSpeechController extends ChangeNotifier {
     );
   }
 
+  /// 一章的音频真的播完了：定时判决 → 连播抑制位 → 自动下一章。
+  ///
+  /// 流式路径在最后一个单元播完后也走这里：「本章播完」的语义只允许有一份，
+  /// 否则「本章播完停/自动连播」迟早会分成两套行为。
+  void _onChapterAudioCompleted() {
+    // 「本章播完停」：先让定时组件判决（fire 会置连播抑制位），再决定是否
+    // 连播。抑制位必须在 `_autoNext` 早退**之前**消费 —— 它读一次即清，
+    // 被早退挡在门外会隔空误伤之后章节的连播（注意事项 2）。
+    if (_sleep.mode == SleepMode.endOfChapter) {
+      final decision = _sleep.tick(
+        position: _position,
+        chapterCompleted: true,
+      );
+      if (decision.stop) unawaited(_applySleepStop());
+    }
+    if (_sleep.consumeSleepSuppressAutoNext()) {
+      notify();
+      return;
+    }
+    if (!_autoNext) return;
+    if (_chapterIndex >= _chapters.length - 1) return;
+    unawaited(_advanceToNextChapter());
+  }
+
   /// 位置事件的三笔账分开算（design.md §3）：
   /// 1. 词/句下标变了 → 立刻 notify，卡拉OK 不能等 250ms；
   /// 2. 段落下标变了 → 同样立刻 notify，否则自动跟随看起来「不跟」；
   /// 3. 都没变 → 只为进度条的平滑走 250ms 节流，避免阅读页整页重建。
   void _onPosition(Duration p) {
-    _position = p;
+    var chapterPosition = p;
+    final stream = _stream;
+    if (stream != null && _streamEpoch == _epoch) {
+      // 流式播放的引擎位置是「单元内毫秒」；对外（进度/高亮/落盘）一律是
+      // 章内毫秒 —— 只在**这一处**做换算，别让单元坐标漏到外面。
+      _streamStarting = false;
+      _streamUnitMs = p.inMilliseconds;
+      chapterPosition = Duration(
+        milliseconds: stream.currentStartMs + p.inMilliseconds,
+      );
+      final unitMs = stream.currentDurationMs;
+      if (unitMs > 0 && _streamUnitMs >= (unitMs * 0.7).round()) {
+        stream.prefetchNext();
+      }
+    }
+    _position = chapterPosition;
     // 统计只在“确实在播”时累计：暂停时位置流仍可能来心跳。
     if (_playing) _stats?.tick();
     final paragraphMoved = _recomputeParagraph();
     final highlightMoved = _updateHighlight();
-    _driveSleepAndPrefetch(p);
+    _driveSleepAndPrefetch(chapterPosition);
     final now = DateTime.now();
     if (!paragraphMoved &&
         !highlightMoved &&
@@ -1269,6 +1370,9 @@ class ReaderSpeechController extends ChangeNotifier {
   }) async {
     try {
       if (tts) {
+        // 流式链路的产物是「单元目录」，整章预取写的是旧格式单文件，命中率为 0
+        // 还白烧在线配额：流式模式下直接跳过，下一章切过来后由会话按需合成。
+        if (_streamingTts) return;
         // 正文必须走 _speechParagraphs（同源 deriveDisplayParagraphs）：否则
         // 预取产物与播放时派生的段落不一致 → 时间点错位（CRITICAL-1 口径）。
         final paragraphs = await _speechParagraphs(next);
@@ -1347,6 +1451,10 @@ class ReaderSpeechController extends ChangeNotifier {
     bool explicitStart = false,
   }) async {
     if (index < 0 || index >= _chapters.length) return;
+    // 换章（含切到音轨路径）：上一章的流式切段必须立刻停手，否则旧会话的
+    // `completed` 会把新章刚打开的媒体顶掉。
+    _cancelStream();
+    // 兜底：TTS 分支会再进来一次，_cancelStream 幂等。
     // 上下章与自动连播共用一个入口：TTS 会话换章必须继续走合成，否则第二章起
     // 会退回「没有可用音色」的老错误。
     if (_useTts) {
@@ -1503,6 +1611,7 @@ class ReaderSpeechController extends ChangeNotifier {
     bool explicitStart = false,
   }) async {
     if (index < 0 || index >= _chapters.length) return;
+    _cancelStream();
     final chapter = _chapters[index];
     final epoch = ++_epoch;
     _clearHighlightCache();
@@ -1519,6 +1628,19 @@ class ReaderSpeechController extends ChangeNotifier {
       if (epoch != _epoch) return;
       // 只读快照：给测试与「朗读文本」类 UI 证明同源用，不参与任何合成决策。
       _speechSnapshot = paragraphs;
+      // 流式链路是独立分支：开关关掉时下面的整章路径逐字节照旧（回滚闸）。
+      if (_streamingTts) {
+        await _startStreamingTts(
+          chapter: chapter,
+          paragraphs: paragraphs,
+          epoch: epoch,
+          resumeMs: resumeMs,
+          startParagraph: startParagraph,
+          startRatio: startRatio,
+          explicitStart: explicitStart,
+        );
+        return;
+      }
       final units = splitSpeechUnits(paragraphs);
       if (units.isEmpty) {
         throw const TtsException(
@@ -1577,12 +1699,16 @@ class ReaderSpeechController extends ChangeNotifier {
     } on TtsException catch (e) {
       // `cancelled` 只是「这一代已经被切章/关闭作废」，新任务正在跑，不该报错。
       if (epoch != _epoch || e.code == TtsErrorCode.cancelled) return;
+      // 流式会话可能已经把 `_stream` 挂上但首单元失败：必须一起作废，
+      // 否则后续位置事件会按一个没有时长的会话换算。
+      _cancelStream();
       _error = e.friendlyText;
       _loading = false;
       _playing = false;
       notify();
     } catch (e) {
       if (epoch != _epoch) return;
+      _cancelStream();
       _error = e;
       _loading = false;
       _playing = false;
@@ -1607,6 +1733,325 @@ class ReaderSpeechController extends ChangeNotifier {
       chapterTitle: chapter.title,
       rules: _rules?.forBook(_bookId) ?? const <ReplaceRule>[],
       convert: _settings?.value.convert ?? ChineseConvert.off,
+    );
+  }
+
+  /// 流式朗读的起播：单元按需合成，**首单元写完就 open**，其余后台续上。
+  ///
+  /// 与整章路径的区别只在「什么时候 open」：这里不等整章；位置事件仍然是
+  /// 引擎的媒体时间，但 [_onPosition] 会把它换算成章内毫秒，所以高亮/进度/
+  /// 落盘的上层语义与整章路径逐项一致。
+  Future<void> _startStreamingTts({
+    required BookChapter chapter,
+    required List<String> paragraphs,
+    required int epoch,
+    required int resumeMs,
+    required int startParagraph,
+    required double startRatio,
+    required bool explicitStart,
+  }) async {
+    final engine = _tts;
+    final voice = TtsVoice(
+      id: _ttsVoiceId.isEmpty ? kEdgeFallbackVoice : _ttsVoiceId,
+    );
+    final plan = await _rolePlanFor(voice);
+    if (epoch != _epoch) return;
+    // 单元键的构成与整章缓存同口径：音色（含多角色签名与静音裁剪位）进键。
+    final key = TtsUnitKey(
+      bookId: _bookId,
+      chapterId: chapter.id,
+      engineId: engine.id,
+      voiceId: _voiceIdFor(voice, plan),
+    );
+    final signature = _cache.signatureOf(paragraphs);
+    final unitCache = await _unitCache();
+    if (epoch != _epoch) return;
+    _pruneUnitCacheOnce(unitCache, key);
+    final session = await StreamingTtsSession.open(
+      cache: unitCache,
+      key: key,
+      paragraphs: paragraphs,
+      textSignature: signature,
+      extension: engine.caps.container,
+      granularity: engine.caps.effectiveGranularity,
+      compose: (unit) =>
+          _composeStreamUnit(unit, paragraphs, voice, plan, epoch),
+      onChanged: _onStreamChanged,
+    );
+    if (epoch != _epoch) {
+      session.cancel();
+      return;
+    }
+    _stream = session;
+    _streamEpoch = epoch;
+    _streamStarting = false;
+    _streamUnitMs = 0;
+    _synthDone = session.producedCount;
+    _synthTotal = session.unitCount;
+
+    // 落点规则与整章路径逐项对齐（含 `explicitStart` 的「必须落段 0」语义）。
+    final startFromHead =
+        explicitStart && startParagraph <= 0 && startRatio <= 0;
+    var targetMs = resumeMs;
+    if (targetMs <= 0) {
+      if (startParagraph > 0 || startRatio > 0) {
+        targetMs = await session.chapterMsOfParagraph(
+          startParagraph,
+          ratio: startRatio,
+        );
+      } else if (!startFromHead) {
+        targetMs = _store.entry(_bookId)?.positionMs ?? 0;
+      }
+    }
+    if (epoch != _epoch) {
+      session.cancel();
+      return;
+    }
+    // 定位到目标单元：命中缓存零网络；未命中要等前序单元合成（与整章同量级）。
+    var initialMsInUnit = 0;
+    if (targetMs > 0) {
+      final location = await session.locateChapterMs(targetMs);
+      if (epoch != _epoch) {
+        session.cancel();
+        return;
+      }
+      session.moveTo(location.index);
+      initialMsInUnit = location.msInUnit;
+    }
+
+    final current = await session.ensure(session.index);
+    if (epoch != _epoch) {
+      session.cancel();
+      return;
+    }
+    _applyPositions(session.positions);
+    // 段数的唯一写入者是阅读页：这里只在没有阅读页在场时兜底。
+    if (_paragraphCount <= 0) _paragraphCount = paragraphs.length;
+
+    await _engine.initialize();
+    if (epoch != _epoch) {
+      session.cancel();
+      return;
+    }
+    await _engine.setProperty('demuxer-lavf-o', _kTtsDemuxerOptions);
+    _streamStarting = true;
+    await _engine.open(Media(current.path), play: true);
+    if (epoch != _epoch) {
+      session.cancel();
+      return;
+    }
+    // 倍速只交给播放器：时间点存的是媒体时间轴，改语速绝不重新合成。
+    await _engine.setRate(_speed);
+    if (epoch != _epoch) {
+      session.cancel();
+      return;
+    }
+    _playing = true;
+    _loading = false;
+    // 开播成功后才起 BGM：失败路径不该有音乐单独响着。
+    _syncBgm(play: true);
+    final startMs = session.startOf(current.index);
+    _position = Duration(milliseconds: startMs + initialMsInUnit);
+    _streamUnitMs = initialMsInUnit;
+    _paragraphIndex = _positions.paragraphAt(
+      _position.inMilliseconds,
+      paragraphCount: _paragraphCount,
+    );
+    _duration = Duration(
+      milliseconds: session.totalKnownMs > _position.inMilliseconds
+          ? session.totalKnownMs
+          : _position.inMilliseconds,
+    );
+    _startSaveTimer();
+    _rearmSleepForChapter();
+    if (initialMsInUnit > 0) {
+      await _engine.seek(Duration(milliseconds: initialMsInUnit));
+      if (epoch != _epoch) return;
+    }
+    // 首单元就绪即把下一单元排上：这是「首段先出、后面不断音」的关键一步。
+    session.prefetchNext();
+    // 开播这一刻就把词/句区间算好：首帧就有高亮，不用等第一个位置事件。
+    _updateHighlight();
+    notify();
+  }
+
+  /// 流式会话每产出一个单元：刷新章内时间表/总时长与合成进度。
+  void _onStreamChanged() {
+    final session = _stream;
+    if (session == null || _streamEpoch != _epoch) return;
+    // 时间表只拼连续已知前缀：高亮/段级跟随都按章内毫秒查询，缺段会让它跳。
+    _applyPositions(session.positions);
+    final known = session.totalKnownMs;
+    if (known > _duration.inMilliseconds) {
+      _duration = Duration(milliseconds: known);
+    }
+    _synthDone = session.producedCount;
+    _synthTotal = session.unitCount;
+    _updateHighlight();
+    notify();
+  }
+
+  /// 合成一个单元：走与整章**同一条**编排链路（时序清洗/静音裁剪/时间点平移）。
+  Future<TtsComposition> _composeStreamUnit(
+    SpeechUnit unit,
+    List<String> paragraphs,
+    TtsVoice voice,
+    SpeechRolePlan? plan,
+    int epoch,
+  ) async {
+    final composition = await _ttsComposer.composeChapter(
+      engine: _tts,
+      paragraphs: paragraphs,
+      voice: voice,
+      voiceFor: _voiceResolver(<SpeechUnit>[unit], plan),
+      epoch: epoch,
+      units: <SpeechUnit>[unit],
+      isCurrent: (value) => value == _epoch,
+      trimSilence: trimSilenceEnabled,
+      // 切段要换媒体：尾部余量必须留够，否则最后一个字被缓冲区丢弃吃掉。
+      tailKeepMs: kStreamUnitTailKeepMs,
+      // 单元之间由会话的 1-ahead 预取负责并发，单次请求内部不再并行。
+      concurrency: 1,
+    );
+    if (epoch != _epoch) {
+      throw TtsException(
+        TtsErrorCode.cancelled,
+        message: '单元 ${unit.index} 合成结束时 requestIndex=$epoch 已过期',
+      );
+    }
+    return composition;
+  }
+
+  /// 播完一个单元 → 打开下一个；最后一段播完才回到「本章播完」的统一处理。
+  Future<void> _advanceStreamUnit(StreamingTtsSession session) async {
+    if (_streamAdvancing) return;
+    _streamAdvancing = true;
+    try {
+      while (true) {
+        if (session != _stream || _streamEpoch != _epoch) return;
+        if (!session.hasNext) {
+          _stream = null;
+          _streamEpoch = -1;
+          _synthDone = 0;
+          _synthTotal = 0;
+          _onChapterAudioCompleted();
+          return;
+        }
+        final target = session.index + 1;
+        StreamingUnitAudio next;
+        try {
+          next = await session.ensure(target);
+        } catch (e) {
+          if (session != _stream || _streamEpoch != _epoch) return;
+          // PRD R6：单段失败不静默，也不整章停掉 —— 记下可读原因后跳过该段。
+          _error = _friendlyOf(e);
+          if (target + 1 >= session.unitCount) {
+            _stream = null;
+            _streamEpoch = -1;
+            _playing = false;
+            notify();
+            return;
+          }
+          session.moveTo(target);
+          notify();
+          continue;
+        }
+        if (session != _stream || _streamEpoch != _epoch) return;
+        session.moveTo(next.index);
+        _streamStarting = true;
+        await _engine.open(Media(next.path), play: true);
+        if (session != _stream || _streamEpoch != _epoch) return;
+        await _engine.setRate(_speed);
+        final startMs = session.startOf(next.index);
+        _position = Duration(milliseconds: startMs);
+        _streamUnitMs = 0;
+        final known = session.totalKnownMs;
+        _duration = Duration(
+          milliseconds: known > startMs ? known : startMs,
+        );
+        _recomputeParagraph();
+        _updateHighlight();
+        // 下一段的预取由 _onPosition 的 70% 阈值与会话的 1-ahead 共同保证。
+        session.prefetchNext();
+        notify();
+        return;
+      }
+    } finally {
+      _streamAdvancing = false;
+    }
+  }
+
+  /// 章内毫秒 → 目标单元 open + 单元内 seek。
+  ///
+  /// 目标在未产出的单元里时会**等**它合成（命中缓存则零网络）；等待期间置
+  /// loading，免得用户以为拖动没反应。
+  Future<bool> _streamSeek(StreamingTtsSession session, int chapterMs) async {
+    if (session != _stream || _streamEpoch != _epoch) return false;
+    final wasLoading = _loading;
+    _loading = true;
+    notify();
+    try {
+      final location = await session.locateChapterMs(chapterMs);
+      if (session != _stream || _streamEpoch != _epoch) return false;
+      if (location.index != session.index) {
+        final audio = await session.ensure(location.index);
+        if (session != _stream || _streamEpoch != _epoch) return false;
+        session.moveTo(location.index);
+        _streamStarting = true;
+        await _engine.open(Media(audio.path), play: _playing);
+        if (session != _stream || _streamEpoch != _epoch) return false;
+        await _engine.setRate(_speed);
+      }
+      if (location.msInUnit > 0) {
+        await _engine.seek(Duration(milliseconds: location.msInUnit));
+      }
+      _streamUnitMs = location.msInUnit;
+      final startMs = session.startOf(location.index);
+      final known = session.totalKnownMs;
+      _duration = Duration(
+        milliseconds: known > startMs ? known : startMs,
+      );
+      session.prefetchNext();
+      return true;
+    } catch (e) {
+      if (session == _stream && _streamEpoch == _epoch) {
+        _error = _friendlyOf(e);
+      }
+      return false;
+    } finally {
+      _loading = wasLoading;
+      notify();
+    }
+  }
+
+  /// 作废当前流式会话（幂等）。切章/换音色/关闭都只走这一个入口。
+  void _cancelStream() {
+    _stream?.cancel();
+    _stream = null;
+    _streamEpoch = -1;
+    _streamUnitMs = 0;
+    _streamAdvancing = false;
+    _streamStarting = false;
+  }
+
+  /// 单元缓存（懒建）。测试注入临时目录，生产走 `audio_cache_units`。
+  Future<TtsUnitCache> _unitCache() async =>
+      _ttsUnitCache ??= await TtsUnitCache.openDefault();
+
+  /// 单元缓存是否已经清过孤儿目录（每个控制器实例只清一次）。
+  bool _prunedUnitCache = false;
+
+  /// 首次使用单元缓存时清一次「没写 index.json 的章目录」（上次中断的半成品）。
+  ///
+  /// 必须带 `keepKeys`：`openChapter` 会先建目录、最后才写 index，没有 index 的
+  /// 目录也可能正是**当前**这一章 —— 误删会让本会话写到一半的文件凭空消失。
+  void _pruneUnitCacheOnce(TtsUnitCache cache, TtsUnitKey keep) {
+    if (_prunedUnitCache) return;
+    _prunedUnitCache = true;
+    unawaited(
+      cache
+          .pruneOrphans(keepKeys: <String>{'${keep.bookDirName}/${keep.dirName}'})
+          .then<void>((_) {}, onError: (Object _, StackTrace _) {}),
     );
   }
 
@@ -1855,6 +2300,8 @@ class ReaderSpeechController extends ChangeNotifier {
       // 旧单源配置一次性搬进多源列表（已迁移过则无操作）。
       await TtsSourceStore(prefs).ensureMigrated();
       _ttsQuotaMb = prefs.getInt(ttsQuotaKey) ?? _ttsQuotaMb;
+      // 流式朗读缺键按关：老路径兜底，实测通过后才考虑改默认。
+      _streamingTts = prefs.getBool(ttsStreamingKey) ?? false;
       // 定时恢复：只在当前未武装时按 prefs 武装。sameSession 复进本页也会走
       // 到这里，进行中的定时不能被重置回满时长；fire 后组件与 prefs 都已落回
       // off，不会跨会话复活。

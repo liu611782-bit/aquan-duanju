@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/books/book_source_model.dart';
@@ -47,6 +49,13 @@ class _BookSourceBookPageState extends State<BookSourceBookPage> {
         _info = info;
         _loading = false;
       });
+      // 「最近在读」里第三方书的封面此前是空串（进阅读器时还没拿到封面地址）：
+      // 详情一拿到就回填，不动进度/序号。
+      final cover = _cover;
+      if (cover.isNotEmpty) {
+        final reading = AppScope.read(context).reading;
+        unawaited(reading.fillCover(_readerBookId, cover));
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -57,11 +66,16 @@ class _BookSourceBookPageState extends State<BookSourceBookPage> {
   }
 
   String get _readerBookId =>
-      'booksrc:${widget.source.url}:${widget.hit.bookUrl}';
+      bookSourceBookId(widget.source, widget.hit.bookUrl);
 
   String get _title => _info != null && _info!.name.isNotEmpty
       ? _info!.name
       : widget.hit.name;
+
+  /// 封面：搜索结果带来的优先，其次详情页的。
+  String get _cover => widget.hit.coverUrl.isNotEmpty
+      ? widget.hit.coverUrl
+      : (_info?.coverUrl ?? '');
 
   void _openChapter(List<BookTocItem> chapters, BookTocItem chapter) {
     final bookChapters = [
@@ -75,6 +89,9 @@ class _BookSourceBookPageState extends State<BookSourceBookPage> {
       builder: (_) => ReaderScreen(
         bookId: _readerBookId,
         bookTitle: _title,
+        // 封面必须带进阅读器：阅读进度记录读的就是它，「最近在读」的封面
+        // 与听书页的占位图都从这里来（漏传 = 历史记录里永远是空封面）。
+        coverUrl: _cover,
         chapters: bookChapters,
         initialIndex: index < 0 ? 0 : index,
         textLoader: (c) => widget.service.content(widget.source, c.id),
@@ -87,9 +104,7 @@ class _BookSourceBookPageState extends State<BookSourceBookPage> {
     final theme = Theme.of(context);
     final chapters = _info?.chapters ?? const <BookTocItem>[];
     final chapterCount = chapters.where((c) => !c.isVolume).length;
-    final cover = widget.hit.coverUrl.isEmpty
-        ? (_info?.coverUrl ?? '')
-        : widget.hit.coverUrl;
+    final cover = _cover;
 
     return Scaffold(
       appBar: AppBar(title: Text(widget.hit.name.isEmpty ? '书籍详情' : widget.hit.name)),

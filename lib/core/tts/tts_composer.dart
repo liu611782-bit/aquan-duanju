@@ -84,6 +84,12 @@ class TtsComposer {
     /// 缓存键需随开关切换（由调用方保证）。
     bool trimSilence = true,
 
+    /// 段尾保留的静音毫秒（默认 160，整章拼接路径的既有行为）。
+    ///
+    /// 流式播放每个单元都要换一次媒体，播放器在切点会丢弃音频缓冲区的尾部；
+    /// 调用方传更大的余量，切点就**结构性地**落在静音里，不会吃掉最后一个字。
+    int tailKeepMs = 160,
+
     /// 合成进度回调（done, total）：每完成一块回调一次。
     ///
     /// 存在的目的只有一个 —— 把「点下去后黑等十几秒」变成可预期的等待。
@@ -196,7 +202,13 @@ class TtsComposer {
         // 段首尾静音：词级时间点告诉了我们语音边界，按整帧裁掉多余空白。
         // 时间点平移放在 _absorb 里统一做（-headTrimMs）。
         if (trimSilence) {
-          final trim = _trimSilence(clean, segment.points, baseMs, bitrateKbps);
+          final trim = _trimSilence(
+            clean,
+            segment.points,
+            baseMs,
+            bitrateKbps,
+            tailKeepMs: tailKeepMs,
+          );
           if (trim.trimmed) {
             clean = trim.audio;
             headTrimMs = trim.headMs;
@@ -361,8 +373,9 @@ class TtsComposer {
     Uint8List frames,
     List<SpeechPoint> points,
     int baseMs,
-    int bitrateKbps,
-  ) {
+    int bitrateKbps, {
+    int tailKeepMs = 160,
+  }) {
     if (points.isEmpty) {
       return Mp3SilenceTrim(audio: frames, headMs: 0, tailMs: 0);
     }
@@ -382,6 +395,7 @@ class TtsComposer {
       firstSpeechMs: firstMs,
       lastSpeechEndMs: lastEndMs,
       bitrateKbps: bitrateKbps,
+      tailKeepMs: tailKeepMs,
     );
   }
 

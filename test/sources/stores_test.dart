@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:aquan_duanju/core/sources/source_adapter.dart';
 import 'package:aquan_duanju/core/sources/source_import.dart';
+import 'package:aquan_duanju/core/sources/source_probe.dart';
 import 'package:aquan_duanju/store/stores.dart';
 
 void main() {
@@ -87,6 +88,19 @@ void main() {
       expect(store2.recordOf('s1').avgLatencyMs, 640);
       expect(store2.recordOf('s2').isCoolingDown(), isTrue);
       expect(store2.scoreOf('s1'), greaterThan(0));
+    });
+
+    test('测速结论按会话记忆：probeOf 可读、未测为 null、不落盘', () async {
+      final store = SourceHealthStore(testDirectory: tmp);
+      expect(store.probeOf('s1'), isNull);
+      store.rememberProbe(
+          const ProbeOutcome(sourceId: 's1', state: ProbeState.ok, ttfbMs: 120));
+      expect(store.probeOf('s1')?.latencyMs, 120);
+
+      // 会话内记忆不写盘：新实例读不到（重启后回落到健康分排序）。
+      final store2 = SourceHealthStore(testDirectory: tmp);
+      await store2.ensureLoaded();
+      expect(store2.probeOf('s1'), isNull);
     });
   });
 

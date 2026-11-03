@@ -120,6 +120,28 @@ void main() {
     await expectLater(cache.finish(chapter), throwsA(isA<StateError>()));
   });
 
+  test('格式版本不符 → 未命中，且 pruneOrphans 会删掉旧格式目录', () async {
+    final chapter = await cache.openChapter(
+      key,
+      unitCount: 1,
+      textSignature: 's',
+      extension: 'mp3',
+    );
+    await cache.writeUnit(chapter, 0, Uint8List.fromList([1]), durationMs: 100);
+    await cache.finish(chapter);
+    // 手改 index：模拟上一版产物（例如尾部裁剪余量更小）。
+    final index = chapter.indexFile;
+    final text = await index.readAsString();
+    await index.writeAsString(
+      text.replaceFirst('"format":$kTtsUnitCacheFormat', '"format":1'),
+    );
+
+    expect(await cache.lookup(key, textSignature: 's', extension: 'mp3'), isNull);
+    final removed = await cache.pruneOrphans();
+    expect(removed, 1);
+    expect(chapter.directory.existsSync(), isFalse);
+  });
+
   test('键里的非法路径字符被替换（第三方书源 URL 也能当目录名）', () {
     expect(key.dirName.contains('/'), isFalse);
     expect(key.dirName.contains(':'), isFalse);

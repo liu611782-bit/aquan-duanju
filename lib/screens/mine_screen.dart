@@ -1300,6 +1300,24 @@ class _ListenSettingsGroupState extends State<ListenSettingsGroup> {
             },
           ),
         ),
+        // 流式朗读：按单元合成，第一段好就开播（首播延迟从整章几十秒降到几秒）。
+        // 关掉即回到整章合成；切换对**下一次开章**生效，不打断正在播的这一章。
+        ListTile(
+          leading: const Icon(Icons.bolt_outlined),
+          title: const Text('流式朗读（首段即播）'),
+          subtitle: Text(
+            tts.streamingTtsEnabled
+                ? '按段合成、第一段就开播；切段/跳段照常可用（下次开章生效）'
+                : '关闭：整章合成完才开播（首播等待较长，作为回滚开关保留）',
+          ),
+          trailing: Switch(
+            value: tts.streamingTtsEnabled,
+            onChanged: (v) async {
+              await tts.setStreamingTtsEnabled(v);
+              if (mounted) setState(() {});
+            },
+          ),
+        ),
         // 章间间隔：自动连播切章前的呼吸（播放器侧等待，不碰时间轴）。
         SettingsPanel._selectTile<int>(
           context,

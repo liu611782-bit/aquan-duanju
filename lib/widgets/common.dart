@@ -543,30 +543,81 @@ String episodeLabel(int n) => '第$n集';
 /// 随机工具：洗牌（对 RangeError 免疫）。
 void shuffleList<T>(List<T> list, {math.Random? rng}) => list.shuffle(rng);
 
-/// 桌面端横向列表的滚轮支持：垂直滚轮转横向滚动（鼠标用户在源条/分类条
-/// 上「滚轮滚不动、也没滚动条」的主诉）。
-class HorizontalWheelScroll extends StatelessWidget {
-  const HorizontalWheelScroll({super.key, required this.child});
+/// 桌面端横向条：常显滚动条 + 鼠标按住拖动 + 垂直滚轮转横向滚动。
+///
+/// 旧实现用 `PrimaryScrollController` 注入 controller，但横向 `ListView` 在桌面
+/// 平台不会继承它（`ScrollView` 只对纵向 / iOS-macOS 继承），于是
+/// `controller.hasClients` 恒为 false：滚轮空转、也没有滚动条，表现为「不能左右
+/// 移动」。这里改为组件自持 controller 并显式传给内部 `ListView`。
+///
+/// 手势约定（xiugou-tv `HorizontalScrollArea` 同款）：只把 `dy` 映射到横向，
+/// `dx` 留给 Scrollable，避免双倍滚动；鼠标补进 dragDevices，桌面才能按住拖。
+class HorizontalScrollStrip extends StatefulWidget {
+  const HorizontalScrollStrip({
+    super.key,
+    required this.children,
+    this.height = 52,
+    this.padding = const EdgeInsets.symmetric(horizontal: 12),
+  });
 
-  final Widget child;
+  /// 横向排列的条目（chip 等）。条目自带右侧间距。
+  final List<Widget> children;
+  final double height;
+  final EdgeInsetsGeometry padding;
+
+  @override
+  State<HorizontalScrollStrip> createState() => _HorizontalScrollStripState();
+}
+
+class _HorizontalScrollStripState extends State<HorizontalScrollStrip> {
+  final ScrollController _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _onPointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    final delta = event.scrollDelta.dy;
+    if (delta == 0 || !_controller.hasClients) return;
+    final target = (_controller.offset + delta)
+        .clamp(0.0, _controller.position.maxScrollExtent);
+    if (target != _controller.offset) _controller.jumpTo(target);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final controller = ScrollController();
-    return Listener(
-      onPointerSignal: (event) {
-        if (event is PointerScrollEvent &&
-            controller.hasClients &&
-            event.scrollDelta.dy != 0) {
-          final target =
-              (controller.offset + event.scrollDelta.dy * 2)
-                  .clamp(0.0, controller.position.maxScrollExtent);
-          controller.jumpTo(target);
-        }
-      },
-      child: PrimaryScrollController(
-        controller: controller,
-        child: child,
+    return SizedBox(
+      height: widget.height,
+      child: ScrollConfiguration(
+        behavior: ScrollConfiguration.of(context).copyWith(
+          // 桌面鼠标默认不在 dragDevices 里，补上才能按住左右拖。
+          dragDevices: const {
+            PointerDeviceKind.touch,
+            PointerDeviceKind.mouse,
+            PointerDeviceKind.trackpad,
+            PointerDeviceKind.stylus,
+            PointerDeviceKind.invertedStylus,
+          },
+        ),
+        child: Listener(
+          onPointerSignal: _onPointerSignal,
+          child: Scrollbar(
+            controller: _controller,
+            thumbVisibility: true,
+            thickness: 3,
+            radius: const Radius.circular(2),
+            scrollbarOrientation: ScrollbarOrientation.bottom,
+            child: ListView(
+              controller: _controller,
+              scrollDirection: Axis.horizontal,
+              padding: widget.padding,
+              children: widget.children,
+            ),
+          ),
+        ),
       ),
     );
   }
