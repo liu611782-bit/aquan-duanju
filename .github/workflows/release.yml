@@ -119,22 +119,41 @@ jobs:
       # 补丁版 media_kit CMake 用 file(DOWNLOAD) 拉 mpv/ANGLE，没有重试，
       # runner 网络抖一下就整次构建失败；这里先带重试拉好放进构建目录，
       # CMake 看到同名且哈希一致的文件就不再下载。
-      - name: 预下载 mpv/ANGLE 归档
+      #
+      # mpv 还要多一层：上游 shinchiro 是**每日构建且滚动删档**，
+      # 固定 tag 的 7z 过一阵就 404（20260921 已失效，见 v1.4.0 首次发版失败）。
+      # 所以这里每次解析 latest，校验体积/哈希后把三件套传给 CMake。
+      - name: 解析并预下载 mpv 归档（上游会删档，取 latest）
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build\windows\x64 | Out-Null
-          $files = @(
-            @{ Name = 'mpv-dev-x86_64-20260921-git-e76a35ec95.7z'
-               Url = 'https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260921/mpv-dev-x86_64-20260921-git-e76a35ec95.7z' }
-            @{ Name = 'ANGLE-v1.0.1.7z'
-               Url = 'https://github.com/alexmercerind/flutter-windows-ANGLE-OpenGL-ES/releases/download/v1.0.1/ANGLE.7z' }
-          )
-          foreach ($f in $files) {
-            $out = "build\windows\x64\$($f.Name)"
-            curl.exe -sSL --retry 5 --retry-all-errors --retry-delay 3 -C - -o $out $f.Url
-            if ($LASTEXITCODE -ne 0) { throw "下载 $($f.Name) 失败" }
-            Get-Item $out | Select-Object Name, Length
-          }
+          $headers = @{ Authorization = "Bearer ${{ github.token }}"; Accept = "application/vnd.github+json" }
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest" -Headers $headers
+          $asset = $release.assets |
+            Where-Object { $_.name -match '^mpv-dev-x86_64-\d{8}-git-[0-9a-f]+\.7z$' } |
+            Select-Object -First 1
+          if (-not $asset) { throw "未在 $($release.tag_name) 找到 mpv-dev-x86_64 归档" }
+          $out = "build\windows\x64\$($asset.name)"
+          curl.exe -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o $out $asset.browser_download_url
+          if ($LASTEXITCODE -ne 0) { throw "下载 $($asset.name) 失败" }
+          $size = (Get-Item $out).Length
+          if ($size -lt 20MB) { throw "mpv 归档体积异常：$size 字节（多半是 404 页面）" }
+          $sha = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+          "DUANJU_MPV_FILE=$($asset.name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DUANJU_MPV_URL=$($asset.browser_download_url)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DUANJU_MPV_SHA256=$sha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Get-Item $out | Select-Object Name, Length
+
+      - name: 预下载 ANGLE 归档
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build\windows\x64 | Out-Null
+          $out = "build\windows\x64\ANGLE-v1.0.1.7z"
+          curl.exe -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o $out "https://github.com/alexmercerind/flutter-windows-ANGLE-OpenGL-ES/releases/download/v1.0.1/ANGLE.7z"
+          if ($LASTEXITCODE -ne 0) { throw "下载 ANGLE 失败" }
+          $size = (Get-Item $out).Length
+          if ($size -lt 1MB) { throw "ANGLE 归档体积异常：$size 字节（多半是 404 页面）" }
+          Get-Item $out | Select-Object Name, Length
 
       # smtc_windows 经 cargokit 构建 Rust 原生层；runner 一般自带 rustc，
       # 没有时用 choco 补装（MSVC 工具链随 VS 已就位）。

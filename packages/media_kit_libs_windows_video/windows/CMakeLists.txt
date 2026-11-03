@@ -65,10 +65,30 @@ function(duanju_native_archive filename url digest destination)
 endfunction()
 
 set(LIBMPV_SRC "${CMAKE_BINARY_DIR}/libmpv")
+
+# mpv 归档默认值。
+# 上游 shinchiro 的每日构建会**滚动删档**（旧 tag 的 7z 会变 404，20260921 已失效），
+# 所以除固定默认值外，支持用环境变量覆盖三件套：
+#   DUANJU_MPV_FILE / DUANJU_MPV_URL / DUANJU_MPV_SHA256
+# CI 每次先解析 latest 再传入；本地不设时走下面的固定版本。
+set(DUANJU_MPV_FILE "mpv-dev-x86_64-20261103-git-a687796d9d.7z")
+set(DUANJU_MPV_URL "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261103/mpv-dev-x86_64-20261103-git-a687796d9d.7z")
+set(DUANJU_MPV_SHA256 "41cbfda596aaf1dc30053679bcd22828afaeec411340de6bf4c0e786fed1480b")
+
+if(DEFINED ENV{DUANJU_MPV_FILE} AND NOT "$ENV{DUANJU_MPV_FILE}" STREQUAL "")
+  if("$ENV{DUANJU_MPV_URL}" STREQUAL "" OR "$ENV{DUANJU_MPV_SHA256}" STREQUAL "")
+    message(FATAL_ERROR "DUANJU_MPV_FILE 覆盖时必须同时给出 DUANJU_MPV_URL 与 DUANJU_MPV_SHA256")
+  endif()
+  set(DUANJU_MPV_FILE "$ENV{DUANJU_MPV_FILE}")
+  set(DUANJU_MPV_URL "$ENV{DUANJU_MPV_URL}")
+  set(DUANJU_MPV_SHA256 "$ENV{DUANJU_MPV_SHA256}")
+  message(STATUS "mpv 归档由环境变量覆盖：${DUANJU_MPV_FILE}")
+endif()
+
 duanju_native_archive(
-  "mpv-dev-x86_64-20260921-git-e76a35ec95.7z"
-  "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260921/mpv-dev-x86_64-20260921-git-e76a35ec95.7z"
-  "361392d64a231830ac79d1c0f91ddb68c6a709accd282b2c87b13889d382fdec"
+  "${DUANJU_MPV_FILE}"
+  "${DUANJU_MPV_URL}"
+  "${DUANJU_MPV_SHA256}"
   "${LIBMPV_SRC}"
   "libmpv-2.dll" "libmpv.dll.a" "include/mpv/client.h" "include/mpv/render.h"
 )
