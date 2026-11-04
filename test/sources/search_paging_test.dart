@@ -45,7 +45,7 @@ class _PagedAdapter implements SourceAdapter {
       const SourcePage(items: [], page: 1);
 
   @override
-  Stream<SourceSearchEvent> search(String query, {int page = 1}) async* {
+  Stream<SourceSearchEvent> search(String query, {int page = 1, CancelToken? cancel}) async* {
     // 只拦续页（page>1）：晚到测试里重开搜索的第 1 页必须能走通。
     if (gate != null && page > 1) await gate!.future;
     yield SourceHits(

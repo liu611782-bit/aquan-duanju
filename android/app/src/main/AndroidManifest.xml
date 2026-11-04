@@ -17,6 +17,8 @@
     <!-- DLNA 投屏设备发现：SSDP 依赖 UDP 组播 239.255.255.250:1900，
          不持 MulticastLock 时多数机型的 Wi-Fi 驱动会过滤组播包。 -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+    <!-- 应用内更新：下载完 APK 后调起系统安装器（用户仍需确认安装）。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
     <application
         android:label="阿圈短剧"
@@ -66,6 +68,17 @@
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>
         </receiver>
+        <!-- 应用内更新：cache 目录里的 APK 通过 FileProvider 交给系统安装器
+             （API 24+ 不允许 file:// 跨应用暴露）。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/aquan_file_paths" />
+        </provider>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

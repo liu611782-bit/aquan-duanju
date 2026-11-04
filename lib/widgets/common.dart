@@ -11,6 +11,7 @@ import '../core/download_service.dart';
 import '../core/books/book_source_store.dart';
 import '../core/image_cache_store.dart';
 import '../core/reader/reader_speech_controller.dart';
+import '../core/sources/auto_source_manager.dart';
 import '../models/models.dart';
 import '../store/stores.dart';
 
@@ -36,6 +37,8 @@ class AppScope extends InheritedNotifier<ChangeNotifier> {
     required this.sourceHealth,
     required this.marketSites,
     required this.seeds,
+    required this.discovery,
+    required this.autoSource,
     required this.bookmarks,
     required this.markings,
     required this.replaceRules,
@@ -69,6 +72,12 @@ class AppScope extends InheritedNotifier<ChangeNotifier> {
 
   /// 源扫描种子清单（内置线路 / 聚合页 / 清单页 + 用户自定义）。
   final SeedStore seeds;
+
+  /// 自动找源的验证记录与合并快照元信息。
+  final SourceDiscoveryStore discovery;
+
+  /// 自动找源调度器（发现 / 验证 / 同步配置 / 重建合并源）。
+  final AutoSourceManager autoSource;
 
   /// 阅读书签。
   final BookmarkStore bookmarks;

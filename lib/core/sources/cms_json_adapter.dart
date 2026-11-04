@@ -18,7 +18,11 @@ import 'source_import.dart';
 ///   回退 `ac=videolist&ids=`；分类 `ac=list` 无 class 回退扫 videolist 回收；
 /// - 响应优先 JSON，`<` 开头按 XML 解析；UTF-8 失败按 GBK。
 class CmsJsonAdapter implements SourceAdapter {
-  CmsJsonAdapter(this.config) : id = config.id, name = config.name;
+  CmsJsonAdapter(this.config, {http.Client? client})
+      : id = config.id,
+        name = config.name,
+        _client = client ?? http.Client(),
+        _ownsClient = client == null;
 
   final SourceConfig config;
 
@@ -30,7 +34,11 @@ class CmsJsonAdapter implements SourceAdapter {
   @override
   SourceCaps get caps => const SourceCaps();
 
-  final http.Client _client = http.Client();
+  http.Client _client;
+
+  /// 注入的 client 由调用方管理；自建的才能在取消时 `close(force: true)`。
+  final bool _ownsClient;
+  bool _clientClosed = false;
 
   /// 端点自举缓存。
   String? _resolved;
@@ -100,7 +108,26 @@ class CmsJsonAdapter implements SourceAdapter {
 
   // ---------- HTTP ----------
 
-  Future<http.Response> _get(String url, {Duration? timeout}) async {
+  Future<http.Response> _get(
+    String url, {
+    Duration? timeout,
+    CancelToken? cancel,
+  }) async {
+    if (cancel?.isCancelled ?? false) {
+      throw SourceException(SourceExceptionCode.searchTimeout, '搜索已取消');
+    }
+    // 取消要真断在途 HTTP：只对自建 client 下手，注入的 client 由调用方管理。
+    cancel?.whenCancelled(() {
+      if (!_ownsClient) return;
+      try {
+        _client.close();
+        _clientClosed = true;
+      } catch (_) {}
+    });
+    if (_clientClosed) {
+      _client = http.Client();
+      _clientClosed = false;
+    }
     final headers = <String, String>{
       if (!config.headers.containsKey('User-Agent'))
         'User-Agent': SourceImporter.defaultUa,
@@ -147,8 +174,8 @@ class CmsJsonAdapter implements SourceAdapter {
     }
   }
 
-  Future<dynamic> _call(String url) async {
-    final res = await _get(url);
+  Future<dynamic> _call(String url, {CancelToken? cancel}) async {
+    final res = await _get(url, cancel: cancel);
     final payload = _parsePayload(_decodeBody(res));
     if (payload == null) {
       throw SourceException(SourceExceptionCode.searchInvalid, url);
@@ -251,21 +278,41 @@ class CmsJsonAdapter implements SourceAdapter {
   }
 
   @override
-  Stream<SourceSearchEvent> search(String query, {int page = 1}) async* {
+  Stream<SourceSearchEvent> search(
+    String query, {
+    int page = 1,
+    CancelToken? cancel,
+  }) async* {
     try {
       final endpoint = await _endpoint();
+      if (cancel?.isCancelled ?? false) return;
+      final encoded = Uri.encodeQueryComponent(query);
+      // 三种口径真实并存：标准 videolist、老站 search、以及「只吃 wd/pg」的源。
+      final attempts = <String>[
+        '$endpoint?ac=videolist&wd=$encoded&pg=$page',
+        '$endpoint?ac=search&wd=$encoded&pg=$page',
+        '$endpoint?wd=$encoded&pg=$page',
+      ];
       SourcePage<UnifiedSeries>? result;
-      try {
-        final payload = await _call(
-            '$endpoint?ac=videolist&wd=${Uri.encodeQueryComponent(query)}&pg=$page');
+      SourceException? lastError;
+      for (final url in attempts) {
+        if (cancel?.isCancelled ?? false) return;
+        try {
+          final payload = await _call(url, cancel: cancel);
+          final items = _itemsOf(payload);
+          // 空结果继续换下一种口径：有的站对错误参数返回 200 + 空列表。
+          if (items.isEmpty && page <= 1) continue;
+          result = SourcePage(
+              items: items, page: page, hasMore: _pageInfoOf(payload, page));
+          break;
+        } on SourceException catch (e) {
+          lastError = e;
+        }
+      }
+      if (result == null) {
+        if (lastError != null) throw lastError;
         result = SourcePage(
-            items: _itemsOf(payload), page: page, hasMore: _pageInfoOf(payload, page));
-      } on SourceException {
-        // ac=videolist 搜索不可用时回退 ac=search（部分老站）。
-        final payload = await _call(
-            '$endpoint?ac=search&wd=${Uri.encodeQueryComponent(query)}&pg=$page');
-        result = SourcePage(
-            items: _itemsOf(payload), page: page, hasMore: _pageInfoOf(payload, page));
+            items: const <UnifiedSeries>[], page: page, hasMore: false);
       }
       if (result.items.isEmpty && page > 1) {
         yield const SourceSearchDone();
@@ -284,12 +331,17 @@ class CmsJsonAdapter implements SourceAdapter {
   @override
   Future<UnifiedSeries> detail(String sourceItemId) async {
     final endpoint = await _endpoint();
+    final id = Uri.encodeQueryComponent(sourceItemId);
     dynamic payload;
     try {
-      payload = await _call('$endpoint?ac=detail&ids=${Uri.encodeQueryComponent(sourceItemId)}');
+      payload = await _call('$endpoint?ac=detail&ids=$id');
     } on SourceException {
-      payload = await _call(
-          '$endpoint?ac=videolist&ids=${Uri.encodeQueryComponent(sourceItemId)}');
+      // 少数老站只认单数参数 `id`。
+      try {
+        payload = await _call('$endpoint?ac=detail&id=$id');
+      } on SourceException {
+        payload = await _call('$endpoint?ac=videolist&ids=$id');
+      }
     }
     final items = _itemsOf(payload);
     if (items.isEmpty) {

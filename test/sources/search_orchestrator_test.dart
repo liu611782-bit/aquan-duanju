@@ -38,7 +38,7 @@ class _FakeAdapter implements SourceAdapter {
       const SourcePage(items: [], page: 1);
 
   @override
-  Stream<SourceSearchEvent> search(String query, {int page = 1}) async* {
+  Stream<SourceSearchEvent> search(String query, {int page = 1, CancelToken? cancel}) async* {
     if (fail) {
       yield const SourceSearchFailed(
           SourceExceptionCode.network, '模拟失败');

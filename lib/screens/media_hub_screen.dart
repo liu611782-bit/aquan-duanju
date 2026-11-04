@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 
+import '../core/sources/backend_dedupe.dart';
 import '../core/sources/source_adapter_factory.dart';
 import '../core/sources/search_orchestrator.dart';
 import '../core/sources/source_adapter.dart';
@@ -29,6 +31,17 @@ class MediaHubScreen extends StatefulWidget {
 class _MediaHubScreenState extends State<MediaHubScreen>
     with SingleTickerProviderStateMixin {
   late final TabController _tabs;
+
+  /// 每次冷启动只自动随机一次（用户在本次会话里手动选过的源不再覆盖）。
+  static bool _homeRandomized = false;
+
+  static final Random _random = Random();
+
+  /// 空内容自动换源次数上限（对齐 TVBox `RANDOM_HOME_MAX_RETRY`）。
+  static const int _maxReroll = 5;
+
+  int _rerollCount = 0;
+  final Set<String> _rerollTried = <String>{};
 
   String _currentSourceId = '';
 
@@ -61,15 +74,101 @@ class _MediaHubScreenState extends State<MediaHubScreen>
         probeOf: (s) => scope.sourceHealth.probeOf(s.id),
       );
 
-  /// 选默认源：只补空缺，不覆盖用户已选的源（从源管理/源市场返回时保持原选择）。
+  /// 直连采集站（不看爬虫源）：随机落点必须是首切就出内容的类型。
+  List<SourceConfig> _directCandidates(List<SourceConfig> sources) {
+    final direct = sources
+        .where((s) =>
+            (s.kind == SourceKind.cmsJson || s.kind == SourceKind.cmsXml) &&
+            !s.pinned)
+        .toList();
+    if (direct.isNotEmpty) return direct;
+    return sources
+        .where((s) =>
+            s.kind == SourceKind.cmsJson || s.kind == SourceKind.cmsXml)
+        .toList();
+  }
+
+  SourceConfig? _randomOther(List<SourceConfig> pool, String excludeId) {
+    final candidates =
+        pool.where((s) => s.id != excludeId).toList(growable: false);
+    if (candidates.isEmpty) return null;
+    return candidates[_random.nextInt(candidates.length)];
+  }
+
+  /// 选默认源：冷启动首次进入随机一个直连源；之后保持用户/当前选择。
   void _pickDefaultSource() {
     final sources = _rankedSources(AppScope.read(context));
     if (sources.isEmpty) {
       _currentSourceId = '';
       return;
     }
+    if (!_homeRandomized) {
+      _homeRandomized = true;
+      // 设置里关掉随机后按健康分顺序取第一个（保持原有「好源在前」语义）。
+      if (!AppScope.read(context).settings.randomHomeSource) {
+        _currentSourceId = sources.first.id;
+        return;
+      }
+      final pool = _directCandidates(sources);
+      final picked = _randomOther(pool, '') ?? pool.firstOrNull;
+      _currentSourceId = picked?.id ?? sources.first.id;
+      return;
+    }
     if (sources.any((s) => s.id == _currentSourceId)) return;
     _currentSourceId = sources.first.id;
+  }
+
+  /// 功能栏「刷新」：立即随机换一个直连源。
+  void _shuffleSource() {
+    final sources = _rankedSources(AppScope.read(context));
+    if (sources.isEmpty) return;
+    final pool = _directCandidates(sources);
+    final previous = _currentSourceId;
+    final next = _randomOther(pool.isEmpty ? sources : pool, previous);
+    if (next == null) {
+      _snack('没有可随机切换的直连源');
+      return;
+    }
+    setState(() {
+      _currentSourceId = next.id;
+      _rerollCount = 0;
+      // 记住换走的那一个：紧接着的空内容自动换源不该又转回它。
+      _rerollTried
+        ..clear()
+        ..add(previous);
+    });
+    _snack('已随机切换：${next.name}');
+  }
+
+  /// 选中源没有内容：自动换下一个（最多 [_maxReroll] 次）。
+  void _handleEmptySource() {
+    if (!AppScope.read(context).settings.randomHomeSource) return;
+    if (_rerollCount >= _maxReroll) {
+      _snack('当前源没有内容，可在上方手动切换');
+      return;
+    }
+    final sources = _rankedSources(AppScope.read(context));
+    final pool = _directCandidates(sources)
+        .where((s) =>
+            s.id != _currentSourceId && !_rerollTried.contains(s.id))
+        .toList();
+    if (pool.isEmpty) {
+      _snack('没有其它可用的直连源');
+      return;
+    }
+    final next = pool[_random.nextInt(pool.length)];
+    setState(() {
+      _rerollTried
+        ..add(_currentSourceId)
+        ..add(next.id);
+      _rerollCount++;
+      _currentSourceId = next.id;
+    });
+  }
+
+  void _snack(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
   void _ensureCurrentSource() {
@@ -131,6 +230,7 @@ class _MediaHubScreenState extends State<MediaHubScreen>
             currentId: current?.id ?? '',
             latencyOf: (s) => scope.sourceHealth.latencyOf(s.id),
             onSelect: (id) => setState(() => _currentSourceId = id),
+            onShuffle: _shuffleSource,
           ),
           Expanded(
             child: sources.isEmpty
@@ -146,10 +246,15 @@ class _MediaHubScreenState extends State<MediaHubScreen>
                       if (current == null)
                         const Center(child: Text('请选择一个源'))
                       else
-                        _BrowseTab(key: ValueKey(current.id), source: current),
+                        _BrowseTab(
+                          key: ValueKey(current.id),
+                          source: current,
+                          onEmpty: _handleEmptySource,
+                        ),
                       _SearchTab(
                           key: const ValueKey('search'),
-                          seedQuery: _searchSeed),
+                          seedQuery: _searchSeed,
+                          homeSourceId: current?.id ?? ''),
                     ],
                   ),
           ),
@@ -166,12 +271,14 @@ class _SourceChipBar extends StatelessWidget {
     required this.currentId,
     required this.latencyOf,
     required this.onSelect,
+    required this.onShuffle,
   });
 
   final List<SourceConfig> sources;
   final String currentId;
   final int Function(SourceConfig config) latencyOf;
   final ValueChanged<String> onSelect;
+  final VoidCallback onShuffle;
 
   @override
   Widget build(BuildContext context) {
@@ -202,6 +309,15 @@ class _SourceChipBar extends StatelessWidget {
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(builder: (_) => const BiliHomeScreen()),
             ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: ActionChip(
+            avatar: Icon(Icons.refresh, size: 18, color: theme.colorScheme.primary),
+            label: const Text('刷新'),
+            tooltip: '随机换一个直连源',
+            onPressed: onShuffle,
           ),
         ),
         for (final s in sources)
@@ -277,9 +393,12 @@ class _EmptySourcesView extends StatelessWidget {
 
 /// 分类浏览：当前源的分类条 + 条目网格（分页加载）。
 class _BrowseTab extends StatefulWidget {
-  const _BrowseTab({super.key, required this.source});
+  const _BrowseTab({super.key, required this.source, this.onEmpty});
 
   final SourceConfig source;
+
+  /// 首次加载后分类与列表都空（或直接报错）时回调：用于自动换源。
+  final VoidCallback? onEmpty;
 
   @override
   State<_BrowseTab> createState() => _BrowseTabState();
@@ -342,12 +461,16 @@ class _BrowseTabState extends State<_BrowseTab>
             : (cats.any((c) => c.id == _categoryId) ? _categoryId : cats.first.id);
       });
       await _loadPage(reset: true);
+      if (!mounted || seq != _seq) return;
+      // 分类与列表都空：交给外层自动换下一个源（换源会重建本 widget）。
+      if (_categories.isEmpty && _items.isEmpty) widget.onEmpty?.call();
     } catch (e) {
       if (!mounted || seq != _seq) return;
       setState(() {
         _loading = false;
         _error = e;
       });
+      widget.onEmpty?.call();
     }
   }
 
@@ -439,9 +562,12 @@ class _BrowseTabState extends State<_BrowseTab>
 
 /// 聚合搜索：跨启用源流式搜索，同名同年份合并分组。
 class _SearchTab extends StatefulWidget {
-  const _SearchTab({super.key, this.seedQuery});
+  const _SearchTab({super.key, this.seedQuery, this.homeSourceId = ''});
 
   final String? seedQuery;
+
+  /// 当前主页源：同一后端有多个源时优先用它（TVBox 把 home 提到队首的语义）。
+  final String homeSourceId;
 
   @override
   State<_SearchTab> createState() => _SearchTabState();
@@ -494,10 +620,17 @@ class _SearchTabState extends State<_SearchTab>
 
   void _search() {
     final scope = AppScope.read(context);
-    final adapters = [
-      for (final s in scope.sources.enabled) ?buildSourceAdapter(s),
-    ];
     final settings = scope.settings;
+    // 按后端去重：同一采集站被多份配置收录时只请求一次（设置可关）。
+    final ordered = settings.dedupeBackendSearch
+        ? dedupeByBackend(
+            scope.sources.enabled,
+            priorityId: widget.homeSourceId,
+          )
+        : scope.sources.enabled;
+    final adapters = [
+      for (final s in ordered) ?buildSourceAdapter(s),
+    ];
     final query = _controller.text.trim();
     if (query.isEmpty || adapters.isEmpty) return;
 
@@ -557,7 +690,15 @@ class _SearchTabState extends State<_SearchTab>
     final scope = AppScope.read(context);
     final adapters = _lastAdapters.isNotEmpty
         ? _lastAdapters
-        : [for (final s in scope.sources.enabled) ?buildSourceAdapter(s)];
+        : [
+            for (final s in (scope.settings.dedupeBackendSearch
+                ? dedupeByBackend(
+                    scope.sources.enabled,
+                    priorityId: widget.homeSourceId,
+                  )
+                : scope.sources.enabled))
+              ?buildSourceAdapter(s),
+          ];
     if (adapters.isEmpty) return;
     final seq = ++_seq;
     _moreSub?.cancel();

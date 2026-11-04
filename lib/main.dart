@@ -26,6 +26,9 @@ import 'models/models.dart';
 import 'screens/detail_screen.dart';
 import 'screens/home_screen.dart';
 import 'core/books/book_source_store.dart';
+import 'core/ops_switches.dart';
+import 'core/sources/auto_source_manager.dart';
+import 'update/update_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'store/stores.dart';
 import 'theme/app_theme.dart';
@@ -40,6 +43,8 @@ bool get _isDesktop =>
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
+  // 图片解码缓存上限 48MB（xiugou-tv 同策略）：默认 100MB 在低配机上长期跑会吃满内存。
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 48 << 20;
   _installErrorHandlers();
   try {
     await _start(args);
@@ -63,6 +68,8 @@ Future<void> _start(List<String> args) async {
 
   final dir = await getApplicationSupportDirectory();
   final sep = Platform.pathSeparator;
+  // 运维急停（app_ops.yaml）：只放「出事要立刻停」的开关，功能开关在应用内设置。
+  await OpsSwitches.load(supportDirectory: dir);
 
   // 已有窗口在跑：把命令转交过去并带回回包，不再开第二个窗口。
   // --search 例外：它始终就地查询（转交过去反而拿不到列表输出）。
@@ -253,6 +260,8 @@ class _AquaAppState extends State<AquaApp> {
   SourceHealthStore? _sourceHealth;
   MarketSitesStore? _marketSites;
   SeedStore? _seeds;
+  SourceDiscoveryStore? _discovery;
+  AutoSourceManager? _autoSource;
   BookmarkStore? _bookmarks;
   MarkingStore? _markings;
   ReplaceRuleStore? _replaceRules;
@@ -279,6 +288,8 @@ class _AquaAppState extends State<AquaApp> {
       _sourceHealth != null &&
       _marketSites != null &&
       _seeds != null &&
+      _discovery != null &&
+      _autoSource != null &&
       _bookmarks != null &&
       _markings != null &&
       _replaceRules != null &&
@@ -297,6 +308,7 @@ class _AquaAppState extends State<AquaApp> {
   @override
   void dispose() {
     _commandSub?.cancel();
+    _autoSource?.dispose();
     _speech?.dispose();
     widget.instance?.dispose();
     super.dispose();
@@ -307,6 +319,8 @@ class _AquaAppState extends State<AquaApp> {
       _error = null;
     });
     try {
+      // 更新源地址来自设置：先绑定，检查更新时才能读到用户配置。
+      UpdateService.instance.attachSettings(widget.settings);
       // 设备档案放应用支持目录（Android 私有目录 / 桌面用户配置目录）。
       final dir = await getApplicationSupportDirectory();
       final client = await AquaClient.create(
@@ -328,6 +342,7 @@ class _AquaAppState extends State<AquaApp> {
       final sourceHealth = SourceHealthStore();
       final marketSites = MarketSitesStore();
       final seeds = SeedStore();
+      final discovery = SourceDiscoveryStore();
       final bookmarks = BookmarkStore();
       final markings = MarkingStore();
       final replaceRules = ReplaceRuleStore();
@@ -348,6 +363,7 @@ class _AquaAppState extends State<AquaApp> {
       await sourceHealth.ensureLoaded();
       await marketSites.ensureLoaded();
       await seeds.ensureLoaded();
+      await discovery.ensureLoaded();
       await bookmarks.ensureLoaded();
       await markings.ensureLoaded();
       await replaceRules.ensureLoaded();
@@ -369,6 +385,14 @@ class _AquaAppState extends State<AquaApp> {
         // 朗读文本与阅读页同源：替换规则与简繁模式都从这两个 store 现取（只读注入）。
         rules: replaceRules,
         settings: readerSettings,
+      );
+      // 自动找源：启动 60s 后按缓存与开关决定是否联网（不阻塞首屏）。
+      final autoSource = AutoSourceManager(
+        seeds: seeds,
+        sources: sources,
+        discovery: discovery,
+        marketSites: marketSites,
+        settings: widget.settings,
       );
       // 系统媒体会话（通知栏/锁屏/耳机键）：只在 Android 上真正初始化，
       // 其他平台 ensure() 返回 null，此处零开销、零异常。
@@ -405,6 +429,8 @@ class _AquaAppState extends State<AquaApp> {
         _sourceHealth = sourceHealth;
         _marketSites = marketSites;
         _seeds = seeds;
+        _discovery = discovery;
+        _autoSource = autoSource;
         _bookmarks = bookmarks;
         _markings = markings;
         _replaceRules = replaceRules;
@@ -414,6 +440,7 @@ class _AquaAppState extends State<AquaApp> {
         _readerSettings = readerSettings;
         _speech = speech;
       });
+      autoSource.start();
       final pending = CommandBus.instance.takePending();
       if (pending != null) {
         // 此时只是 setState 完，根导航器要等下一帧才挂上；
@@ -534,6 +561,8 @@ class _AquaAppState extends State<AquaApp> {
         sourceHealth: _sourceHealth!,
         marketSites: _marketSites!,
         seeds: _seeds!,
+        discovery: _discovery!,
+        autoSource: _autoSource!,
         bookmarks: _bookmarks!,
         markings: _markings!,
         replaceRules: _replaceRules!,

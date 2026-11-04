@@ -23,3 +23,19 @@ String normalizeTitle(String raw) {
       '');
   return s.toLowerCase();
 }
+
+/// 分集名归一化：换源后按集名定位同一集。
+///
+/// 规则（xiugou-tv `normalizeEpisodeName`）：全角转半角 → 去空白 → 去前缀「第」
+/// → 去后缀「集/话/期/回」→ 纯数字去前导 0 → 小写。
+/// 只做「唯一匹配」判定：多个分集归一到同一个名字时调用方应视为歧义并跳过。
+String normalizeEpisodeName(String raw) {
+  var s = normalizeTitle(raw);
+  if (s.isEmpty) return s;
+  s = s.replaceFirst(RegExp(r'^第'), '');
+  s = s.replaceFirst(RegExp(r'(集|话|期|回)$'), '');
+  if (RegExp(r'^\d+$').hasMatch(s)) {
+    s = int.tryParse(s)?.toString() ?? s;
+  }
+  return s;
+}

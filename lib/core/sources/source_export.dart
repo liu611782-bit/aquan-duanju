@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'merged_source.dart';
 import 'source_adapter.dart';
 import 'source_market.dart';
 
@@ -48,12 +49,7 @@ String cleanSourceUrl(String url) {
   return out;
 }
 
-int _tvboxType(SourceKind kind) => switch (kind) {
-      SourceKind.cmsXml => 0,
-      SourceKind.cmsJson => 1,
-      SourceKind.spiderJs => 3,
-      SourceKind.spider => 3,
-    };
+int _tvboxType(SourceKind kind) => tvboxSiteType(kind);
 
 /// TVBox 单仓 `sites` JSON。
 String exportSitesJson(List<SourceConfig> sources) {

@@ -1,0 +1,25 @@
+{
+  "version": "1.5.0",
+  "changelog": "本次更新内容（纯文本，可含换行）",
+  "assets": {
+    "windows": [
+      "https://github.com/wjsqqj/aquan-duanju/releases/download/v1.5.0/aquan-windows-x64-1.5.0-setup.exe",
+      "https://gh-proxy.com/https://github.com/wjsqqj/aquan-duanju/releases/download/v1.5.0/aquan-windows-x64-1.5.0-setup.exe"
+    ],
+    "android-arm64-v8a": [
+      "https://github.com/wjsqqj/aquan-duanju/releases/download/v1.5.0/aquan-arm64-v8a.apk"
+    ],
+    "android-armeabi-v7a": [
+      "https://github.com/wjsqqj/aquan-duanju/releases/download/v1.5.0/aquan-armeabi-v7a.apk"
+    ],
+    "android-x86_64": [
+      "https://github.com/wjsqqj/aquan-duanju/releases/download/v1.5.0/aquan-x86_64.apk"
+    ]
+  },
+  "sha256": {
+    "windows": "把安装包的 SHA-256 放这里（64 位十六进制，大小写均可）",
+    "android-arm64-v8a": "把 APK 的 SHA-256 放这里",
+    "android-armeabi-v7a": "把 APK 的 SHA-256 放这里",
+    "android-x86_64": "把 APK 的 SHA-256 放这里"
+  }
+}

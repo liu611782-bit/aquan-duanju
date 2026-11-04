@@ -105,4 +105,46 @@ void main() {
     expect(target.subtitleFontSize, 56);
     expect(target.subtitleBackground, isTrue);
   });
+
+  test('影视聚合效果开关：默认值 / 范围 / 备份往返', () async {
+    SharedPreferences.setMockInitialValues({});
+    final s = SettingsStore(await SharedPreferences.getInstance());
+    expect(s.autoDiscovery, isTrue);
+    expect(s.autoSourceIntervalMinutes, 60);
+    expect(s.autoMergeSources, isTrue);
+    expect(s.randomHomeSource, isTrue);
+    expect(s.dedupeBackendSearch, isTrue);
+    expect(s.detailSourceSwitch, isTrue);
+    expect(s.autoCheckUpdate, isTrue);
+
+    s.autoSourceIntervalMinutes = 5;
+    expect(s.autoSourceIntervalMinutes, 15);
+    s.autoSourceIntervalMinutes = 9999;
+    expect(s.autoSourceIntervalMinutes, 360);
+
+    s
+      ..autoDiscovery = false
+      ..autoMergeSources = false
+      ..randomHomeSource = false
+      ..dedupeBackendSearch = false
+      ..detailSourceSwitch = false
+      ..autoCheckUpdate = false
+      ..updateUrls = 'https://example.com/update.json';
+
+    final data = s.exportBackup();
+    expect(data['sources.autoDiscovery'], isFalse);
+    expect(data['sources.randomHome'], isFalse);
+    expect(data['update.urls'], 'https://example.com/update.json');
+
+    SharedPreferences.setMockInitialValues({});
+    final target = SettingsStore(await SharedPreferences.getInstance());
+    target.importBackup(data);
+    expect(target.autoDiscovery, isFalse);
+    expect(target.autoMergeSources, isFalse);
+    expect(target.randomHomeSource, isFalse);
+    expect(target.dedupeBackendSearch, isFalse);
+    expect(target.detailSourceSwitch, isFalse);
+    expect(target.autoCheckUpdate, isFalse);
+    expect(target.updateUrls, 'https://example.com/update.json');
+  });
 }

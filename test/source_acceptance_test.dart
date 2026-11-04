@@ -52,7 +52,7 @@ class FakeAdapter extends SourceAdapter {
   }
 
   @override
-  Stream<SourceSearchEvent> search(String query, {int page = 1}) async* {
+  Stream<SourceSearchEvent> search(String query, {int page = 1, CancelToken? cancel}) async* {
     final items = searchResults['$query#$page'];
     if (items == null) {
       if (searchError != null) {

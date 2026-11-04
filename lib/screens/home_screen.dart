@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:screen_retriever/screen_retriever.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../core/ops_switches.dart';
 import '../core/reader/reader_speech_controller.dart';
 import '../core/window_geometry.dart';
 import '../update/update_service.dart';
@@ -48,8 +49,12 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
       _initWindow();
     }
     // 启动后半分钟静默查一次新版本，失败不打扰；提示出现在「我的」页。
+    // 开关与运维急停都在触发时现读，改设置不用重启。
     Timer(const Duration(seconds: 30), () {
-      if (mounted) UpdateService.instance.checkQuietly();
+      if (!mounted) return;
+      final settings = AppScope.read(context).settings;
+      if (!settings.autoCheckUpdate || OpsSwitches.disableAutoUpdate) return;
+      UpdateService.instance.checkQuietly();
     });
   }
 

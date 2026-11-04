@@ -498,6 +498,8 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
       position: _position.inMilliseconds / 1000.0,
       finished: finished,
       sourceKey: widget.source.id,
+      // 详情接口挂掉时的兜底直链（spider 源这里是令牌，仍按原样存）。
+      playUrl: ep.url,
     );
   }
 

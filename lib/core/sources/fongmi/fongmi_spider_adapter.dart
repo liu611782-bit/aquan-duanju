@@ -96,7 +96,12 @@ class FongmiSpiderAdapter implements SourceAdapter {
   }
 
   @override
-  Stream<SourceSearchEvent> search(String query, {int page = 1}) async* {
+  Stream<SourceSearchEvent> search(
+    String query, {
+    int page = 1,
+    CancelToken? cancel,
+  }) async* {
+    if (cancel?.isCancelled ?? false) return;
     await _source();
     if (!_isFongmiFlavor) {
       yield* (await _delegate()).search(query, page: page);

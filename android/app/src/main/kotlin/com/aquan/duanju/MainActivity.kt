@@ -7,10 +7,12 @@ import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.wifi.WifiManager
 import android.os.Build
+import androidx.core.content.FileProvider
 import com.aquan.duanju.mirror.MirrorService
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 // 继承 AudioServiceActivity（它本身继承 FlutterActivity）才能让 audio_service 的
 // 前台服务拿到 Activity 上下文；同时保住下面 aquan/cast 的自定义通道。
@@ -119,6 +121,47 @@ class MainActivity : AudioServiceActivity() {
                         } catch (e: Exception) {
                             pendingNotificationResult = null
                             result.success(false)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        // 应用内更新：把下载好的 APK 交给系统安装器。
+        // Dart 侧只负责下载 + SHA-256 校验，安装确认交给系统（不能静默安装）。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aquan/update")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "installApk" -> {
+                        val path = call.argument<String>("path")
+                        if (path.isNullOrEmpty()) {
+                            result.error("BAD_ARGS", "安装包路径为空", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            val file = File(path)
+                            if (!file.exists()) {
+                                result.error("NOT_FOUND", "安装包不存在", null)
+                                return@setMethodCallHandler
+                            }
+                            // API 24+ 不允许 file:// 跨应用暴露：必须走 FileProvider。
+                            val uri = FileProvider.getUriForFile(
+                                this,
+                                "$packageName.fileprovider",
+                                file,
+                            )
+                            val intent = Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(
+                                    uri,
+                                    "application/vnd.android.package-archive",
+                                )
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            startActivity(intent)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("INSTALL_FAILED", e.message, null)
                         }
                     }
                     else -> result.notImplemented()

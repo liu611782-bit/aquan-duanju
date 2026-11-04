@@ -326,7 +326,14 @@ abstract class SourceAdapter {
   Future<SourcePage<UnifiedSeries>> list({String? categoryId, required int page});
 
   /// 流式搜索：每页完成即发事件。
-  Stream<SourceSearchEvent> search(String query, {int page = 1});
+  ///
+  /// [cancel] 取消后实现方应尽快中止在途请求（能真断 HTTP 的源必须断），
+  /// 并停止后续回退分支——被替换的旧搜索不该继续占用带宽。
+  Stream<SourceSearchEvent> search(
+    String query, {
+    int page = 1,
+    CancelToken? cancel,
+  });
 
   /// 详情（含全部线路与分集）。
   Future<UnifiedSeries> detail(String sourceItemId);

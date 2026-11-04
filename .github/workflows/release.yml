@@ -312,6 +312,62 @@ jobs:
           fi
           cat release_notes.md
 
+      - name: 生成 update.json（应用内更新清单）
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+
+          tag = os.environ['GITHUB_REF_NAME'].lstrip('v')
+          base = (
+              f"https://github.com/{os.environ['GITHUB_REPOSITORY']}"
+              f"/releases/download/{os.environ['GITHUB_REF_NAME']}"
+          )
+
+          def sha256(path):
+              h = hashlib.sha256()
+              with open(path, 'rb') as f:
+                  for chunk in iter(lambda: f.read(1 << 20), b''):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          assets = {}
+          shas = {}
+
+          windows = sorted(
+              p for p in os.listdir('dist')
+              if p.startswith('aquan-windows-x64-') and p.endswith('-setup.exe')
+          )
+          if windows:
+              name = windows[0]
+              assets['windows'] = [f"{base}/{name}"]
+              shas['windows'] = sha256(os.path.join('dist', name))
+
+          for key, name in (
+              ('android-arm64-v8a', 'aquan-arm64-v8a.apk'),
+              ('android-armeabi-v7a', 'aquan-armeabi-v7a.apk'),
+              ('android-x86_64', 'aquan-x86_64.apk'),
+          ):
+              path = os.path.join('dist', name)
+              if os.path.exists(path):
+                  assets[key] = [f"{base}/{name}"]
+                  shas[key] = sha256(path)
+
+          changelog = ''
+          if os.path.exists('release_notes.md'):
+              with open('release_notes.md', encoding='utf-8') as f:
+                  changelog = f.read().strip()
+
+          manifest = {
+              'version': tag,
+              'changelog': changelog,
+              'assets': assets,
+              'sha256': shas,
+          }
+          with open('dist/update.json', 'w', encoding='utf-8') as f:
+              json.dump(manifest, f, ensure_ascii=False, indent=2)
+          print(json.dumps(manifest, ensure_ascii=False, indent=2))
+          PY
+
       - name: 创建 Release
         env:
           GH_TOKEN: ${{ github.token }}

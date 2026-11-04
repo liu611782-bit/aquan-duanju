@@ -73,7 +73,11 @@ class BiliAdapter implements SourceAdapter {
   }
 
   @override
-  Stream<SourceSearchEvent> search(String query, {int page = 1}) async* {
+  Stream<SourceSearchEvent> search(
+    String query, {
+    int page = 1,
+    CancelToken? cancel,
+  }) async* {
     try {
       final items = await _api.search(query);
       yield SourceHits(

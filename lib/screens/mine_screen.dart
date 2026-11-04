@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 
 import '../core/image_cache_store.dart';
+import '../core/ops_switches.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -38,6 +39,7 @@ import '../theme/app_theme.dart';
 import '../update/update_flow.dart';
 import '../update/update_service.dart';
 import '../widgets/common.dart';
+import 'config_manage_screen.dart';
 import 'detail_screen.dart';
 import 'book_detail_screen.dart';
 import 'bookshelf_screen.dart';
@@ -469,6 +471,31 @@ class SettingsPanel extends StatelessWidget {
       listenable: scope.settings,
       builder: (context, _) => Column(
         children: [
+          if (OpsSwitches.anyActive)
+            Card(
+              color: Theme.of(context).colorScheme.errorContainer,
+              margin: const EdgeInsets.only(bottom: 12),
+              child: ListTile(
+                leading: Icon(
+                  Icons.pan_tool_alt_outlined,
+                  color: Theme.of(context).colorScheme.onErrorContainer,
+                ),
+                title: Text(
+                  '运维急停已开启',
+                  style: TextStyle(
+                      color: Theme.of(context).colorScheme.onErrorContainer),
+                ),
+                subtitle: Text(
+                  [
+                    if (OpsSwitches.disableAutoSource) '自动找源',
+                    if (OpsSwitches.disableAutoUpdate) '自动检查更新',
+                    if (OpsSwitches.disableAutoMerge) '自动重建合并源',
+                  ].join(' / '),
+                  style: TextStyle(
+                      color: Theme.of(context).colorScheme.onErrorContainer),
+                ),
+              ),
+            ),
           _selectTile<String>(
             context,
             icon: Icons.brightness_6_outlined,
@@ -707,6 +734,113 @@ class SettingsPanel extends StatelessWidget {
               value: scope.settings.autoFitWindow,
               onChanged: (v) => scope.settings.autoFitWindow = v,
             ),
+          SwitchListTile(
+            secondary: const Icon(Icons.travel_explore),
+            title: const Text('自动找源'),
+            subtitle: Text(
+              OpsSwitches.disableAutoSource
+                  ? '运维急停已停用（app_ops.yaml）'
+                  : scope.settings.autoDiscovery
+                      ? '后台从 GitHub / GitLab / Gitee 发现并验证配置'
+                      : '已关闭，仍可在「配置地址管理」手动找源',
+            ),
+            value: scope.settings.autoDiscovery,
+            onChanged: OpsSwitches.disableAutoSource
+                ? null
+                : (v) {
+                    scope.settings.autoDiscovery = v;
+                    scope.autoSource.rescheduleOnSettingsChanged();
+                  },
+          ),
+          _selectTile<int>(
+            context,
+            icon: Icons.schedule,
+            title: '找源间隔',
+            value: scope.settings.autoSourceIntervalMinutes,
+            items: const {
+              30: '30 分钟',
+              60: '1 小时',
+              180: '3 小时',
+              360: '6 小时',
+            },
+            onChanged: scope.settings.autoDiscovery
+                ? (v) {
+                    scope.settings.autoSourceIntervalMinutes = v;
+                    scope.autoSource.rescheduleOnSettingsChanged();
+                  }
+                : null,
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.merge_type),
+            title: const Text('自动重建合并源'),
+            subtitle: const Text('找源成功后把可用站点合并进 local://merged_sources.json'),
+            value: scope.settings.autoMergeSources,
+            onChanged: OpsSwitches.disableAutoMerge
+                ? null
+                : (v) => scope.settings.autoMergeSources = v,
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.shuffle),
+            title: const Text('进入影视聚合时随机换源'),
+            subtitle: const Text('关闭后按健康分顺序使用第一个源'),
+            value: scope.settings.randomHomeSource,
+            onChanged: (v) => scope.settings.randomHomeSource = v,
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.filter_alt_outlined),
+            title: const Text('搜索按后端去重'),
+            subtitle: const Text('同一采集站被多份配置收录时只请求一次'),
+            value: scope.settings.dedupeBackendSearch,
+            onChanged: (v) => scope.settings.dedupeBackendSearch = v,
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.swap_horiz),
+            title: const Text('详情页显示换源入口'),
+            value: scope.settings.detailSourceSwitch,
+            onChanged: (v) => scope.settings.detailSourceSwitch = v,
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.system_update_alt),
+            title: const Text('启动后自动检查更新'),
+            subtitle: Text(
+              OpsSwitches.disableAutoUpdate
+                  ? '运维急停已停用（仍可手动检查）'
+                  : '发现新版本时在「我的」页提示',
+            ),
+            value: scope.settings.autoCheckUpdate,
+            onChanged: OpsSwitches.disableAutoUpdate
+                ? null
+                : (v) => scope.settings.autoCheckUpdate = v,
+          ),
+          ListTile(
+            leading: const Icon(Icons.playlist_add_check_outlined),
+            title: const Text('配置地址管理'),
+            subtitle: Text(
+              '自动找源：${scope.settings.autoDiscovery ? scope.discovery.statusText : '已关闭'}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () async {
+              await Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const ConfigManageScreen()));
+              if (context.mounted) {
+                await scope.discovery.ensureLoaded();
+              }
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.link),
+            title: const Text('更新源地址'),
+            subtitle: Text(
+              scope.settings.updateUrls.isEmpty
+                  ? '默认（GitHub Releases 清单）'
+                  : scope.settings.updateUrls,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            onTap: () => _editUpdateUrls(context, scope),
+          ),
           ListenableBuilder(
             listenable: UpdateService.instance,
             builder: (context, _) {
@@ -759,6 +893,46 @@ class SettingsPanel extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// 更新清单地址：多个地址用英文逗号分隔，依次尝试；清空恢复内置默认。
+  static Future<void> _editUpdateUrls(
+      BuildContext context, AppScope scope) async {
+    final controller = TextEditingController(text: scope.settings.updateUrls);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('更新源地址'),
+        content: TextField(
+          controller: controller,
+          minLines: 3,
+          maxLines: 6,
+          decoration: const InputDecoration(
+            hintText: 'https://…/update.json,https://…/update.json',
+            helperText: '英文逗号分隔，依次尝试；留空恢复内置默认清单',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    final value = controller.text;
+    controller.dispose();
+    if (ok != true) return;
+    scope.settings.updateUrls = value;
+    UpdateService.instance.resetManifestCache();
+    if (context.mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('更新源地址已保存')));
+    }
   }
 
   static String _downloadDirLabel(AppScope scope) {
@@ -839,13 +1013,14 @@ class SettingsPanel extends StatelessWidget {
     String? subtitle,
     required T value,
     required Map<T, String> items,
-    required void Function(T) onChanged,
+    required void Function(T)? onChanged,
   }) {
     return ListTile(
       leading: Icon(icon),
       title: Text(title),
       subtitle: subtitle == null ? null : Text(subtitle),
       trailing: PopupMenuButton<T>(
+        enabled: onChanged != null,
         initialValue: value,
         onSelected: onChanged,
         itemBuilder: (_) => [

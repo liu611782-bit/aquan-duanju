@@ -158,7 +158,7 @@ class SearchOrchestrator {
         final adapter = fresh[i];
         try {
           final events = await adapter
-              .search(q)
+              .search(q, cancel: internal)
               .timeout(perSourceTimeout)
               .toList();
           if (internal.isCancelled || seq != _seq) return;
@@ -291,7 +291,7 @@ class SearchOrchestrator {
         final page = ledger.lastPage + 1;
         try {
           final events = await adapter
-              .search(q, page: page)
+              .search(q, page: page, cancel: internal)
               .timeout(perSourceTimeout)
               .toList();
           if (internal.isCancelled || gen != _pagingGen) return;

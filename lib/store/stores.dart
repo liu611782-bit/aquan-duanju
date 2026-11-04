@@ -11,7 +11,9 @@ import '../core/reader/reader_theme.dart';
 import '../core/player/playback_health.dart';
 import '../core/reader/reader_annotations.dart';
 import '../core/reader/replace_rules.dart';
+import '../core/sources/merged_source.dart';
 import '../core/sources/source_adapter.dart';
+import '../core/sources/source_discovery.dart';
 import '../core/sources/source_health.dart';
 import '../core/sources/source_probe.dart';
 import '../core/sources/source_import.dart';
@@ -165,6 +167,88 @@ class SettingsStore extends ChangeNotifier {
     _prefs.setBool('sources.disclaimerDismissed', v);
     notifyListeners();
   }
+
+  /// 自动找源：后台从 GitHub / GitLab / Gitee 发现并验证配置。
+  bool get autoDiscovery => _prefs.getBool('sources.autoDiscovery') ?? true;
+  set autoDiscovery(bool v) {
+    _prefs.setBool('sources.autoDiscovery', v);
+    notifyListeners();
+  }
+
+  /// GitHub Token（可选）：留空按匿名调用，限流更早但可用。
+  String get githubToken => _prefs.getString('sources.githubToken') ?? '';
+  set githubToken(String v) {
+    final trimmed = v.trim();
+    if (trimmed.isEmpty) {
+      _prefs.remove('sources.githubToken');
+    } else {
+      _prefs.setString('sources.githubToken', trimmed);
+    }
+    notifyListeners();
+  }
+
+  /// 自动找源间隔（分钟，15–360，默认 60）：成功后的下一轮等待时间。
+  int get autoSourceIntervalMinutes =>
+      (_prefs.getInt('sources.autoDiscoveryIntervalMin') ?? 60).clamp(15, 360);
+  set autoSourceIntervalMinutes(int v) {
+    _prefs.setInt('sources.autoDiscoveryIntervalMin', v.clamp(15, 360));
+    notifyListeners();
+  }
+
+  /// 找源成功后自动重建本地合并源（默认开）。
+  bool get autoMergeSources => _prefs.getBool('sources.autoMerge') ?? true;
+  set autoMergeSources(bool v) {
+    _prefs.setBool('sources.autoMerge', v);
+    notifyListeners();
+  }
+
+  /// 进入影视聚合时随机选一个直连源（默认开）。
+  bool get randomHomeSource => _prefs.getBool('sources.randomHome') ?? true;
+  set randomHomeSource(bool v) {
+    _prefs.setBool('sources.randomHome', v);
+    notifyListeners();
+  }
+
+  /// 聚合/快速搜索按「后端」去重（默认开）。
+  bool get dedupeBackendSearch =>
+      _prefs.getBool('sources.dedupeBackend') ?? true;
+  set dedupeBackendSearch(bool v) {
+    _prefs.setBool('sources.dedupeBackend', v);
+    notifyListeners();
+  }
+
+  /// 详情页显示「换源」入口（默认开）。
+  bool get detailSourceSwitch =>
+      _prefs.getBool('sources.detailSwitch') ?? true;
+  set detailSourceSwitch(bool v) {
+    _prefs.setBool('sources.detailSwitch', v);
+    notifyListeners();
+  }
+
+  /// 启动后自动检查更新（默认开；仍受运维急停约束）。
+  bool get autoCheckUpdate => _prefs.getBool('update.autoCheck') ?? true;
+  set autoCheckUpdate(bool v) {
+    _prefs.setBool('update.autoCheck', v);
+    notifyListeners();
+  }
+
+  /// 更新清单地址（英文逗号分隔，依次尝试）。空 = 用内置默认地址。
+  String get updateUrls => _prefs.getString('update.urls') ?? '';
+  set updateUrls(String v) {
+    final trimmed = v.trim();
+    if (trimmed.isEmpty) {
+      _prefs.remove('update.urls');
+    } else {
+      _prefs.setString('update.urls', trimmed);
+    }
+    notifyListeners();
+  }
+
+  List<String> get updateUrlList => updateUrls
+      .split(',')
+      .map((u) => u.trim())
+      .where((u) => u.isNotEmpty)
+      .toList(growable: false);
 
   // ---------- 语音输入（桌面云 API） ----------
 
@@ -423,6 +507,15 @@ class SettingsStore extends ChangeNotifier {
         'subtitle.fontSize': subtitleFontSize,
         'subtitle.border': subtitleBorder,
         'subtitle.background': subtitleBackground,
+        // 影视聚合的「效果开关」：随备份走，避免换设备后行为不一致。
+        'sources.autoDiscovery': autoDiscovery,
+        'sources.autoDiscoveryIntervalMin': autoSourceIntervalMinutes,
+        'sources.autoMerge': autoMergeSources,
+        'sources.randomHome': randomHomeSource,
+        'sources.dedupeBackend': dedupeBackendSearch,
+        'sources.detailSwitch': detailSourceSwitch,
+        'update.urls': updateUrls,
+        'update.autoCheck': autoCheckUpdate,
       };
 
   /// 从备份恢复设置：未知键忽略、非法值回落默认，返回实际写入的键数。
@@ -516,6 +609,38 @@ class SettingsStore extends ChangeNotifier {
       final v = data['subtitle.background'];
       if (v is bool) subtitleBackground = v;
     });
+    apply('sources.autoDiscovery', () {
+      final v = data['sources.autoDiscovery'];
+      if (v is bool) autoDiscovery = v;
+    });
+    apply('sources.autoDiscoveryIntervalMin', () {
+      final v = data['sources.autoDiscoveryIntervalMin'];
+      if (v is num) autoSourceIntervalMinutes = v.toInt();
+    });
+    apply('sources.autoMerge', () {
+      final v = data['sources.autoMerge'];
+      if (v is bool) autoMergeSources = v;
+    });
+    apply('sources.randomHome', () {
+      final v = data['sources.randomHome'];
+      if (v is bool) randomHomeSource = v;
+    });
+    apply('sources.dedupeBackend', () {
+      final v = data['sources.dedupeBackend'];
+      if (v is bool) dedupeBackendSearch = v;
+    });
+    apply('sources.detailSwitch', () {
+      final v = data['sources.detailSwitch'];
+      if (v is bool) detailSourceSwitch = v;
+    });
+    apply('update.urls', () {
+      final v = data['update.urls'];
+      if (v is String) updateUrls = v;
+    });
+    apply('update.autoCheck', () {
+      final v = data['update.autoCheck'];
+      if (v is bool) autoCheckUpdate = v;
+    });
     return applied;
   }
 }
@@ -531,6 +656,7 @@ class HistoryEntry {
     this.finished = false,
     this.position = 0,
     this.episodeId = '',
+    this.playUrl = '',
     this.speed = 0,
     this.quality = '',
     this.sourceKey = '',
@@ -550,6 +676,9 @@ class HistoryEntry {
   final bool finished;
   final double position;
   final String episodeId;
+
+  /// 上次实际播放的直链：详情接口挂掉时用它兜底「继续播放」。
+  final String playUrl;
 
   /// 这部剧的播放偏好：speed 为 0 表示没改过倍速；quality 为空表示用全局默认。
   final double speed;
@@ -598,6 +727,7 @@ class HistoryEntry {
         'finished': finished,
         'position': position,
         'episode_id': episodeId,
+        if (playUrl.isNotEmpty) 'play_url': playUrl,
         if (speed > 0) 'speed': speed,
         if (quality.isNotEmpty) 'quality': quality,
         if (sourceKey.isNotEmpty) 'source_key': sourceKey,
@@ -618,6 +748,7 @@ class HistoryEntry {
         finished: json['finished'] as bool? ?? false,
         position: (json['position'] as num?)?.toDouble() ?? 0,
         episodeId: json['episode_id'] as String? ?? '',
+        playUrl: json['play_url'] as String? ?? '',
         speed: (json['speed'] as num?)?.toDouble() ?? 0,
         quality: json['quality'] as String? ?? '',
         sourceKey: json['source_key'] as String? ?? '',
@@ -851,6 +982,7 @@ class HistoryStore extends _JsonFileStore {
     double speed = 0,
     String quality = '',
     String sourceKey = '',
+    String playUrl = '',
   }) async {
     await ensureLoaded();
     final existing = _entries[seriesId];
@@ -878,6 +1010,7 @@ class HistoryStore extends _JsonFileStore {
       audioTrackKey: existing?.audioTrackKey ?? '',
       subtitleTrackKey: existing?.subtitleTrackKey ?? '',
       sourceKey: sourceKey.isNotEmpty ? sourceKey : (existing?.sourceKey ?? ''),
+      playUrl: playUrl.isNotEmpty ? playUrl : (existing?.playUrl ?? ''),
     );
     _prune();
     await _writeJson({
@@ -920,6 +1053,9 @@ class HistoryStore extends _JsonFileStore {
       subtitleTrackKey: subtitleTrackKey.isNotEmpty
           ? subtitleTrackKey
           : (e?.subtitleTrackKey ?? ''),
+      // 偏好写入不能顺手丢掉「来源 / 上次直链」：续播兜底要靠它们。
+      sourceKey: e?.sourceKey ?? '',
+      playUrl: e?.playUrl ?? '',
       updatedAt: e?.updatedAt,
     );
     await _writeJson({
@@ -2994,6 +3130,228 @@ class SourceHealthStore extends _JsonFileStore {
         _health[k.toString()] = incomingRecord;
         merged++;
       }
+    });
+    if (merged > 0) await _flush();
+    return merged;
+  }
+}
+
+/// 自动找源的一条验证记录（按配置 URL 归一化键存储）。
+///
+/// 这是一份「历史结论」，不是站点列表：真正可用的配置会以自定义种子的形式
+/// 写进 `SeedStore`，这里只负责判断「这个地址上次验证是什么结果」「该不该剔」。
+class DiscoveryEntry {
+  DiscoveryEntry({
+    required this.name,
+    required this.url,
+    required this.origin,
+    this.auto = true,
+    this.usable = false,
+    this.siteCount = 0,
+    this.verifiedSites = 0,
+    this.latencyMs = 0,
+    this.checkedAt,
+    this.message = '',
+  });
+
+  final String name;
+  final String url;
+  final DiscoveryOrigin origin;
+
+  /// 由自动找源写入/维护。只有 `auto=true` 的条目允许被自动剔除。
+  final bool auto;
+
+  bool usable;
+  int siteCount;
+  int verifiedSites;
+  int latencyMs;
+  DateTime? checkedAt;
+  String message;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'name': name,
+        'url': url,
+        'origin': origin.name,
+        'auto': auto,
+        'usable': usable,
+        'site_count': siteCount,
+        'verified_sites': verifiedSites,
+        'latency_ms': latencyMs,
+        if (checkedAt != null)
+          'checked_at': checkedAt!.millisecondsSinceEpoch,
+        if (message.isNotEmpty) 'message': message,
+      };
+
+  factory DiscoveryEntry.fromJson(Map<String, dynamic> json) => DiscoveryEntry(
+        name: json['name'] as String? ?? '',
+        url: json['url'] as String? ?? '',
+        origin: DiscoveryOrigin.fromName(json['origin']),
+        auto: json['auto'] as bool? ?? false,
+        usable: json['usable'] as bool? ?? false,
+        siteCount: (json['site_count'] as num?)?.toInt() ?? 0,
+        verifiedSites: (json['verified_sites'] as num?)?.toInt() ?? 0,
+        latencyMs: (json['latency_ms'] as num?)?.toInt() ?? 0,
+        checkedAt: json['checked_at'] is num
+            ? DateTime.fromMillisecondsSinceEpoch(
+                (json['checked_at'] as num).toInt())
+            : null,
+        message: json['message'] as String? ?? '',
+      );
+}
+
+/// 在线发现与合并快照的元数据（`aquan_source_discovery.json`）。
+class SourceDiscoveryStore extends _JsonFileStore {
+  SourceDiscoveryStore({super.testDirectory})
+      : super('aquan_source_discovery.json');
+
+  final Map<String, DiscoveryEntry> _entries = <String, DiscoveryEntry>{};
+
+  DateTime? lastRunAt;
+  DateTime? lastOkAt;
+  String lastError = '';
+  int failStreak = 0;
+
+  /// 合并快照元信息（真身由 MergedSourceStore 读写）。
+  int mergedSiteCount = 0;
+  DateTime? mergedBuiltAt;
+
+  Map<String, DiscoveryEntry> get entries => Map.unmodifiable(_entries);
+
+  List<DiscoveryEntry> get all => List<DiscoveryEntry>.of(_entries.values);
+
+  List<DiscoveryEntry> get autoEntries =>
+      _entries.values.where((e) => e.auto).toList();
+
+  DiscoveryEntry? entryOf(String url) => _entries[normalizeSeedUrl(url)];
+
+  /// 最近一次运行的结果摘要（配置管理页展示）。
+  String get statusText {
+    if (lastRunAt == null) return '尚未运行';
+    if (lastOkAt != null && lastError.isEmpty) {
+      return '上次成功：${_timeText(lastOkAt!)}';
+    }
+    return lastError.isEmpty ? '上次运行：${_timeText(lastRunAt!)}' : lastError;
+  }
+
+  static String _timeText(DateTime time) {
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${two(time.month)}-${two(time.day)} '
+        '${two(time.hour)}:${two(time.minute)}';
+  }
+
+  Future<void> upsert(DiscoveryEntry entry) async {
+    await ensureLoaded();
+    _entries[normalizeSeedUrl(entry.url)] = entry;
+    await _flush();
+  }
+
+  Future<void> upsertAll(Iterable<DiscoveryEntry> entries) async {
+    await ensureLoaded();
+    for (final entry in entries) {
+      _entries[normalizeSeedUrl(entry.url)] = entry;
+    }
+    await _flush();
+  }
+
+  Future<void> removeUrl(String url) async {
+    await ensureLoaded();
+    if (_entries.remove(normalizeSeedUrl(url)) == null) return;
+    await _flush();
+  }
+
+  Future<void> markRun({required bool ok, String error = ''}) async {
+    await ensureLoaded();
+    lastRunAt = DateTime.now();
+    if (ok) {
+      lastOkAt = lastRunAt;
+      lastError = '';
+      failStreak = 0;
+    } else {
+      lastError = error;
+      failStreak++;
+    }
+    await _flush();
+  }
+
+  Future<void> markMerged(int siteCount) async {
+    await ensureLoaded();
+    mergedSiteCount = siteCount;
+    mergedBuiltAt = DateTime.now();
+    await _flush();
+  }
+
+  Future<void> _flush() async {
+    await _writeJson(<String, dynamic>{
+      'version': 1,
+      if (lastRunAt != null) 'last_run_at': lastRunAt!.millisecondsSinceEpoch,
+      if (lastOkAt != null) 'last_ok_at': lastOkAt!.millisecondsSinceEpoch,
+      if (lastError.isNotEmpty) 'last_error': lastError,
+      'fail_streak': failStreak,
+      'merged': <String, dynamic>{
+        'sites': mergedSiteCount,
+        if (mergedBuiltAt != null)
+          'built_at': mergedBuiltAt!.millisecondsSinceEpoch,
+        'url': mergedSourceUrl,
+      },
+      'entries': <String, dynamic>{
+        for (final e in _entries.entries) e.key: e.value.toJson(),
+      },
+    });
+    notifyListeners();
+  }
+
+  @override
+  Future<void> loadFromDisk() async {
+    final json = await _readJson();
+    _entries.clear();
+    final entries = json['entries'];
+    if (entries is Map) {
+      entries.forEach((key, value) {
+        if (value is Map<String, dynamic>) {
+          final entry = DiscoveryEntry.fromJson(value);
+          if (entry.url.isNotEmpty) {
+            _entries[normalizeSeedUrl(entry.url)] = entry;
+          }
+        }
+      });
+    }
+    final lastRun = json['last_run_at'];
+    lastRunAt = lastRun is num
+        ? DateTime.fromMillisecondsSinceEpoch(lastRun.toInt())
+        : null;
+    final lastOk = json['last_ok_at'];
+    lastOkAt = lastOk is num
+        ? DateTime.fromMillisecondsSinceEpoch(lastOk.toInt())
+        : null;
+    lastError = json['last_error'] as String? ?? '';
+    failStreak = (json['fail_streak'] as num?)?.toInt() ?? 0;
+    final merged = json['merged'];
+    if (merged is Map) {
+      mergedSiteCount = (merged['sites'] as num?)?.toInt() ?? 0;
+      final built = merged['built_at'];
+      mergedBuiltAt = built is num
+          ? DateTime.fromMillisecondsSinceEpoch(built.toInt())
+          : null;
+    }
+    _loaded = true;
+    notifyListeners();
+  }
+
+  @override
+  Future<void> persist(Map<String, dynamic> json) => _writeJson(json);
+
+  @override
+  Future<int> importData(Map<String, dynamic> incoming) async {
+    await ensureLoaded();
+    final entries = incoming['entries'];
+    if (entries is! Map) return 0;
+    var merged = 0;
+    entries.forEach((key, value) {
+      if (value is! Map<String, dynamic>) return;
+      final entry = DiscoveryEntry.fromJson(value);
+      if (entry.url.isEmpty) return;
+      _entries[normalizeSeedUrl(entry.url)] = entry;
+      merged++;
     });
     if (merged > 0) await _flush();
     return merged;

@@ -68,6 +68,11 @@ android {
     }
 }
 
+dependencies {
+    // 应用内更新：FileProvider（API 24+ 不允许 file:// 跨应用暴露 APK）。
+    implementation("androidx.core:core-ktx:1.13.1")
+}
+
 kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17

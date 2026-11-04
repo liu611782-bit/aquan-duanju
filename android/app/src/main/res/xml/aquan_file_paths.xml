@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 应用内更新只暴露 cache 目录里的安装包；不开放外部存储。 -->
+<paths>
+    <cache-path name="aquan_update_cache" path="." />
+</paths>

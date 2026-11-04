@@ -37,7 +37,11 @@ class HongguoBridgeAdapter implements SourceAdapter {
   }
 
   @override
-  Stream<SourceSearchEvent> search(String query, {int page = 1}) async* {
+  Stream<SourceSearchEvent> search(
+    String query, {
+    int page = 1,
+    CancelToken? cancel,
+  }) async* {
     try {
       // 红果是游标分页 + SDK 设备风控：单并发、只取第一页参与聚合。
       final result = await _api.search(query);
