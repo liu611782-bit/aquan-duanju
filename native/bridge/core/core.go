@@ -161,6 +161,11 @@ func (cfg config) apply(opts *sdk.Options) {
 	opts.DistributionOrigin = cfg.DistributionOrigin
 	opts.RetryAttempts = cfg.RetryAttempts
 	opts.Device = cfg.Device
+	// openhongguo v0.2.0 起默认「设备失效自动换新设备」（最多 2 次）。
+	// 本进程已有 callWithDeviceHeal（见 Call）：两层叠加会让一次失败消耗
+	// 3~4 台匿名设备，而服务端对每台匿名设备有播放次数限制。
+	// 因此显式关闭上游自动换设备，换设备策略只保留 callWithDeviceHeal 一处。
+	opts.DeviceResets = sdk.Int(0)
 }
 
 // method 是一个可按名字调用的 SDK 方法：args 是参数数组的各项。

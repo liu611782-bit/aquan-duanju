@@ -1,4 +1,4 @@
-# github.com/beilunyang/openhongguo v0.1.1
+# github.com/beilunyang/openhongguo v0.2.0
 ## explicit; go 1.22
 github.com/beilunyang/openhongguo/adapters
 github.com/beilunyang/openhongguo/adapters/filestore
