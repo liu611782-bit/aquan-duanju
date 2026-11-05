@@ -270,9 +270,11 @@ class _RecordingStore extends ListenProgressStore {
   }
 }
 
+// 章节 id 用纯数字：控制器对非数字 id 有「强制本地合成」硬闸门（第三方书源），
+// 用 'c1' 会让音轨路径用例全部跌到 TTS。
 const List<BookChapter> _chapters = <BookChapter>[
-  BookChapter(id: 'c1', title: '第一章 起风了', index: 0),
-  BookChapter(id: 'c2', title: '第二章 雪停了', index: 1),
+  BookChapter(id: '7001', title: '第一章 起风了', index: 0),
+  BookChapter(id: '7002', title: '第二章 雪停了', index: 1),
 ];
 
 void main() {
@@ -354,7 +356,8 @@ void main() {
     // 静音裁剪开关也进缓存键（默认开 → `#t1`，文件名字符过滤后是 `_t1`）。
     String trimSuffix = '_t1',
   }) {
-    final stem = 'c1-$engineId-$voiceId$trimSuffix';
+    // 缓存键含章节 id：`_chapters[0].id` 是 7001（必须是纯数字，见文件头注释）。
+    final stem = '7001-$engineId-$voiceId$trimSuffix';
     expect(
       File('${bookDir().path}${Platform.pathSeparator}$stem.mp3').existsSync(),
       isTrue,
@@ -778,7 +781,7 @@ void main() {
       expect(
         File(
           '${bookDir().path}${Platform.pathSeparator}'
-          'c1-edge-zh-CN-XiaoyiNeural_t1.mp3',
+          '7001-edge-zh-CN-XiaoyiNeural_t1.mp3',
         ).existsSync(),
         isTrue,
       );
@@ -799,7 +802,7 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 250));
 
       expect(controller.chapterIndex, 1);
-      expect(controller.currentChapter?.id, 'c2');
+      expect(controller.currentChapter?.id, '7002');
     });
 
     test('间隔期间关闭会话：不再自动切章', () async {

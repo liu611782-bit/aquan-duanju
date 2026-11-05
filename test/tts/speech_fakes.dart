@@ -251,9 +251,13 @@ class RecordingStore extends ListenProgressStore {
   }
 }
 
+/// 章节 id 必须是**纯数字**：控制器 `start()` 有硬闸门——非数字 id（第三方书源 /
+/// 本地书）一律走本地合成，即使音色表探测成功也不碰音轨接口。用 'c1' 这类占位
+/// id 会让所有「音轨路径」用例静默跌到 TTS，断言全部失真。
+/// 需要验证闸门本身时，单独用非数字 id 构造章节（见 speech_path_switch_test）。
 const List<BookChapter> harnessChapters = <BookChapter>[
-  BookChapter(id: 'c1', title: '第一章 起风了', index: 0),
-  BookChapter(id: 'c2', title: '第二章 雪停了', index: 1),
+  BookChapter(id: '7001', title: '第一章 起风了', index: 0),
+  BookChapter(id: '7002', title: '第二章 雪停了', index: 1),
 ];
 
 /// 一套完整的开播环境：临时缓存目录 + 假件 + 被建出来的控制器（统一 dispose）。

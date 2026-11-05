@@ -16,6 +16,7 @@ import 'package:aquan_duanju/core/reader/reader_speech_controller.dart';
 import 'package:aquan_duanju/core/reader/reader_speech_settings.dart';
 import 'package:aquan_duanju/core/tts/tts_models.dart';
 import 'package:aquan_duanju/models/audio.dart';
+import 'package:aquan_duanju/models/book.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -315,6 +316,33 @@ void main() {
         throwsA(isA<TtsException>()),
       );
       expect(controller.ttsEngineId, 'edge');
+    });
+  });
+
+  group('非数字章节 id 的硬闸门', () {
+    test('第三方书 / URL 章节 id：即使有音色表也走本地合成', () async {
+      // 闸门存在的原因：番茄音轨接口只认数字 item id，第三方书拿 URL 去请求会失败。
+      // 用 'c1' 这类占位 id 写音轨用例会静默跌到 TTS —— 夹具必须用纯数字（见
+      // speech_fakes.dart 的 harnessChapters）。
+      harness.api.tones = _recordedTones;
+      harness.api.timepoints = _threeParagraphPoints;
+      final engine = FakeTts();
+      final controller = harness.build(engine);
+
+      await controller.start(
+        bookId: 'csp_book',
+        bookTitle: '第三方书',
+        coverUrl: '',
+        chapters: const <BookChapter>[
+          BookChapter(id: 'https://example.com/ch1', title: '第一章', index: 0),
+        ],
+        chapterIndex: 0,
+      );
+
+      expect(controller.tone, isNull, reason: '非数字 id 必须清掉音色');
+      expect(controller.activePath, SpeechPath.cloudTts);
+      expect(engine.calls, greaterThan(0), reason: '必须落到本地合成');
+      expect(harness.api.audioStreamCalls, 0, reason: '不碰音轨接口');
     });
   });
 }
