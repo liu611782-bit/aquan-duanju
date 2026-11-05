@@ -6,6 +6,7 @@ import '../core/books/provider/wenku8_page.dart';
 import '../core/books/provider/wenku8_provider.dart';
 import '../widgets/common.dart';
 import '../widgets/cookie_dialog.dart';
+import '../widgets/skeleton.dart';
 import 'book_source_book_page.dart';
 
 /// 内置 Wenku8 书城：**排行 / 分类** 两个维度浏览，点书进详情。
@@ -225,7 +226,7 @@ class _Wenku8BrowseScreenState extends State<Wenku8BrowseScreen>
 
   Widget _buildClass() {
     if (!_classReady) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: SkeletonView(layout: SkeletonLayout.list));
     }
     if (_classes.isEmpty) {
       final error = _classError;
@@ -313,7 +314,7 @@ class _Wenku8BrowseScreenState extends State<Wenku8BrowseScreen>
   }) {
     final theme = Theme.of(context);
     if (loading && hits.isEmpty) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: SkeletonView(layout: SkeletonLayout.list));
     }
     if (hits.isEmpty) {
       if (error != null && error is! StateError) {

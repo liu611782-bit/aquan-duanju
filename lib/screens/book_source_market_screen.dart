@@ -9,6 +9,7 @@ import '../core/books/book_source_seed.dart';
 import '../core/books/book_source_store.dart';
 import '../core/books/builtin_sources.dart';
 import '../widgets/common.dart';
+import '../widgets/skeleton.dart';
 
 /// 书源仓库：扫描内置种子 → 逐源三连校验（搜书/详情/目录）→ 勾选导入。
 ///
@@ -255,11 +256,12 @@ class _BookSourceMarketScreenState extends State<BookSourceMarketScreen> {
           const Divider(height: 16),
           Expanded(
             child: _results.isEmpty
-                ? Center(
-                    child: _scanning
-                        ? const CircularProgressIndicator()
-                        : Text('点「开始扫描」从内置 ${builtinBookSeeds.length} 个种子抓取可用书源',
-                            style: theme.textTheme.bodyMedium))
+                ? (_scanning
+                    ? const SkeletonView(layout: SkeletonLayout.list)
+                    : Center(
+                        child: Text(
+                            '点「开始扫描」从内置 ${builtinBookSeeds.length} 个种子抓取可用书源',
+                            style: theme.textTheme.bodyMedium)))
                 : ListView.builder(
                     itemCount: _results.length,
                     itemBuilder: (context, i) {

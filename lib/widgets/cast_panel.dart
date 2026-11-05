@@ -41,6 +41,9 @@ Future<String?> showCastSheet(
   BuildContext context, {
   required CastMedia media,
   required Future<void> Function() onLocalPause,
+  /// 默认勾选「镜像屏幕」：加密分集的中继起不来时，镜像是唯一不依赖 ffmpeg
+  /// 的通路（MediaProjection → MediaCodec → MPEG-TS）。
+  bool initialMirrorMode = false,
 }) async {
   final scope = AppScope.read(context);
   final controller = castController;
@@ -57,7 +60,11 @@ Future<String?> showCastSheet(
   if (context.mounted) {
     await showModalBottomSheet<String>(
       context: context,
-      builder: (sheetContext) => _CastDeviceSheet(scope: scope, media: media),
+      builder: (sheetContext) => _CastDeviceSheet(
+        scope: scope,
+        media: media,
+        initialMirrorMode: initialMirrorMode,
+      ),
     );
     result = controller.isCasting ? 'started' : null;
   }
@@ -71,10 +78,15 @@ Future<String?> showCastSheet(
 
 /// 设备选择抽屉。
 class _CastDeviceSheet extends StatefulWidget {
-  const _CastDeviceSheet({required this.scope, required this.media});
+  const _CastDeviceSheet({
+    required this.scope,
+    required this.media,
+    this.initialMirrorMode = false,
+  });
 
   final AppScope scope;
   final CastMedia media;
+  final bool initialMirrorMode;
 
   @override
   State<_CastDeviceSheet> createState() => _CastDeviceSheetState();
@@ -85,6 +97,12 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
   bool _connecting = false;
   bool _mirrorMode = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _mirrorMode = widget.initialMirrorMode;
+  }
 
   @override
   void dispose() {

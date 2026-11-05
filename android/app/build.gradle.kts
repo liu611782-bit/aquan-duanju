@@ -66,6 +66,15 @@ android {
             }
         }
     }
+
+    packaging {
+        jniLibs {
+            // libffmpeg.so 是 PIE 可执行文件（不是共享库）：必须解压到
+            // nativeLibraryDir 才能 exec；strip 会把它改坏，务必跳过。
+            useLegacyPackaging = true
+            keepDebugSymbols += "**/libffmpeg.so"
+        }
+    }
 }
 
 dependencies {

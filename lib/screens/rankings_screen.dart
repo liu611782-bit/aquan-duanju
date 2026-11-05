@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/models.dart';
+import '../widgets/back_to_top.dart';
 import '../widgets/common.dart';
 import 'detail_screen.dart';
 import 'filter_screen.dart';
@@ -26,6 +27,9 @@ class _RankingsScreenState extends State<RankingsScreen>
   bool _loadingMore = false;
   Object? _error;
 
+  /// 榜单列表滚动控制器：给「回到顶部」用。
+  final ScrollController _listScroll = ScrollController();
+
   @override
   bool get wantKeepAlive => true;
 
@@ -33,6 +37,12 @@ class _RankingsScreenState extends State<RankingsScreen>
   void initState() {
     super.initState();
     _reload();
+  }
+
+  @override
+  void dispose() {
+    _listScroll.dispose();
+    super.dispose();
   }
 
   Future<void> _reload() async {
@@ -198,6 +208,7 @@ class _RankingsScreenState extends State<RankingsScreen>
               ),
             Expanded(
               child: ListView.builder(
+                controller: _listScroll,
                 itemCount: _items.length + (_hasMore ? 1 : 0),
                 itemBuilder: (context, i) {
                   if (i >= _items.length) {
@@ -220,6 +231,7 @@ class _RankingsScreenState extends State<RankingsScreen>
           ],
         ),
       ),
+      floatingActionButton: BackToTopFab(controller: _listScroll),
     );
   }
 }

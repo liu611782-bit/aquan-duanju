@@ -11,6 +11,7 @@ import '../core/sources/source_import.dart';
 import '../core/sources/source_probe.dart';
 import '../store/stores.dart';
 import '../widgets/common.dart';
+import '../widgets/skeleton.dart';
 import 'live_player_screen.dart';
 
 /// 直播页：TVBox lives 配置 → 频道分组浏览 → 测速 → 播放。
@@ -233,7 +234,7 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 
   Widget _buildChannels(ThemeData theme) {
-    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_loading) return const Center(child: SkeletonView(layout: SkeletonLayout.grid));
     if (_error != null) {
       return ErrorRetryView(error: _error!, onRetry: _load);
     }

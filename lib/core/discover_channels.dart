@@ -199,18 +199,23 @@ List<SeriesSummary> rankItemsToSummaries(List<RankItem> items) {
 
 /// 剧集 id → 名次角标文案。
 ///
-/// 两条服务端事实决定了这里的取数口径（见 `protocol.ParseShortRank`）：
-/// - `rank` 来自 `recommend_info`，缺失时为 0，所以回落到 `position`；
-/// - `promoted` 行（「平台推荐」）的名次复制了下一行，直接跳过，否则同一页
-///   会出现两个「第5」。
-Map<String, String> rankBadges(List<RankItem> items) {
+/// 只认 `position`，**不读 `recommend_info.rank`**：服务端对同一页的多行都会
+/// 下发 `rank: 1`（实测两个相邻卡片同时是「第1」），用它必然重复。
+/// `position` 是解析器按返回顺序生成的 `len(items)+1`，页内唯一且递增。
+///
+/// 另外两条约束：
+/// - `position` 是**页内**序号，下一页从 1 重来，所以翻页必须由调用方把已加载
+///   的原始条目数作为 [offset] 传进来，否则第二页又从「第1」开始；
+/// - `promoted` 行（「平台推荐」）不显示名次，但它**仍占一个 position**，
+///   所以 [offset] 要按包含它的原始条目数累加，不能用去重后的展示条目数。
+Map<String, String> rankBadges(List<RankItem> items, {int offset = 0}) {
   final out = <String, String>{};
   for (final item in items) {
     final id = item.seriesId.trim();
     if (id.isEmpty || item.promoted) continue;
-    final place = item.rank > 0 ? item.rank : item.position;
-    if (place <= 0) continue;
-    out[id] = '第$place';
+    final pagePlace = item.position;
+    if (pagePlace <= 0) continue;
+    out[id] = '第${pagePlace + offset}';
   }
   return out;
 }

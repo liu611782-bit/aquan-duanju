@@ -43,9 +43,10 @@ void main() {
       }
     });
 
-    test('未知 code 回落默认文案', () {
+    test('未知 code 回落默认文案并带上 code（便于定位）', () {
       final e = AquaException.fromJson(const {'code': 'WHATEVER'});
-      expect(e.friendlyText, '出了点小问题，请稍后再试');
+      expect(e.friendlyText, '出了点小问题（WHATEVER），请稍后再试');
+      expect(e.friendlyText, contains('WHATEVER'));
     });
   });
 }

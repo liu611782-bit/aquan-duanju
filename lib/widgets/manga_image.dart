@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../core/aqua_api.dart';
 import '../core/image_cache_store.dart';
+import '../core/image_key.dart';
 import 'common.dart';
 
 /// 漫画的一页：字节由 core 下载并按整话密钥解密，这里负责缓存与展示。
@@ -101,10 +102,12 @@ class MangaPageProvider extends ImageProvider<MangaPageProvider> {
 
   @override
   bool operator ==(Object other) =>
-      other is MangaPageProvider && other.url == url && other.key == key;
+      other is MangaPageProvider &&
+      stableImageKey(other.url) == stableImageKey(url) &&
+      other.key == key;
 
   @override
-  int get hashCode => Object.hash(url, key);
+  int get hashCode => Object.hash(stableImageKey(url), key);
 }
 
 /// 漫画页字节缓存：内存 LRU → 磁盘（flutter_cache_manager）→ core 解密。
@@ -118,7 +121,10 @@ class MangaPageCache {
   final Map<String, Uint8List> _memory = {};
   final Map<String, Future<Uint8List>> _inFlight = {};
 
-  static String _cacheKey(String url, String key) => 'manga:$key:$url';
+  /// 缓存的磁盘/内存 key。URL 先规范化：漫画图同样走带签名的 CDN 直链，
+  /// 签名变化不该导致整页重下重解密。
+  static String _cacheKey(String url, String key) =>
+      'manga:$key:${stableImageKey(url)}';
 
   Future<Uint8List> load(String url, String key, MangaPageFetcher api) {
     final cacheKey = _cacheKey(url, key);

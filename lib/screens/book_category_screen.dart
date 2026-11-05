@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../core/error_log.dart';
 import '../models/models.dart';
+import '../widgets/back_to_top.dart';
 import '../widgets/common.dart';
 import 'book_detail_screen.dart';
 
@@ -275,10 +276,19 @@ class _BookCategoryListScreenState extends State<BookCategoryListScreen> {
   bool _hasMore = false;
   int _seq = 0;
 
+  /// 书单网格滚动控制器：给「回到顶部」用。
+  final ScrollController _listScroll = ScrollController();
+
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _listScroll.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -399,6 +409,7 @@ class _BookCategoryListScreenState extends State<BookCategoryListScreen> {
               child: RefreshIndicator(
                 onRefresh: _load,
                 child: SeriesGrid(
+                  controller: _listScroll,
                   items: _items,
                   hasMore: _hasMore,
                   onLoadMore: _loadMore,
@@ -417,6 +428,7 @@ class _BookCategoryListScreenState extends State<BookCategoryListScreen> {
           ),
         ],
       ),
+      floatingActionButton: BackToTopFab(controller: _listScroll),
     );
   }
 }

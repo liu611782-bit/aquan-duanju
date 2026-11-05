@@ -87,23 +87,34 @@ class ImageCacheStore {
   }
 
   /// 解析自描述文件；损坏（头非法 / 不可读）返回 null。
+  ///
+  /// **只读头部**（4 字节长度 + key），不要 `readAsBytes()` 读整个文件：
+  /// 首次访问要扫描整个缓存目录，几千个文件全量读入会让首图卡住好几秒。
   Future<_ImageCacheEntry?> _parseFile(File file) async {
+    RandomAccessFile? raf;
     try {
-      final bytes = await file.readAsBytes();
-      if (bytes.length < 4) return null;
-      final view = ByteData.sublistView(bytes);
-      final keyLen = view.getUint32(0, Endian.little);
-      if (keyLen == 0 || keyLen > 4096 || 4 + keyLen > bytes.length) return null;
-      final key = utf8.decode(bytes.sublist(4, 4 + keyLen), allowMalformed: true);
+      raf = await file.open();
+      final head = await raf.read(4);
+      if (head.length < 4) return null;
+      final keyLen =
+          ByteData.sublistView(Uint8List.fromList(head)).getUint32(0, Endian.little);
+      if (keyLen == 0 || keyLen > 4096) return null;
+      final keyBytes = await raf.read(keyLen);
+      if (keyBytes.length < keyLen) return null;
+      final key = utf8.decode(keyBytes, allowMalformed: true);
       final stat = await file.stat();
       return _ImageCacheEntry(
         key: key,
         file: file,
-        bytes: bytes.length,
+        bytes: stat.size,
         lastAccess: stat.modified,
       );
     } catch (_) {
       return null;
+    } finally {
+      try {
+        await raf?.close();
+      } catch (_) {}
     }
   }
 
@@ -120,10 +131,11 @@ class ImageCacheStore {
       final view = ByteData.sublistView(bytes);
       final keyLen = view.getUint32(0, Endian.little);
       if (4 + keyLen > bytes.length) throw const FormatException('bad header');
+      // 直接返回视图，省掉一次整图拷贝（解码器只读，不需要可变副本）。
       final payload = Uint8List.sublistView(bytes, 4 + keyLen);
       // LRU 续期（内存序 + 文件 mtime）。
       _entries[key] = entry..touch();
-      return Uint8List.fromList(payload);
+      return payload;
     } catch (_) {
       _entries.remove(key);
       try {

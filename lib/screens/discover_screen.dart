@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/aqua_error.dart';
 import '../core/discover_channels.dart';
+import '../core/history_rail_collapse.dart';
 import '../models/models.dart';
 import '../store/stores.dart';
+import '../widgets/back_to_top.dart';
 import '../widgets/common.dart';
 import '../widgets/reading_rail.dart';
 import 'book_aggregation_screen.dart';
@@ -36,6 +40,11 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   final _items = <SeriesSummary>[];
   final _badges = <String, String>{};
 
+  /// 榜单已加载的**原始**条目数（含不显示名次的「平台推荐」行）。
+  ///
+  /// 服务端的名次是页内序号，下一页必须加上这个偏移才能接续。
+  int _rawCount = 0;
+
   /// [channelKey] → (榜单内容 id, 榜单 id)。榜单目录由服务端下发，选定一次就
   /// 固定；翻页必须带同一组值，否则游标无法续接。
   final _rankTargets = <String, ({String content, String board})>{};
@@ -59,13 +68,57 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   /// 不会覆盖后发起的那次。
   int _seq = 0;
 
+  /// 历史条（继续观看 / 最近在读）的折叠状态。
+  ///
+  /// 不持久化：每次进入页面都是展开的。用户手动展开后，直到滚回顶部之前
+  /// 不再自动折叠，否则「刚点开就被下一次滚动收起」。
+  final ScrollController _scroll = ScrollController();
+  bool _historyCollapsed = false;
+  bool _manualExpandUntilTop = false;
+
   @override
   bool get wantKeepAlive => true;
 
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_onScroll);
     _reload();
+  }
+
+  @override
+  void dispose() {
+    _scroll.removeListener(_onScroll);
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final offset = _scroll.offset;
+    // 回到顶部才自动展开，避免上滑后立刻又弹回来。
+    if (shouldUnfoldHistoryRail(offset: offset, collapsed: _historyCollapsed)) {
+      setState(() {
+        _historyCollapsed = false;
+        _manualExpandUntilTop = false;
+      });
+      return;
+    }
+    if (shouldFoldHistoryRail(
+      offset: offset,
+      collapsed: _historyCollapsed,
+      manualExpand: _manualExpandUntilTop,
+    )) {
+      setState(() => _historyCollapsed = true);
+    }
+  }
+
+  /// 历史条标题行的 ↑ / ↓ 按钮。
+  void _toggleHistory() {
+    setState(() {
+      _historyCollapsed = !_historyCollapsed;
+      _manualExpandUntilTop = !_historyCollapsed;
+    });
   }
 
   Future<void> _reload({bool allowFallback = true}) async {
@@ -91,8 +144,11 @@ class _DiscoverScreenState extends State<DiscoverScreen>
           ..addAll(page.badges);
         _cursor = page.cursor;
         _hasMore = page.hasMore;
+        _rawCount = page.rawCount;
         _loading = false;
       });
+      // 网格改成 sliver 后不再由 SeriesGrid 内部预取，这里补上首屏预热。
+      _warmCovers();
       // 榜单降级提示只在这次结果真正落地时弹，避免切走后弹出过期提示。
       final notice = page.notice;
       if (notice != null) _snack(notice);
@@ -131,7 +187,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     final channel = _channel;
     _loadingMore = true;
     try {
-      final page = await _fetchPage(type, channel, _cursor);
+      final page = await _fetchPage(type, channel, _cursor, offset: _rawCount);
       if (!mounted || seq != _seq) return;
       final fresh = _dedupe(page.items);
       setState(() {
@@ -144,6 +200,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         }
         _badges.addAll(page.badges);
         _cursor = page.cursor;
+        _rawCount += page.rawCount;
       });
     } catch (_) {
       // 触底加载失败静默，下次触底再试。榜单目录可能已失效，丢掉缓存让
@@ -155,6 +212,24 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       // 只有这一代请求才有资格解锁：被切类型顶掉的旧请求不能把新请求的
       // 翻页锁清掉，否则会重复追加同一页。
       if (seq == _seq) _loadingMore = false;
+    }
+  }
+
+  /// 预热首屏封面（前 12 张）。
+  ///
+  /// 网格改成 sliver 之后不再走 `SeriesGrid` 内置的 `CoverPrefetch`，但预取
+  /// 本身仍然有价值：命中时 `AquaImageCache.load` 直接返回内存/磁盘字节。
+  void _warmCovers() {
+    if (_items.isEmpty) return;
+    final api = AppScope.read(context).api;
+    for (final item in _items.take(12)) {
+      if (item.coverUrl.isEmpty) continue;
+      unawaited(
+        AquaImageCache.instance.load(item.coverUrl, api).then(
+              (_) {},
+              onError: (Object _) {},
+            ),
+      );
     }
   }
 
@@ -172,8 +247,15 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   }
 
   /// 按频道来源取一页，两个数据源都归一化成 [_ChannelPage]。
+  ///
+  /// [offset] 是「已经展示过的榜单原始条目数」，只对榜单频道有意义：服务端
+  /// 的名次是页内序号，翻页时必须由调用方补偏移，否则第二页又从「第1」开始。
   Future<_ChannelPage> _fetchPage(
-      ContentType type, DiscoverChannel channel, String cursor) async {
+    ContentType type,
+    DiscoverChannel channel,
+    String cursor, {
+    int offset = 0,
+  }) async {
     final api = AppScope.read(context).api;
     if (channel.source == DiscoverSource.feed) {
       final page = await api.discover(channel: channel.value, cursor: cursor);
@@ -181,6 +263,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         items: page.items,
         cursor: page.cursor,
         hasMore: page.hasMore,
+        rawCount: page.items.length,
       );
     }
 
@@ -205,9 +288,10 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         // 目录缺失时直接展示服务端默认榜，翻页仍可续接游标。
         return _ChannelPage(
           items: rankItemsToSummaries(ranking.items),
-          badges: rankBadges(ranking.items),
+          badges: rankBadges(ranking.items, offset: offset),
           cursor: ranking.cursor,
           hasMore: ranking.hasMore,
+          rawCount: ranking.items.length,
         );
       }
       _rankTargets[key] = (content: contentId, board: board.id);
@@ -221,10 +305,11 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     }
     return _ChannelPage(
       items: rankItemsToSummaries(ranking.items),
-      badges: rankBadges(ranking.items),
+      badges: rankBadges(ranking.items, offset: offset),
       notice: notice,
       cursor: ranking.cursor,
       hasMore: ranking.hasMore,
+      rawCount: ranking.items.length,
     );
   }
 
@@ -234,6 +319,9 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     setState(() {
       _type = type;
       _channel = _lastChannelByType[type.name] ?? type.channels.first;
+      // 换 tag 回到展开态：新的 tag 有自己的历史条。
+      _historyCollapsed = false;
+      _manualExpandUntilTop = false;
     });
     _reload();
   }
@@ -283,12 +371,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     switch (type.name) {
       case '短剧':
       case '漫剧':
-      case '电影':
-        final genre = switch (type.name) {
-          '短剧' => 'short_play',
-          '漫剧' => 'comic_series',
-          _ => 'movie',
-        };
+        final genre = type.name == '短剧' ? 'short_play' : 'comic_series';
         return [
           card(Icons.live_tv, '影视聚合', 'TVBox / 采集站源聚合搜索与观看',
               () => Navigator.of(context).push(
@@ -297,6 +380,16 @@ class _DiscoverScreenState extends State<DiscoverScreen>
               '体裁、年代、主题、排序筛选',
               () => Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => FilterScreen(initialGenre: genre)))),
+        ];
+      case '电影':
+        // 服务端 shortFilter 只接受 short_play / comic_series / ai_series，
+        // 没有电影体裁：传 'movie' 会命中 SDK 的 unknown genre 校验并报错。
+        // 电影的真实来源是影视聚合（TVBox 源），所以这里不给分类入口。
+        return [
+          card(Icons.live_tv, '影视聚合',
+              'TVBox / 采集站源聚合搜索与观看；电影分类筛选暂未开放',
+              () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const MediaHubScreen()))),
         ];
       case '小说':
         return [
@@ -366,6 +459,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
               child: RefreshIndicator(
                 onRefresh: _reload,
                 child: CustomScrollView(
+                  controller: _scroll,
                   physics: const AlwaysScrollableScrollPhysics(),
                   slivers: [
                     // 统一 IA：每个 tag 两张入口卡——「XX聚合」+「按分类找XX」。
@@ -374,11 +468,28 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                     // 继续观看只在影视类 tab；「最近在读」按小说/漫画分域
                     // （各 tag 的历史记录互不混排）。
                     if (_type.kind == ContentKind.video)
-                      const SliverToBoxAdapter(child: _ContinueRail()),
+                      SliverToBoxAdapter(
+                        child: _ContinueRail(
+                          collapsed: _historyCollapsed,
+                          onToggleCollapsed: _toggleHistory,
+                        ),
+                      ),
                     if (_type.kind == ContentKind.book)
-                      const SliverToBoxAdapter(child: ReadingRail(manga: false)),
+                      SliverToBoxAdapter(
+                        child: ReadingRail(
+                          manga: false,
+                          collapsed: _historyCollapsed,
+                          onToggleCollapsed: _toggleHistory,
+                        ),
+                      ),
                     if (_type.kind == ContentKind.manga)
-                      const SliverToBoxAdapter(child: ReadingRail(manga: true)),
+                      SliverToBoxAdapter(
+                        child: ReadingRail(
+                          manga: true,
+                          collapsed: _historyCollapsed,
+                          onToggleCollapsed: _toggleHistory,
+                        ),
+                      ),
                     if (_type.channels.length > 1)
                       SliverToBoxAdapter(
                         child: _ChannelBar(
@@ -389,15 +500,15 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                       ),
                     if (_type.notice.isNotEmpty)
                       SliverToBoxAdapter(child: _NoticeBar(text: _type.notice)),
-                    SliverFillRemaining(
-                      hasScrollBody: true,
-                      child: SeriesGrid(
-                        items: _items,
-                        hasMore: _hasMore,
-                        onLoadMore: _loadMore,
-                        badgeOf: (item) => _badges[item.id],
-                        onTap: _open,
-                      ),
+                    // 必须用 sliver 网格，不能用 SliverFillRemaining + SeriesGrid：
+                    // 后者会形成第二个滚动视口，滚网格时外层 offset 不变，
+                    // 历史条的自动收起就只在页面上半部分生效。
+                    SliverSeriesGrid(
+                      items: _items,
+                      hasMore: _hasMore,
+                      onLoadMore: _loadMore,
+                      badgeOf: (item) => _badges[item.id],
+                      onTap: _open,
                     ),
                   ],
                 ),
@@ -406,6 +517,8 @@ class _DiscoverScreenState extends State<DiscoverScreen>
           ),
         ],
       ),
+      // 四个内容 tab 共用同一个滚动控制器，所以一个按钮就够。
+      floatingActionButton: BackToTopFab(controller: _scroll),
     );
   }
 }
@@ -640,10 +753,15 @@ class _ChannelPage {
     this.notice,
     this.cursor = '',
     this.hasMore = false,
+    this.rawCount = 0,
   });
 
   final List<SeriesSummary> items;
   final Map<String, String> badges;
+
+  /// 服务端这一页返回的**原始**条目数（含被跳过名次的「平台推荐」行）。
+  /// 下一页的「第 N」= 页内序号 + 已加载原始条目数。
+  final int rawCount;
 
   /// 这次结果的轻提示（如榜单降级），由调用方在结果落地时弹出。
   final String? notice;
@@ -655,7 +773,13 @@ class _ChannelPage {
 /// 「继续观看」：最近没看完的剧横排，点了直接续播到上次那一集那一秒。
 /// 看完的（finished）不出现；看完入口在「我的 → 观看历史」。
 class _ContinueRail extends StatelessWidget {
-  const _ContinueRail();
+  const _ContinueRail({this.collapsed = false, this.onToggleCollapsed});
+
+  /// true = 折叠成一条约 40dp 的标题栏（不渲染卡片）。
+  final bool collapsed;
+
+  /// 收起/展开回调；null 表示不显示按钮。
+  final VoidCallback? onToggleCollapsed;
 
   @override
   Widget build(BuildContext context) {
@@ -670,28 +794,61 @@ class _ContinueRail extends StatelessWidget {
             .take(10)
             .toList();
         if (entries.isEmpty) return const SizedBox.shrink();
+        final theme = Theme.of(context);
         return Padding(
           padding: const EdgeInsets.only(top: 8, bottom: 4),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 16),
-                child: Text('继续观看',
-                    style: TextStyle(fontWeight: FontWeight.bold)),
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                height: 172,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  children: [
-                    for (final e in entries) _ContinueCard(entry: e),
-                  ],
+          child: AnimatedSize(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            alignment: Alignment.topCenter,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(left: 16, right: 4),
+                  child: Row(
+                    children: [
+                      const Text('继续观看',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                      if (collapsed) ...[
+                        const SizedBox(width: 8),
+                        Text('共${entries.length}部',
+                            style: theme.textTheme.labelSmall
+                                ?.copyWith(color: theme.colorScheme.outline)),
+                      ],
+                      const Spacer(),
+                      if (onToggleCollapsed != null)
+                        IconButton(
+                          tooltip: collapsed ? '展开继续观看' : '收起继续观看',
+                          onPressed: onToggleCollapsed,
+                          visualDensity: VisualDensity.compact,
+                          icon: Icon(
+                            collapsed
+                                ? Icons.keyboard_arrow_down
+                                : Icons.keyboard_arrow_up,
+                            size: 20,
+                          ),
+                        )
+                      else
+                        const SizedBox(width: 12),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+                if (!collapsed) ...[
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 172,
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      children: [
+                        for (final e in entries) _ContinueCard(entry: e),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ),
         );
       },

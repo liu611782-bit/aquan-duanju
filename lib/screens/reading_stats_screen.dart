@@ -8,6 +8,7 @@ import '../core/reader/reader_annotations.dart';
 import '../core/stats/reading_stats.dart';
 import '../widgets/common.dart';
 import '../widgets/quote_card.dart';
+import '../widgets/skeleton.dart';
 
 /// 阅读统计 + 摘录卡。
 ///
@@ -83,7 +84,7 @@ class _ReadingStatsScreenState extends State<ReadingStatsScreen>
   Widget _buildStats() {
     final snapshot = _snapshot;
     if (snapshot == null) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: SkeletonView(layout: SkeletonLayout.list));
     }
     final theme = Theme.of(context);
     final today = DateTime.now();

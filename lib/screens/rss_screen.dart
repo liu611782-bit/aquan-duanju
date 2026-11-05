@@ -10,6 +10,7 @@ import '../core/rss/rss_feed.dart';
 import '../core/rss/rss_models.dart';
 import '../core/rss/rss_store.dart';
 import '../widgets/common.dart';
+import '../widgets/skeleton.dart';
 
 /// 订阅（RSS/Atom）阅读器：源列表 → 文章列表 → 正文。
 ///
@@ -138,7 +139,7 @@ class _RssScreenState extends State<RssScreen> {
         ],
       ),
       body: store == null
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(child: SkeletonView(layout: SkeletonLayout.list))
           : ListenableBuilder(
               listenable: store,
               builder: (context, _) {
@@ -256,7 +257,7 @@ class _RssArticleListScreenState extends State<RssArticleListScreen> {
         ],
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(child: SkeletonView(layout: SkeletonLayout.list))
           : _error != null
               ? ErrorRetryView(error: _error!, onRetry: _load)
               : _articles.isEmpty

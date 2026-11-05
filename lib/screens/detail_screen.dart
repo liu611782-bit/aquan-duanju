@@ -3,10 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../core/aqua_api.dart';
+import '../core/season_number.dart';
 import '../models/models.dart';
 import '../store/stores.dart';
 import '../widgets/common.dart';
+import '../widgets/back_to_top.dart';
 import '../widgets/download_sheet.dart';
+import '../widgets/skeleton.dart';
 import 'player_screen.dart';
 import 'search_screen.dart';
 
@@ -50,6 +53,9 @@ class _DetailScreenState extends State<DetailScreen> {
   /// 同名搜索结果（标题去自身去重后的条目）；null = 未加载/加载中。
   List<SeriesSummary>? _sameName;
 
+  /// 详情页主滚动控制器：给「回到顶部」用。
+  final ScrollController _pageScroll = ScrollController();
+
   /// 标题含「第X季/部」「合集」记号的结果 → 同名系列；其余 → 同名单剧。
   static final RegExp _seasonMark =
       RegExp(r'第\s*[0-9一二三四五六七八九十]+\s*[季部]|[（(]\s*第?[0-9一二三四五六七八九十]+\s*[季部]\s*[)）]|合集');
@@ -58,6 +64,12 @@ class _DetailScreenState extends State<DetailScreen> {
   void initState() {
     super.initState();
     _reload();
+  }
+
+  @override
+  void dispose() {
+    _pageScroll.dispose();
+    super.dispose();
   }
 
   Future<void> _reload() async {
@@ -182,11 +194,12 @@ class _DetailScreenState extends State<DetailScreen> {
     final series = _series;
     return Scaffold(
       body: _loading
-          ? const SkeletonGrid(columns: 1)
+          ? const SkeletonView(layout: SkeletonLayout.detail)
           : _error != null
               ? ErrorRetryView(error: _error!, onRetry: _reload)
               : SafeArea(
                   child: CustomScrollView(
+                    controller: _pageScroll,
                     slivers: [
                       SliverAppBar(
                         pinned: true,
@@ -206,8 +219,15 @@ class _DetailScreenState extends State<DetailScreen> {
                     ],
                   ),
                 ),
-      floatingActionButton: (!_loading && _error == null && _episodes.isNotEmpty)
-          ? FloatingActionButton.extended(
+      // 详情页已经有「继续播放」FAB，不能抢占插槽：回顶按钮排在它上方。
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          BackToTopFab(controller: _pageScroll),
+          if (!_loading && _error == null && _episodes.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            FloatingActionButton.extended(
               onPressed: () {
                 final (ep, start) = _resumeTarget();
                 _play(ep, start);
@@ -227,8 +247,10 @@ class _DetailScreenState extends State<DetailScreen> {
                   return Text(ep);
                 },
               ),
-            )
-          : null,
+            ),
+          ],
+        ],
+      ),
     );
   }
 
@@ -262,21 +284,30 @@ class _DetailScreenState extends State<DetailScreen> {
     final theme = Theme.of(context);
     final items = _sameName;
     if (items == null) return const SizedBox.shrink();
-    // Season 不是 SeriesSummary 的子类：cast 懒视图会在 build 迭代时抛
-    // TypeError（release 表现为整页灰），两套 tile 必须分开渲染。
-    final seasons = _album?.seasons ?? const <Season>[];
-    final series = [
+    // 「季与合集」只由 album 提供（同一合集即同一作者）。这里既不再重复渲染
+    // 该分组，也要剔除合集内已有条目，只留真正的其他作品。
+    //
+    // 搜索结果不返回 author 字段，无法按作者做严格过滤；合集成员关系是
+    // 「同作者」在当前数据下唯一可信的依据。
+    final albumIds = <String>{
+      for (final s in _album?.seasons ?? const <Season>[]) s.seriesId,
+    };
+    final others = [
       for (final s in items)
+        if (s.id != widget.seriesId && !albumIds.contains(s.id)) s,
+    ];
+    final series = [
+      for (final s in others)
         if (_seasonMark.hasMatch(s.title) || _seasonMark.hasMatch(s.description))
           s,
     ];
     final singles = [
-      for (final s in items)
+      for (final s in others)
         if (!_seasonMark.hasMatch(s.title) &&
             !_seasonMark.hasMatch(s.description))
           s,
     ];
-    if (seasons.isEmpty && series.isEmpty && singles.isEmpty) {
+    if (series.isEmpty && singles.isEmpty) {
       return const SizedBox.shrink();
     }
     Widget group(String label, List<Widget> tiles) => tiles.isEmpty
@@ -319,33 +350,6 @@ class _DetailScreenState extends State<DetailScreen> {
             ),
         ];
 
-    List<Widget> seasonTiles() => [
-          for (final s in seasons)
-            ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: SizedBox(
-                width: 44,
-                height: 60,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(6),
-                  child: CoverImage(url: s.coverUrl),
-                ),
-              ),
-              title: Text(s.title,
-                  maxLines: 1, overflow: TextOverflow.ellipsis),
-              subtitle: Text(
-                  s.seriesId == widget.seriesId
-                      ? '当前季'
-                      : '共${s.episodeCount}集',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis),
-              onTap: s.seriesId == widget.seriesId
-                  ? null
-                  : () => openDetail(context, s.seriesId, s.title),
-            ),
-        ];
-
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
       child: Column(
@@ -354,7 +358,6 @@ class _DetailScreenState extends State<DetailScreen> {
           Text('同名系列',
               style: theme.textTheme.titleMedium
                   ?.copyWith(fontWeight: FontWeight.bold)),
-          group('季与合集', seasonTiles()),
           group('同名系列', tileList(series)),
           group('同名单剧', tileList(singles)),
         ],
@@ -601,7 +604,7 @@ class _DetailScreenState extends State<DetailScreen> {
               style: theme.textTheme.titleMedium
                   ?.copyWith(fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
-          for (final s in _album!.seasons)
+          for (final (i, s) in _album!.seasons.indexed)
             ListTile(
               dense: true,
               contentPadding: EdgeInsets.zero,
@@ -613,7 +616,10 @@ class _DetailScreenState extends State<DetailScreen> {
                   child: CoverImage(url: s.coverUrl),
                 ),
               ),
-              title: Text('${s.index}. ${s.title}',
+              // 上游 season_index 缺失时为 0，直接打印会出现「0. 万妖图录传」。
+              title: Text(
+                  seasonTitleLabel(
+                      index: s.index, title: s.title, position: i),
                   maxLines: 1, overflow: TextOverflow.ellipsis),
               subtitle: Text(s.seriesId == widget.seriesId
                   ? '当前季'

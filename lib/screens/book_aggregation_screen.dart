@@ -11,6 +11,7 @@ import '../core/error_log.dart';
 import '../core/sources/source_fetch.dart';
 import '../widgets/common.dart';
 import '../widgets/cookie_dialog.dart';
+import '../widgets/skeleton.dart';
 import 'book_source_book_page.dart';
 import 'book_source_market_screen.dart';
 import 'rss_screen.dart';
@@ -151,7 +152,7 @@ class _BookAggregationScreenState extends State<BookAggregationScreen> {
           ),
           Expanded(
             child: _searching
-                ? const Center(child: CircularProgressIndicator())
+                ? const Center(child: SkeletonView(layout: SkeletonLayout.list))
                 : _hits.isEmpty
                     ? _buildEmpty(theme)
                     : ListView.builder(

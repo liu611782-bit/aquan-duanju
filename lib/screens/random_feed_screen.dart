@@ -6,6 +6,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../core/aqua_error.dart';
 import '../models/models.dart';
 import '../widgets/common.dart';
+import '../widgets/skeleton.dart';
 import 'detail_screen.dart';
 
 /// 随机播放：全屏竖滑 feed（仿红果「随机看」）。
@@ -222,7 +223,7 @@ class _RandomFeedScreenState extends State<RandomFeedScreen>
   Widget build(BuildContext context) {
     super.build(context);
     if (_loadingPool && _pool.isEmpty) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(body: SkeletonView(layout: SkeletonLayout.grid));
     }
     if (_error != null && _pool.isEmpty) {
       return Scaffold(

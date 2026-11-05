@@ -20,7 +20,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -328,19 +330,90 @@ func buildFFmpegArgs(ffmpeg string, opts relayOptions, dir string, decKey string
 	return args
 }
 
-// findFFmpeg：应用目录（exe 旁）优先，其次 PATH。
+// findFFmpeg 按优先级定位可执行的 ffmpeg。
+//
+// Android 上没有 PATH 里的 ffmpeg，也没有「exe 同目录」的概念：二进制由
+// jniLibs 打包、系统解压到 nativeLibraryDir，文件名 libffmpeg.so（是 PIE
+// 可执行文件而不是共享库，改名只是为了让它进 nativeLibraryDir）。
+// 因此额外两跳：环境变量 AQUAN_FFMPEG → nativeLibraryDir。
 func findFFmpeg() (string, error) {
-	if exe, err := os.Executable(); err == nil {
-		local := filepath.Join(filepath.Dir(exe), "ffmpeg.exe")
-		if _, err := os.Stat(local); err == nil {
-			return local, nil
+	if p := os.Getenv("AQUAN_FFMPEG"); isExecutableFile(p) {
+		return p, nil
+	}
+	if dir := nativeLibraryDir(); dir != "" {
+		for _, name := range []string{"libffmpeg.so", "ffmpeg"} {
+			p := filepath.Join(dir, name)
+			if isExecutableFile(p) {
+				return p, nil
+			}
 		}
-		local = filepath.Join(filepath.Dir(exe), "ffmpeg")
-		if _, err := os.Stat(local); err == nil {
-			return local, nil
+	}
+	if exe, err := os.Executable(); err == nil {
+		for _, name := range []string{"ffmpeg.exe", "ffmpeg"} {
+			p := filepath.Join(filepath.Dir(exe), name)
+			if isExecutableFile(p) {
+				return p, nil
+			}
 		}
 	}
 	return exec.LookPath("ffmpeg")
+}
+
+// isExecutableFile 要求路径存在、是普通文件、且有任一执行位。
+//
+// Windows 不看权限位（os.Stat 在那里的 perm 不反映 ACL），只看存在性——
+// 桌面端原本就是「exe 旁有 ffmpeg.exe 就用」，不能因为权限位判断退化。
+func isExecutableFile(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return info.Mode().Perm()&0o111 != 0
+}
+
+// nativeLibraryDir 在 Android 上定位应用的原生库目录。
+//
+// Go 侧拿不到 Java 的 ApplicationInfo，但进程 maps 里一定有 libaquan_core.so，
+// 它所在目录就是 nativeLibraryDir。非 Android 直接返回空串。
+func nativeLibraryDir() string {
+	if runtime.GOOS != "android" {
+		return ""
+	}
+	data, err := os.ReadFile("/proc/self/maps")
+	if err != nil {
+		return ""
+	}
+	return parseNativeLibDir(string(data))
+}
+
+// parseNativeLibDir 从 /proc/self/maps 内容里取出 libaquan_core.so 所在目录。
+//
+// 行格式：`7f... r-xp 00000000 fd:01 1234 /data/app/.../lib/arm64/libaquan_core.so`
+// 第 6 列是映射文件路径。
+func parseNativeLibDir(maps string) string {
+	for _, line := range strings.Split(maps, "\n") {
+		if !strings.Contains(line, "libaquan_core.so") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		mapped := fields[5]
+		if !strings.HasPrefix(mapped, "/") {
+			continue
+		}
+		// maps 里的路径永远是 POSIX 形式：必须用 path 而不是 filepath，
+		// 否则在 Windows 上跑单测会被改写成反斜杠。
+		return path.Dir(mapped)
+	}
+	return ""
 }
 
 // cleanProxyEnv 清空全部代理变量（上游是签名直链）。

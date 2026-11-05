@@ -1,12 +1,27 @@
 import 'package:flutter/material.dart';
 
+import '../widgets/back_to_top.dart';
 import '../widgets/common.dart';
 import 'detail_screen.dart';
 
 /// 全部观看历史：完整列表（不再截断 10 条），单条可删、可一键清空，
 /// 点条目进详情页（播放中的会按秒续播）。
-class HistoryScreen extends StatelessWidget {
+class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
+
+  @override
+  State<HistoryScreen> createState() => _HistoryScreenState();
+}
+
+class _HistoryScreenState extends State<HistoryScreen> {
+  /// 列表滚动控制器：给「回到顶部」用。
+  final ScrollController _scroll = ScrollController();
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -58,6 +73,7 @@ class HistoryScreen extends StatelessWidget {
             );
           }
           return ListView.separated(
+            controller: _scroll,
             itemCount: entries.length,
             separatorBuilder: (_, _) => const Divider(height: 1),
             itemBuilder: (context, i) {
@@ -92,6 +108,7 @@ class HistoryScreen extends StatelessWidget {
           );
         },
       ),
+      floatingActionButton: BackToTopFab(controller: _scroll),
     );
   }
 

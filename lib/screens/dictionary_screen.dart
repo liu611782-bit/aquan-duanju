@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../core/dict/dictionary_store.dart';
 import '../core/dict/stardict.dart';
+import '../widgets/skeleton.dart';
 
 /// 离线词典：导入 StarDict（.ifo + .idx + .dict），查词与前后缀建议。
 ///
@@ -105,7 +106,7 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
         ],
       ),
       body: store == null
-          ? const Center(child: CircularProgressIndicator())
+          ? const SkeletonView(layout: SkeletonLayout.list)
           : ListView(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
               children: [

@@ -20,11 +20,15 @@
     <!-- 应用内更新：下载完 APK 后调起系统安装器（用户仍需确认安装）。 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
+    <!-- extractNativeLibs：内置的 libffmpeg.so 是 PIE 可执行文件，必须被系统
+         解压到 nativeLibraryDir 才能 exec（castrelay 的 Android 解密中继）。
+         见 android/ffmpeg/README.md。 -->
     <application
         android:label="阿圈短剧"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true"
+        android:extractNativeLibs="true"
         android:enableOnBackInvokedCallback="true">
         <activity
             android:name=".MainActivity"

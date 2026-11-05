@@ -1,6 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../core/auto_retry.dart';
+import '../core/error_log.dart';
 import '../models/models.dart';
+import '../widgets/back_to_top.dart';
 import '../widgets/common.dart';
 import 'detail_screen.dart';
 
@@ -29,7 +34,25 @@ class _FilterScreenState extends State<FilterScreen> {
   bool _loadingMore = false;
   Object? _error;
 
+  /// 请求代际：只有最新一次请求的响应能落地，避免快速连点标签时旧响应
+  /// 后到并覆盖新选择。面板与结果分开计数。
+  int _panelSeq = 0;
+  int _resultSeq = 0;
+
+  /// 已经用掉的自动重试次数（手动重试会清零）。
+  int _panelRetry = 0;
+  int _resultRetry = 0;
+
   late String _genre = widget.initialGenre;
+
+  /// 选择防抖：连点多个标签时只发最后一次请求。
+  ///
+  /// 匿名设备有服务端配额，一次连点能打出七八个请求，既浪费配额又容易触发
+  /// `ANONYMOUS_LIMITED`。
+  Timer? _selectDebounce;
+
+  /// 结果网格的滚动控制器：给「回到顶部」用。
+  final ScrollController _resultScroll = ScrollController();
 
   @override
   void initState() {
@@ -37,7 +60,16 @@ class _FilterScreenState extends State<FilterScreen> {
     _loadPanel();
   }
 
-  Future<void> _loadPanel() async {
+  @override
+  void dispose() {
+    _selectDebounce?.cancel();
+    _resultScroll.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadPanel({bool resetRetry = true}) async {
+    if (resetRetry) _panelRetry = 0;
+    final seq = ++_panelSeq;
     setState(() {
       _loadingPanel = true;
       _error = null;
@@ -45,7 +77,7 @@ class _FilterScreenState extends State<FilterScreen> {
     try {
       final rows =
           await AppScope.read(context).api.shortFilterPanel(_genre);
-      if (!mounted) return;
+      if (!mounted || seq != _panelSeq) return;
       setState(() {
         _rows = rows;
         _selections.clear();
@@ -56,7 +88,17 @@ class _FilterScreenState extends State<FilterScreen> {
       });
       await _reloadResults();
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || seq != _panelSeq) return;
+      // 面板失败时整页只剩错误页，自动重试比让用户手点更有价值；
+      // 重试期间保持骨架（_loadingPanel 仍为 true）。
+      final delay = worthAutoRetry(e) ? autoRetryDelay(_panelRetry) : null;
+      if (delay != null) {
+        _panelRetry++;
+        await Future<void>.delayed(delay);
+        if (!mounted || seq != _panelSeq) return;
+        return _loadPanel(resetRetry: false);
+      }
+      ErrorLog.instance.record('筛选', '面板加载失败：$e', StackTrace.current);
       setState(() {
         _error = e;
         _loadingPanel = false;
@@ -69,7 +111,9 @@ class _FilterScreenState extends State<FilterScreen> {
     await _loadPanel();
   }
 
-  Future<void> _reloadResults() async {
+  Future<void> _reloadResults({bool resetRetry = true}) async {
+    if (resetRetry) _resultRetry = 0;
+    final seq = ++_resultSeq;
     setState(() {
       _loadingResults = true;
       _error = null;
@@ -78,7 +122,7 @@ class _FilterScreenState extends State<FilterScreen> {
       final page = await AppScope.read(context)
           .api
           .shortFilter(_asQuery());
-      if (!mounted) return;
+      if (!mounted || seq != _resultSeq) return;
       setState(() {
         _items
           ..clear()
@@ -88,7 +132,15 @@ class _FilterScreenState extends State<FilterScreen> {
         _loadingResults = false;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || seq != _resultSeq) return;
+      final delay = worthAutoRetry(e) ? autoRetryDelay(_resultRetry) : null;
+      if (delay != null) {
+        _resultRetry++;
+        await Future<void>.delayed(delay);
+        if (!mounted || seq != _resultSeq) return;
+        return _reloadResults(resetRetry: false);
+      }
+      ErrorLog.instance.record('筛选', '结果加载失败：$e', StackTrace.current);
       setState(() {
         _error = e;
         _loadingResults = false;
@@ -107,26 +159,56 @@ class _FilterScreenState extends State<FilterScreen> {
     } else {
       _selections[key] = value;
     }
-    _reloadResults();
+    // chip 选中态立即刷新，请求本身防抖：连点时只有最后一次真正发出。
+    setState(() {});
+    _selectDebounce?.cancel();
+    _selectDebounce = Timer(const Duration(milliseconds: 250), () {
+      unawaited(_reloadResults());
+    });
   }
 
   Future<void> _loadMore() async {
     if (_loadingMore || !_hasMore || _loadingResults) return;
+    final seq = _resultSeq;
     _loadingMore = true;
     try {
       final page = await AppScope.read(context)
           .api
           .shortFilter(_asQuery(), cursor: _cursor);
-      if (!mounted) return;
+      // 期间换过筛选条件：这一页属于旧查询，不能追加。
+      if (!mounted || seq != _resultSeq) return;
       setState(() {
         _items.addAll(page.items);
         _cursor = page.cursor;
         _hasMore = page.hasMore;
       });
-    } catch (_) {
+    } catch (e) {
+      ErrorLog.instance.record('筛选', '加载更多失败：$e', StackTrace.current);
     } finally {
       _loadingMore = false;
     }
+  }
+
+  /// 一键换一台匿名设备再重拉。
+  ///
+  /// 这是「匿名访问上限 / 设备被拒」的正规恢复路径：限流不是靠重试能绕过的，
+  /// 换设备后服务端会当作新访客重新计算配额。
+  Future<void> _resetDeviceAndRetry() async {
+    final api = AppScope.read(context).api;
+    try {
+      await api.resetDevice();
+    } catch (e) {
+      ErrorLog.instance.record('筛选', '重置设备失败：$e', StackTrace.current);
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(content: Text('重置设备失败，请稍后再试')));
+      }
+      return;
+    }
+    if (!mounted) return;
+    _panelRetry = 0;
+    _resultRetry = 0;
+    await _loadPanel();
   }
 
   @override
@@ -161,12 +243,24 @@ class _FilterScreenState extends State<FilterScreen> {
       body: _loadingPanel
           ? const SkeletonGrid(columns: 1)
           : _error != null && _rows.isEmpty
-              ? ErrorRetryView(error: _error!, onRetry: _loadPanel)
+              ? ErrorRetryView(
+                  error: _error!,
+                  onRetry: () => _loadPanel(),
+                  onResetDevice: deviceRecoverable(_error!)
+                      ? () => _resetDeviceAndRetry()
+                      : null,
+                )
               : Column(
                   children: [
                     // 筛选行。
                     ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 260),
+                      // minWidth 撑满：SingleChildScrollView 传给 child 的是松约束，
+                      // Column 会 shrink-wrap 到最宽 chip 的宽度；chip 少的体裁
+                      // （如漫剧）就塌成居中，与短剧的左对齐不一致。
+                      constraints: const BoxConstraints(
+                        maxHeight: 260,
+                        minWidth: double.infinity,
+                      ),
                       child: SingleChildScrollView(
                         padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
                         child: Column(
@@ -214,10 +308,11 @@ class _FilterScreenState extends State<FilterScreen> {
                       child: LoadView(
                         loading: _loadingResults,
                         error: _error,
-                        onRetry: _reloadResults,
+                        onRetry: () => _reloadResults(),
                         empty: _items.isEmpty,
                         emptyText: '没有符合筛选的短剧',
                         child: SeriesGrid(
+                          controller: _resultScroll,
                           items: _items,
                           hasMore: _hasMore,
                           onLoadMore: _loadMore,
@@ -228,6 +323,7 @@ class _FilterScreenState extends State<FilterScreen> {
                     ),
                   ],
                 ),
+      floatingActionButton: BackToTopFab(controller: _resultScroll),
     );
   }
 

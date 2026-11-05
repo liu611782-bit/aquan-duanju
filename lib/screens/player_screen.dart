@@ -29,6 +29,7 @@ import '../core/playback_failure.dart';
 import '../core/playback_fallback.dart';
 import '../core/playback_recovery.dart';
 import '../core/playback_utils.dart';
+import '../core/player_layout.dart';
 import '../core/player/player_engine.dart';
 import '../core/player/track_preference.dart';
 import '../core/progress_throttle.dart';
@@ -205,6 +206,17 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// 桌面「铺满」模式：画面 cover 裁剪填充窗口（抖音式），再点切回 contain。
   bool _fill = false;
+
+  /// 播放方向：auto = 跟随传感器；locked = 由「横屏/竖屏」按钮锁定。
+  ///
+  /// 移动端进页**一律先竖屏**（含横屏电影），横屏画面靠 `BoxFit.contain`
+  /// 在竖屏容器里上下留黑边；用户旋转设备或点按钮才横过来。
+  _OrientationMode _orientMode = _OrientationMode.auto;
+  bool _lockedLandscape = false;
+
+  /// 首次 `_applyOrientation` 已执行（换集不再强制竖屏）。
+  bool _orientationReady = false;
+  Timer? _orientationUnlockTimer;
 
   bool get _isDesktop =>
       Platform.isWindows || Platform.isMacOS || Platform.isLinux;
@@ -450,6 +462,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     WakelockPlus.disable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    _orientationUnlockTimer?.cancel();
     _restoreOrientation();
     super.dispose();
   }
@@ -460,16 +473,69 @@ class _PlayerScreenState extends State<PlayerScreen>
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
   }
 
-  /// 按片源方向自动摆正：竖屏剧竖着看，横屏剧横着看。
-  void _applyOrientation(Episode episode) {
+  /// 进页首次摆正：**一律先竖屏**（含横屏电影），随后按模式放开给传感器。
+  ///
+  /// 换集不再强制竖屏，也不重置用户的手动锁定——横屏看剧换集被掰回竖屏很难受。
+  void _applyOrientation() {
     if (_isDesktop) return;
-    if (episode.vertical) {
-      SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-    } else {
+    if (_orientationReady) {
+      if (_orientMode == _OrientationMode.auto) _applyAutoOrientation();
+      return;
+    }
+    _orientationReady = true;
+    _portraitOnly();
+    if (_orientMode != _OrientationMode.auto) return;
+    // 立刻竖屏 → 400ms 后放开三方向：既满足「进页竖屏」，又让物理旋转能生效。
+    // 锁定方向后 MediaQuery 不再变化，跟随传感器只能交给系统按
+    // preferredOrientations 处理（在 build 里判断会形成锁定循环）。
+    _orientationUnlockTimer?.cancel();
+    _orientationUnlockTimer = Timer(const Duration(milliseconds: 400), () {
+      if (!mounted || _orientMode != _OrientationMode.auto) return;
+      _applyAutoOrientation();
+    });
+  }
+
+  void _portraitOnly() {
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  }
+
+  void _applyAutoOrientation() {
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+  }
+
+  void _applyLockedOrientation() {
+    if (_lockedLandscape) {
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.landscapeLeft,
         DeviceOrientation.landscapeRight,
       ]);
+    } else {
+      _portraitOnly();
+    }
+  }
+
+  /// 「横屏/竖屏」按钮：自动 ⇄ 锁定；锁定方向取当前姿态的反方向。
+  void _toggleOrientation() {
+    if (_isDesktop) return;
+    final isLandscape =
+        MediaQuery.orientationOf(context) == Orientation.landscape;
+    _orientationUnlockTimer?.cancel();
+    setState(() {
+      if (_orientMode == _OrientationMode.auto) {
+        _orientMode = _OrientationMode.locked;
+        _lockedLandscape = !isLandscape;
+      } else {
+        _orientMode = _OrientationMode.auto;
+      }
+    });
+    if (_orientMode == _OrientationMode.locked) {
+      _applyLockedOrientation();
+    } else {
+      _applyAutoOrientation();
     }
   }
 
@@ -863,7 +929,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       });
       await _playLocal(local, effectiveStart);
       if (_disposed || epoch != _openEpoch) return;
-      _applyOrientation(ep);
+      _applyOrientation();
       _updateSmtcMetadata();
       _recordHistory(finished: false);
       _showOpeningNoticeIfNeeded();
@@ -894,7 +960,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       });
       await _playStream(stream, effectiveStart);
       if (_disposed || epoch != _openEpoch) return;
-      _applyOrientation(ep);
+      _applyOrientation();
       await _maybeFitWindow(stream, ep);
       _updateSmtcMetadata();
       _recordHistory(finished: false);
@@ -1716,6 +1782,52 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  /// 窄屏底栏放不下时，「更多」里的睡眠定时二级选择。
+  Future<void> _pickSleepTimer() async {
+    const options = <int>[0, 15, 30, 60];
+    final picked = await showModalBottomSheet<int>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final m in options)
+              ListTile(
+                title: Text(m == 0 ? '不定时' : '$m 分钟后暂停'),
+                trailing: _sleepMinutes == m ? const Icon(Icons.check) : null,
+                onTap: () => Navigator.pop(sheetContext, m),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (picked != null && mounted) _setSleepTimer(picked);
+  }
+
+  /// 窄屏底栏放不下时，「更多」里的倍速二级选择。
+  Future<void> _pickSpeed() async {
+    const options = <double>[0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
+    final picked = await showModalBottomSheet<double>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final v in options)
+              ListTile(
+                title: Text('${_trimSpeed(v)}x'),
+                trailing: _speed == v ? const Icon(Icons.check) : null,
+                onTap: () => Navigator.pop(sheetContext, v),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (picked != null && mounted) await _applySpeed(picked);
+  }
+
   /// 睡眠定时：到点暂停播放；选「关」取消。
   void _setSleepTimer(int minutes) {
     _sleepTimer?.cancel();
@@ -2142,8 +2254,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       return;
     }
     var castUrl = stream.url;
+    // 中继起不来（典型：系统没有可执行的 ffmpeg）时不再把整条投屏路堵死，
+    // 改为弹面板并默认勾选「镜像屏幕」——镜像走 MediaProjection，不依赖 ffmpeg。
+    var needsMirror = false;
     if (playback.contentKey != null) {
-      // M3：加密分集走本机中继（ffmpeg 解密转 HLS），失败降级为明确提示。
+      // M3：加密分集走本机中继（ffmpeg 解密转 HLS）。
       try {
         final relay = await AppScope.read(context).api.castRelayStart(
           url: stream.url,
@@ -2155,11 +2270,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         castUrl = relay['url'] as String? ?? castUrl;
         _showToast('已启动本机解密中继');
       } on AquaException catch (e) {
-        _showToast(e.friendlyText);
-        return;
+        needsMirror = true;
+        _showToast('${e.friendlyText}；已切换为镜像屏幕投屏');
       } catch (e) {
-        _showToast('加密中继启动失败：$e');
-        return;
+        needsMirror = true;
+        _showToast('加密中继启动失败，已切换为镜像屏幕投屏');
+        ErrorLog.instance.record('投屏', '中继启动失败：$e', StackTrace.current);
       }
     }
     if (!mounted) {
@@ -2233,6 +2349,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       context,
       media: media,
       onLocalPause: () => _engine.pause(),
+      initialMirrorMode: needsMirror,
     );
     if (!mounted || result == null) {
       // 用户取消：中继会话留着会被空闲回收，但立即回收更干净。
@@ -2681,6 +2798,12 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Widget _buildControls(BuildContext context) {
     final ep = widget.episodes[_index];
+    // 竖屏 360dp 级设备上，底栏固定子项合计约 394dp，会把最右侧「横屏/竖屏」
+    // 按钮裁掉一半。窄屏把睡眠定时与倍速收进「更多」菜单（见 player_layout.dart）。
+    final compactBar = useCompactPlayerBar(
+      desktop: _isDesktop,
+      width: MediaQuery.sizeOf(context).width,
+    );
     return GestureDetector(
       onTap: _toggleControls,
       child: Container(
@@ -2889,12 +3012,18 @@ class _PlayerScreenState extends State<PlayerScreen>
                             case 'screenshot':
                               _captureScreenshot();
                               break;
+                            case 'sleep':
+                              unawaited(_pickSleepTimer());
+                              break;
+                            case 'speed':
+                              unawaited(_pickSpeed());
+                              break;
                             case 'help':
                               _showShortcutHelp();
                               break;
                           }
                         },
-                        itemBuilder: (_) => const [
+                        itemBuilder: (_) => [
                           PopupMenuItem(
                             value: 'skip',
                             child: Text('片头片尾',
@@ -2925,10 +3054,23 @@ class _PlayerScreenState extends State<PlayerScreen>
                             child: Text('快捷键',
                                 style: TextStyle(color: Colors.white)),
                           ),
+                          if (!compactBar) ...[
+                            PopupMenuItem(
+                              value: 'sleep',
+                              child: Text('睡眠定时',
+                                  style: TextStyle(color: Colors.white)),
+                            ),
+                            PopupMenuItem(
+                              value: 'speed',
+                              child: Text('播放倍速',
+                                  style: TextStyle(color: Colors.white)),
+                            ),
+                          ],
                         ],
                       ),
-                      // 睡眠定时
-                      PopupMenuButton<int>(
+                      // 睡眠定时（窄屏收进「更多」）
+                      if (!compactBar)
+                        PopupMenuButton<int>(
                         tooltip: '睡眠定时',
                         initialValue: _sleepMinutes,
                         color: Colors.grey.shade900,
@@ -2963,8 +3105,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                           ),
                         ),
                       ),
-                      // 倍速
-                      PopupMenuButton<double>(
+                      // 倍速（窄屏收进「更多」）
+                      if (!compactBar)
+                        PopupMenuButton<double>(
                         initialValue: _speed,
                         color: Colors.grey.shade900,
                         // 倍速按剧记忆，换剧不再重调。
@@ -3020,28 +3163,27 @@ class _PlayerScreenState extends State<PlayerScreen>
                               color: Colors.white),
                         ),
                       IconButton(
-                        tooltip: _isDesktop ? '全屏 (F)' : '横屏/竖屏',
-                        onPressed: () async {
+                        tooltip: _isDesktop
+                            ? '全屏 (F)'
+                            : _orientMode == _OrientationMode.locked
+                                ? '恢复自动旋转'
+                                : MediaQuery.orientationOf(context) ==
+                                        Orientation.landscape
+                                    ? '锁定竖屏'
+                                    : '锁定横屏',
+                        onPressed: () {
                           if (_isDesktop) {
-                            await _toggleFullscreen();
+                            unawaited(_toggleFullscreen());
                             return;
                           }
-                          final isLandscape = MediaQuery.orientationOf(
-                                  context) ==
-                              Orientation.landscape;
-                          if (isLandscape) {
-                            _restoreOrientation();
-                          } else {
-                            await SystemChrome.setPreferredOrientations([
-                              DeviceOrientation.landscapeLeft,
-                              DeviceOrientation.landscapeRight,
-                            ]);
-                          }
+                          _toggleOrientation();
                         },
                         icon: Icon(
                             _isDesktop
                                 ? Icons.fullscreen
-                                : Icons.screen_rotation,
+                                : _orientMode == _OrientationMode.locked
+                                    ? Icons.screen_lock_rotation
+                                    : Icons.screen_rotation,
                             color: Colors.white),
                       ),
                     ],
@@ -3055,6 +3197,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 }
+
+/// 播放方向模式：跟随传感器 / 手动锁定。
+enum _OrientationMode { auto, locked }
 
 enum _DragKind { seek, brightness, volume }
 

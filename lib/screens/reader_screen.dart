@@ -36,6 +36,7 @@ import '../store/stores.dart';
 import '../widgets/book_directory_sheet.dart';
 import '../widgets/common.dart';
 import '../widgets/reader/reader_click_zone_editor.dart';
+import '../widgets/skeleton.dart';
 
 /// 本章内搜索面板。
 class _ChapterSearchSheet extends StatefulWidget {
@@ -2179,7 +2180,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       return _buildPaged(theme);
     }
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: SkeletonView(layout: SkeletonLayout.detail));
     }
     final error = _error;
     if (error != null) {

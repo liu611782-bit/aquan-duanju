@@ -6,6 +6,7 @@ import '../core/books/book_source_model.dart';
 import '../core/books/book_source_service.dart';
 import '../models/book.dart';
 import '../widgets/common.dart';
+import '../widgets/skeleton.dart';
 import 'reader_screen.dart';
 
 /// 外部/内置书源的书籍详情：封面 / 作者 / 简介 / 目录 → 点章进阅读器。
@@ -109,7 +110,7 @@ class _BookSourceBookPageState extends State<BookSourceBookPage> {
     return Scaffold(
       appBar: AppBar(title: Text(widget.hit.name.isEmpty ? '书籍详情' : widget.hit.name)),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(child: SkeletonView(layout: SkeletonLayout.detail))
           : _error != null
               ? ErrorRetryView(error: _error!, onRetry: _load)
               : ListView(

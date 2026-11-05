@@ -15,6 +15,7 @@ import '../widgets/book_directory_sheet.dart';
 import '../widgets/common.dart';
 import '../widgets/manga_image.dart';
 import '../widgets/manga_zoom_page.dart';
+import '../widgets/skeleton.dart';
 
 /// 漫画阅读页：竖向连续看图 + 目录抽屉 + 上下话切换 + 进度记忆。
 class MangaReaderScreen extends StatefulWidget {
@@ -501,7 +502,7 @@ class _MangaReaderScreenState extends State<MangaReaderScreen> {
 
   Widget _buildBody() {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: SkeletonView(layout: SkeletonLayout.detail));
     }
     final error = _error;
     if (error != null) {

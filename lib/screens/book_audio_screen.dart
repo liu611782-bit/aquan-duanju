@@ -26,6 +26,7 @@ import '../store/stores.dart';
 import '../widgets/common.dart';
 import '../widgets/reader/follow_pill.dart';
 import '../widgets/reader/sleep_sheet.dart';
+import '../widgets/skeleton.dart';
 import 'reader_screen.dart';
 
 /// 听书页 → 阅读页的定位比例（章内 0..1）。
@@ -930,7 +931,7 @@ class _BookAudioScreenState extends State<BookAudioScreen>
               ),
             )
           : _loadingTones
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(child: SkeletonView(layout: SkeletonLayout.list))
           : (_error != null && _tones == null)
               ? ErrorRetryView(error: _error!, onRetry: _loadTones)
               : (_tones == null || _tones!.tones.isEmpty)

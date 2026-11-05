@@ -10,6 +10,7 @@ import '../core/sources/venera/venera_manga_source.dart';
 import '../models/book.dart';
 import '../models/manga.dart';
 import '../widgets/common.dart';
+import '../widgets/skeleton.dart';
 import 'manga_reader_screen.dart';
 
 /// Venera 漫画源浏览：探索页（分类）+ 搜索 + 详情 + 阅读器。
@@ -238,7 +239,7 @@ class _VeneraMangaScreenState extends State<VeneraMangaScreen> {
           ),
         Expanded(
           child: _comicsLoading
-              ? const Center(child: CircularProgressIndicator())
+              ? const Center(child: SkeletonView(layout: SkeletonLayout.grid))
               : _comics.isEmpty
                   ? Center(
                       child: Text('这里空空如也',

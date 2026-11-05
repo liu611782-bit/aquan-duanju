@@ -61,6 +61,25 @@ def build_windows(version: str, out: Path | None = None) -> Path:
     return target
 
 
+def stage_android_ffmpeg(jni: Path) -> None:
+    """把仓库内的 libffmpeg-<abi>.so 落位成 jniLibs/<abi>/libffmpeg.so。
+
+    jniLibs 整体被 .gitignore 排除（Go 产物每次重建），所以内置的 ffmpeg 二进制
+    放在 android/ffmpeg/ 里纳入版本控制，构建时再拷进 jniLibs——否则 CI 打出的
+    APK 不含 ffmpeg，加密分集只能退化成镜像投屏。
+    """
+    src_dir = REPO / "android" / "ffmpeg"
+    for abi in ("arm64-v8a", "armeabi-v7a"):
+        src = src_dir / f"libffmpeg-{abi}.so"
+        if not src.exists():
+            print(f"skip ffmpeg for {abi}: {src} 不存在")
+            continue
+        dst = jni / abi / "libffmpeg.so"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        print(f"staged {dst}")
+
+
 def build_android(version: str, ndk: str) -> None:
     ndk_path = Path(ndk)
     toolchain = ndk_path / "toolchains" / "llvm" / "prebuilt"
@@ -88,6 +107,9 @@ def build_android(version: str, ndk: str) -> None:
                "-o", str(so), "."]
         run(cmd, env)
         print(f"built {so}")
+
+    # jniLibs 被 .gitignore 排除：ffmpeg 二进制从 android/ffmpeg 落位进来。
+    stage_android_ffmpeg(jni)
 
 
 def build_linux(version: str) -> None:

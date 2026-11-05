@@ -88,8 +88,14 @@ class AquaException implements Exception {
         return '中继会话已结束';
       case AquaCode.castRelayInternal:
         return '中继启动失败，请重试';
+      case AquaCode.paramInvalid:
+      case AquaCode.invalidOptions:
+        return '请求参数无效，请更新到新版本';
+      case AquaCode.signerUnavailable:
+        return '签名组件不可用，请更新到新版本';
       default:
-        return '出了点小问题，请稍后再试';
+        // 带上原始 code：只给「出了点小问题」时，用户反馈里没有任何可定位信息。
+        return '出了点小问题（$code），请稍后再试';
     }
   }
 
