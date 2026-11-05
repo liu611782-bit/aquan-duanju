@@ -129,11 +129,9 @@ const List<ContentType> kContentTypes = <ContentType>[
   // 听书（tab_type 5）已下线：专辑与曲目都能取到，但播放地址接口 novelfm 按
   // 应用家族校验 aid，本设备是 hongguo 家族，实测三种参数组合均为
   // 403 invalid aid / 400，无法播放。实现已从仓库移除（历史提交 fb94da0）。
-  ContentType(
-    name: '漫画',
-    channels: [DiscoverChannel(name: '推荐', value: '漫画')],
-    kind: ContentKind.manga,
-  ),
+  // 漫画 tab 已从发现页下线（2026-11-05）：进入后整窗黑屏且无法返回。
+  // Venera 源 / 阅读器链路待单独排查；代码保留，修好后把上面的 ContentType
+  // 加回即可恢复入口（发现页 `_entriesFor('漫画')` 的入口卡也一并复活）。
   // 社区不再作为「内容类型」：tab_type 33 下发的是书籍流，放进类型条会让人以为
   // 「社区」是一类小说。社区是独立板块（话题 → 帖子 → 帖子详情），入口在发现页
   // 顶栏（社区图标），帖子数据来自「讨论」搜索（tab_type 31），

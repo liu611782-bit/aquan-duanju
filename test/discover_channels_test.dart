@@ -10,8 +10,10 @@ void main() {
         '漫剧',
         '电影',
         '小说',
-        '漫画',
       ]);
+      // 漫画 tab 因「进入即黑屏且无法返回」已下线（2026-11-05）；
+      // 修复 Venera 源 / 阅读器链路后再把 ContentType 加回。
+      expect(kContentTypes.any((t) => t.name == '漫画'), isFalse);
     });
 
     test('默认类型与默认频道是首项本身', () {
@@ -86,9 +88,7 @@ void main() {
         );
       }
       final novel = kContentTypes.firstWhere((t) => t.name == '小说');
-      final manga = kContentTypes.firstWhere((t) => t.name == '漫画');
       expect(novel.kind, ContentKind.book);
-      expect(manga.kind, ContentKind.manga);
       // 社区不在内容类型条里：它是发现页顶栏的独立入口。
       expect(kContentTypes.any((t) => t.name == '社区'), isFalse);
     });
@@ -98,9 +98,9 @@ void main() {
       expect(novel.kind, ContentKind.book);
     });
 
-    test('漫画类型进图片阅读器', () {
-      final manga = kContentTypes.firstWhere((t) => t.name == '漫画');
-      expect(manga.kind, ContentKind.manga);
+    test('漫画类型已从发现页下线', () {
+      // 进入即黑屏且无法返回，先整体下线入口；修复后再恢复 ContentKind.manga。
+      expect(kContentTypes.any((t) => t.kind == ContentKind.manga), isFalse);
     });
   });
 
