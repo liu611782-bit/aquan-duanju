@@ -48,9 +48,10 @@ class _FilterScreenState extends State<FilterScreen> {
       if (!mounted) return;
       setState(() {
         _rows = rows;
-        _selections
-          ..clear()
-          ..['genre'] = _genre;
+        _selections.clear();
+        // 空字符串 = 全部体裁（服务端 default scene）：不写入 genre，
+        // 否则会发出空值筛选被 SDK 拒绝（empty value for short filter row）。
+        if (_genre.isNotEmpty) _selections['genre'] = _genre;
         _loadingPanel = false;
       });
       await _reloadResults();
@@ -140,6 +141,7 @@ class _FilterScreenState extends State<FilterScreen> {
             initialValue: _genre,
             onSelected: _switchGenre,
             itemBuilder: (_) => const [
+              PopupMenuItem(value: '', child: Text('全部体裁')),
               PopupMenuItem(value: 'short_play', child: Text('真人剧')),
               PopupMenuItem(value: 'comic_series', child: Text('漫剧')),
               PopupMenuItem(value: 'ai_series', child: Text('AI 剧')),
@@ -179,13 +181,24 @@ class _FilterScreenState extends State<FilterScreen> {
                                 spacing: 8,
                                 runSpacing: 6,
                                 children: [
+                                  // 每行都有「全部」：清掉该行条件（缺省行 = 全部）。
+                                  // genre 行走体裁切换，避免页头标签与查询不一致。
+                                  ChoiceChip(
+                                    label: const Text('全部'),
+                                    selected:
+                                        !_selections.containsKey(row.key),
+                                    onSelected: (_) => row.key == 'genre'
+                                        ? _switchGenre('')
+                                        : _select(row.key, ''),
+                                  ),
                                   for (final opt in row.options)
                                     ChoiceChip(
                                       label: Text(opt.name),
                                       selected:
                                           _selections[row.key] == opt.value,
-                                      onSelected: (_) =>
-                                          _select(row.key, opt.value),
+                                      onSelected: (_) => row.key == 'genre'
+                                          ? _switchGenre(opt.value)
+                                          : _select(row.key, opt.value),
                                     ),
                                 ],
                               ),
@@ -219,6 +232,7 @@ class _FilterScreenState extends State<FilterScreen> {
   }
 
   String _genreLabel(String genre) => switch (genre) {
+        '' => '全部体裁',
         'comic_series' => '漫剧',
         'ai_series' => 'AI 剧',
         _ => '真人剧',
