@@ -413,6 +413,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     await _engine.setProperty('demuxer-max-bytes', '64MiB');
     await _engine.setProperty('force-seekable', 'yes');
     // Android 走 mediacodec；其余平台用用户选择的硬解方式（白名单已校验）。
+    // 默认值是 auto-copy（拷回）：零拷贝直通在 ANGLE 下会因解码纹理 16 像素对齐
+    // 在画面右侧/底部留下绿边，见 SettingsStore.defaultHwdecMode。
     final hwdec = Platform.isAndroid
         ? (settings.hwdecMode == 'no' ? 'no' : 'mediacodec')
         : settings.hwdecMode;

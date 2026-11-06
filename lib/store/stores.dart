@@ -327,10 +327,18 @@ class SettingsStore extends ChangeNotifier {
 
   // ---------- 播放器高级设置（带白名单 / 范围校验） ----------
 
+  /// 默认硬解方式：拷回（copy）路径。
+  ///
+  /// 零拷贝直通（旧默认 `auto-safe` / `d3d11va`）在 Windows + ANGLE 下，解码纹理
+  /// 按 16 像素对齐（1080 → 1088），多出的列/行不会被裁掉，YUV 未写入区域经色彩
+  /// 转换后是绿色：竖屏片源在画面右侧留一条绿竖条，横屏片源在底部留一条绿横条。
+  /// 拷回模式拿到的已是裁剪后的帧，因此作为默认值。
+  static const String defaultHwdecMode = 'auto-copy';
+
   static const List<String> hwdecValues = [
-    'auto-safe',
-    'd3d11va',
+    'auto-copy',
     'd3d11va-copy',
+    'd3d11va',
     'dxva2',
     'nvdec',
     'cuda',
@@ -338,9 +346,9 @@ class SettingsStore extends ChangeNotifier {
   ];
 
   static const Map<String, String> hwdecLabels = {
-    'auto-safe': '自动（推荐）',
-    'd3d11va': 'D3D11VA 硬解',
+    'auto-copy': '自动（推荐）',
     'd3d11va-copy': 'D3D11VA 拷回模式',
+    'd3d11va': 'D3D11VA 直通（可能绿边）',
     'dxva2': 'DXVA2（旧显卡）',
     'nvdec': 'NVIDIA NVDEC',
     'cuda': 'NVIDIA CUDA',
@@ -368,14 +376,17 @@ class SettingsStore extends ChangeNotifier {
       (v < minHistoryLimit || v > maxHistoryLimit) ? 150 : v;
 
   /// 硬解方式：Windows/macOS/Linux 可调；Android 固定 mediacodec（见播放器）。
+  ///
+  /// 旧版本的 `auto-safe`（零拷贝直通）已从可选值中移除：读到它时回落到
+  /// [defaultHwdecMode]，让存量配置（含旧备份恢复）不再出现画面绿边。
   String get hwdecMode {
-    final v = _prefs.getString('player.hwdec') ?? 'auto-safe';
-    return hwdecValues.contains(v) ? v : 'auto-safe';
+    final v = _prefs.getString('player.hwdec') ?? defaultHwdecMode;
+    return hwdecValues.contains(v) ? v : defaultHwdecMode;
   }
 
   set hwdecMode(String v) {
     _prefs.setString(
-        'player.hwdec', hwdecValues.contains(v) ? v : 'auto-safe');
+        'player.hwdec', hwdecValues.contains(v) ? v : defaultHwdecMode);
     notifyListeners();
   }
 

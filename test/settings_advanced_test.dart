@@ -8,7 +8,7 @@ void main() {
   test('播放器高级设置默认值与范围校验', () async {
     SharedPreferences.setMockInitialValues({});
     final s = SettingsStore(await SharedPreferences.getInstance());
-    expect(s.hwdecMode, 'auto-safe');
+    expect(s.hwdecMode, 'auto-copy');
     expect(s.cacheSecs, 30);
     expect(s.audioDelayMs, 0);
     expect(s.scale, 'fit');
@@ -21,7 +21,7 @@ void main() {
     expect(s.subtitleBackground, isFalse);
 
     s.hwdecMode = 'not-a-mode';
-    expect(s.hwdecMode, 'auto-safe');
+    expect(s.hwdecMode, 'auto-copy');
     s.hwdecMode = 'dxva2';
     expect(s.hwdecMode, 'dxva2');
 
@@ -65,6 +65,15 @@ void main() {
     expect(s.subtitleFontSize, 56);
     expect(s.subtitleBorder, isFalse);
     expect(s.subtitleBackground, isTrue);
+  });
+
+  test('旧版 auto-safe 硬解回落到拷回模式（避免画面右/下绿边）', () async {
+    SharedPreferences.setMockInitialValues({'player.hwdec': 'auto-safe'});
+    final s = SettingsStore(await SharedPreferences.getInstance());
+    expect(s.hwdecMode, 'auto-copy');
+    // 再次写入已废弃档位也走同一兜底。
+    s.hwdecMode = 'auto-safe';
+    expect(s.hwdecMode, 'auto-copy');
   });
 
   test('备份导出/恢复设置：未知键忽略、非法值回落', () async {
