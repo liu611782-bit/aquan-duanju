@@ -3,9 +3,11 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../core/cast/cast_controller.dart';
+import '../core/cast/cast_diagnostics.dart';
 import '../core/cast/cast_target.dart';
 import '../core/cast/web_cast.dart';
 import '../core/cast/mirror/mirror_controller.dart';
@@ -360,6 +362,10 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
               Text(_error!,
                   style: theme.textTheme.bodySmall
                       ?.copyWith(color: theme.colorScheme.error)),
+              const SizedBox(height: 4),
+              Text('打开右上角「投屏诊断」可查看失败分类与本机连通性自助验证',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.outline)),
             ],
             if (_connecting)
               const Padding(
@@ -563,15 +569,34 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
     );
   }
 
-  /// 低调的「投屏诊断」：只展示不含 URL/凭据的诊断信息。
-  void _showDiagnostics(BuildContext context, List<CastTarget> devices) {
+  /// 诊断分区（M0）：失败分类 + 一句人话解释、本机 IP / 完整投屏 URL /
+  /// 监听端口、自助验证指引、「接受但没取流」时的防火墙放行命令、
+  /// 「复制诊断报告」「导出到文件」。
+  ///
+  /// 两级脱敏（review §8.4）：完整投屏 URL（含 token）只在面板展示供自测；
+  /// 复制/导出的报告一律走 [CastDiagnostics.toRedactedReport]（导出级脱敏，
+  /// token / 签名 query / 凭据头 / dc:description 不外泄）。
+  Future<void> _showDiagnostics(
+      BuildContext context, List<CastTarget> devices) async {
+    final theme = Theme.of(context);
+    final diag = CastDiagnostics.instance;
+    final verdict = diag.computeVerdict();
     final target = _diagDevice ?? (devices.isEmpty ? null : devices.first);
     final model = target?.modelName ?? '';
     final maker = target?.manufacturer ?? '';
     final mirror = MirrorController.instance;
     final bound = SsdpDiscovery.lastBoundPort;
     final recipe = _lookupRecipe(target);
-    final lines = <String>[
+    final exePath = _executablePath();
+    final mediaUrl = diag.mediaUrl;
+    final needsFirewallFix = verdict == CastVerdict.acceptedButNotFetched;
+    final firewallCommand = needsFirewallFix && exePath.isNotEmpty
+        ? CastDiagnostics.buildWindowsFirewallCommand(programPath: exePath)
+        : null;
+    final report = diag.toRedactedReport();
+    final detail = <String>[
+      report,
+      '-- 面板环境 --',
       'SSDP 绑定端口：${bound > 0 ? '$bound' : '未绑定（可手动输入 IP 直连）'}',
       '已发现设备：${devices.length} 台',
       '设备型号：${model.isEmpty ? '未知' : model}',
@@ -581,14 +606,107 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
           '${mirror.lastError == null ? '' : '（${mirror.lastError}）'}',
       '当前配方：${recipe ?? '未记忆'}',
       '当前阶段：$_stage',
-    ];
-    // 统一脱敏：URL 查询串 / token / 凭据不出现在诊断面板与复制内容里。
-    final text = ErrorLog.redact(lines.join('\n'));
-    showDialog<void>(
+    ].join('\n');
+
+    if (!mounted) return;
+    await showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('投屏诊断'),
-        content: SingleChildScrollView(child: SelectableText(text)),
+        content: SizedBox(
+          width: 520,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('失败判定', style: theme.textTheme.titleSmall),
+                const SizedBox(height: 4),
+                Text(
+                  verdict?.label ??
+                      (diag.playingConfirmed
+                          ? '无（电视已进入播放）'
+                          : (diag.hasSession ? '暂无判定' : '尚未发起连接')),
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: verdict == null
+                        ? theme.colorScheme.onSurface
+                        : theme.colorScheme.error,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (verdict != null) ...[
+                  const SizedBox(height: 4),
+                  Text(verdict.hint, style: theme.textTheme.bodySmall),
+                ],
+                const SizedBox(height: 12),
+                Text('本机地址（仅供自测，请勿外发）',
+                    style: theme.textTheme.titleSmall),
+                const SizedBox(height: 4),
+                Text('本机 IP：${diag.selectedIp ?? '未采集（发起一次投屏后显示）'}',
+                    style: theme.textTheme.bodySmall),
+                Text('监听端口：${diag.mediaPort?.toString() ?? '未采集（直投公网地址时无本机端口）'}',
+                    style: theme.textTheme.bodySmall),
+                if (mediaUrl != null) ...[
+                  const SizedBox(height: 4),
+                  SelectableText(mediaUrl, style: theme.textTheme.bodySmall),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: mediaUrl));
+                        Navigator.of(dialogContext).pop();
+                      },
+                      icon: const Icon(Icons.copy, size: 16),
+                      label: const Text('复制投屏地址', style: TextStyle(fontSize: 12)),
+                    ),
+                  ),
+                ],
+                Text('自助验证：在同一 Wi-Fi 下的另一台设备（手机/平板）浏览器打开上面的'
+                    '投屏地址。能打开或开始下载，说明本机服务可达、电视理应也能拉到流；'
+                    '打不开则是本机 IP / 防火墙 / 端口问题，与协议无关。',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.outline)),
+                if (needsFirewallFix) ...[
+                  const SizedBox(height: 12),
+                  Text('防火墙放行（Windows）', style: theme.textTheme.titleSmall),
+                  const SizedBox(height: 4),
+                  Text(
+                    diag.mediaPort == null
+                        ? '判定为「已接受但电视没来取流」时，最常见原因是 Windows '
+                            '防火墙拦下了本机媒体服务端口。可复制下方命令（管理员'
+                            '运行一次即可，按程序放行）：'
+                        : '判定为「已接受但电视没来取流」时，最常见原因是 Windows '
+                            '防火墙拦下了本机媒体服务端口（当前监听端口：'
+                            '${diag.mediaPort}）。可复制下方命令（管理员运行一次'
+                            '即可，按程序放行）：',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  if (firewallCommand != null) ...[
+                    const SizedBox(height: 4),
+                    SelectableText(firewallCommand,
+                        style: theme.textTheme.bodySmall),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton.icon(
+                        onPressed: () {
+                          Clipboard.setData(ClipboardData(text: firewallCommand));
+                          Navigator.of(dialogContext).pop();
+                        },
+                        icon: const Icon(Icons.copy, size: 16),
+                        label: const Text('复制放行命令', style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  ],
+                ],
+                const SizedBox(height: 12),
+                Text('详细报告（复制/导出为脱敏版）',
+                    style: theme.textTheme.titleSmall),
+                const SizedBox(height: 4),
+                SelectableText(detail, style: theme.textTheme.bodySmall),
+              ],
+            ),
+          ),
+        ),
         actions: <Widget>[
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(),
@@ -596,14 +714,86 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
           ),
           TextButton(
             onPressed: () {
-              Clipboard.setData(ClipboardData(text: text));
+              Clipboard.setData(ClipboardData(text: detail));
               Navigator.of(dialogContext).pop();
             },
-            child: const Text('复制'),
+            child: const Text('复制诊断报告'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(dialogContext).pop();
+              _exportDiagnosticsReport(report);
+            },
+            child: const Text('导出到文件'),
           ),
         ],
       ),
     );
+  }
+
+  /// 导出诊断报告到应用支持目录（导出级脱敏，见 [CastDiagnostics.toRedactedReport]）。
+  Future<void> _exportDiagnosticsReport(String report) async {
+    String? path;
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final now = DateTime.now();
+      String two(int v) => v.toString().padLeft(2, '0');
+      final name = 'cast_diagnostics_'
+          '${now.year}${two(now.month)}${two(now.day)}'
+          '-${two(now.hour)}${two(now.minute)}${two(now.second)}.txt';
+      final file = File('${dir.path}${Platform.pathSeparator}$name');
+      await file.writeAsString(report, flush: true);
+      path = file.path;
+    } catch (e, stack) {
+      // 导出失败不打断面板：原始异常只进 ErrorLog。
+      ErrorLog.instance.record('投屏诊断导出', e, stack);
+    }
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(path == null ? '导出失败' : '已导出诊断报告'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              path == null
+                  ? '诊断报告导出失败，请改用「复制诊断报告」'
+                  : '文件位置：',
+              style: Theme.of(dialogContext).textTheme.bodySmall,
+            ),
+            if (path != null) ...[
+              const SizedBox(height: 8),
+              SelectableText(path, style: Theme.of(dialogContext).textTheme.bodySmall),
+            ],
+          ],
+        ),
+        actions: [
+          if (path != null)
+            TextButton(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: path!));
+                Navigator.of(dialogContext).pop();
+              },
+              child: const Text('复制路径'),
+            ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 当前可执行文件路径（防火墙 program 级放行命令用）；取不到为空串。
+  String _executablePath() {
+    try {
+      return Platform.resolvedExecutable;
+    } catch (_) {
+      return '';
+    }
   }
 
   /// 优先读 CastStore 暴露的持久化配方表，其次读控制器内存表；都没有 = 未记忆。

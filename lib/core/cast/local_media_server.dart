@@ -4,6 +4,8 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'cast_diagnostics.dart';
+
 /// 本地 HTTP 媒体服务：把本机文件以「token URL」的形式喂给电视。
 ///
 /// 为什么需要：DLNA 电视只能拉 HTTP 直链，本地下载的剧集没有公网地址。
@@ -175,32 +177,43 @@ class LocalMediaServer {
     if (requestLine.length < 2) return;
     final method = requestLine[0].toUpperCase();
     if (method != 'GET' && method != 'HEAD') {
+      _traceMedia(requestLine[1], method, null, null, 405, 0);
       await _writeStatus(socket, 405, 'Method Not Allowed');
       return;
     }
     final rawPath = requestLine[1];
     String? rangeHeader;
+    String? userAgent;
     for (final line in lines.skip(1)) {
       final idx = line.indexOf(':');
       if (idx <= 0) continue;
-      if (line.substring(0, idx).trim().toLowerCase() == 'range') {
+      final key = line.substring(0, idx).trim().toLowerCase();
+      if (key == 'range') {
         rangeHeader = line.substring(idx + 1).trim();
+      } else if (key == 'user-agent') {
+        userAgent = line.substring(idx + 1).trim();
       }
     }
+    // 取流埋点（M0 纯采集；recordMediaRequest 自身吞异常）。
+    void trace(int status, int bytes) =>
+        _traceMedia(rawPath, method, rangeHeader, userAgent, status, bytes);
 
     final path = Uri.tryParse(rawPath)?.path ?? '';
     final segments = path.split('/').where((s) => s.isNotEmpty).toList();
     if (segments.length != 2 || segments.first != 'm') {
+      trace(404, 0);
       await _writeStatus(socket, 404, 'Not Found');
       return;
     }
     final filePath = _tokens[segments[1]];
     if (filePath == null) {
+      trace(404, 0);
       await _writeStatus(socket, 404, 'Not Found');
       return;
     }
     final file = File(filePath);
     if (!await file.exists()) {
+      trace(404, 0);
       await _writeStatus(socket, 404, 'Not Found');
       return;
     }
@@ -211,6 +224,7 @@ class LocalMediaServer {
     if (range == null) {
       // 不可满足的 Range（起点越界/区间非法/多段）：按 HTTP 语义回 416，
       // 不再静默退化成整文件 200（旧行为会掩盖客户端的错区间 bug）。
+      trace(416, 0);
       await _writeStatus(
         socket,
         416,
@@ -219,6 +233,7 @@ class LocalMediaServer {
       );
       return;
     }
+    trace(range.partial ? 206 : 200, range.length);
     final head = StringBuffer()
       ..write(range.partial ? 'HTTP/1.1 206 Partial Content\r\n' : 'HTTP/1.1 200 OK\r\n')
       ..write('Content-Type: $mime\r\n')
@@ -253,6 +268,20 @@ class LocalMediaServer {
       'Connection: close\r\n\r\n',
     ));
     await socket.flush();
+  }
+
+  /// 电视取流埋点（M0 纯采集；不改变任何响应行为）。
+  static void _traceMedia(String url, String method, String? range,
+      String? userAgent, int status, int bytes) {
+    CastDiagnostics.instance.recordMediaRequest(MediaRequestTrace(
+      url: url,
+      method: method,
+      range: range,
+      userAgent: userAgent,
+      statusCode: status,
+      bytesServed: bytes,
+      source: 'local',
+    ));
   }
 
   /// 解析 `bytes=` 单段 Range；返回 null = 不可满足（调用方回 416）。

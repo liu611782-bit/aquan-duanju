@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io' show SocketException;
 
 import 'cast_controller.dart';
+import 'cast_diagnostics.dart';
 import 'cast_recipe.dart';
 import 'didl.dart';
 import 'dlna_device.dart';
@@ -241,14 +242,19 @@ class DlnaTransport implements CastTransport, CastCompatTransport {
       _activeRecipe = recipe;
       try {
         await _attempt(request, recipe, deadline);
+        _trace('配方命中：didl=${recipe.didl.name} mime=${recipe.protocolMime}');
         return recipe;
       } on TimeoutException {
+        _trace('配方未命中（超时）：didl=${base.didl.name}');
         _activeRecipe = null;
         rethrow;
       } on SocketException {
+        _trace('配方未命中（连接失败）：didl=${base.didl.name}');
         _activeRecipe = null;
         rethrow;
       } on SoapException catch (e) {
+        _trace('配方未命中：didl=${base.didl.name} → '
+            '${e.faultCode == null ? e.message : 'fault ${e.faultCode}'}');
         _activeRecipe = null;
         if (_isTimeoutLike(e)) rethrow;
         lastFailure = e;
@@ -256,6 +262,9 @@ class DlnaTransport implements CastTransport, CastCompatTransport {
     }
     throw lastFailure ?? SoapException('SetAVTransportURI 失败');
   }
+
+  /// 状态时间线埋点（M0 纯采集；recordTimeline 自身吞异常）。
+  void _trace(String message) => CastDiagnostics.instance.recordTimeline(message);
 
   Future<void> _attempt(
     CastLoadRequest req,
@@ -279,6 +288,7 @@ class DlnaTransport implements CastTransport, CastCompatTransport {
         rethrow;
       }
       // 701 / 705：状态机未就绪 → Stop → 重设 URI（一次）→ 延迟 300ms → 重 Play。
+      _trace('状态冲突（701/705）→ Stop → 重设 URI → 重 Play');
       try {
         await stop();
       } on Exception {

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'cast_diagnostics.dart';
 import 'local_media_server.dart';
 import 'subtitle_converter.dart';
 
@@ -164,18 +165,24 @@ class CastMediaProxy {
     final method = requestLine[0].toUpperCase();
     if (method != 'GET' && method != 'HEAD') {
       // 只读代理：POST 等一律拒绝（防把代理当转发器滥用）。
+      _traceRequest(requestLine[1], method, null, null, 405, 0);
       await _writeStatus(socket, 405, 'Method Not Allowed');
       return;
     }
+    final rawTarget = requestLine[1];
     String? range;
+    String? userAgent;
     for (final line in lines.skip(1)) {
       final idx = line.indexOf(':');
       if (idx <= 0) continue;
-      if (line.substring(0, idx).trim().toLowerCase() == 'range') {
+      final key = line.substring(0, idx).trim().toLowerCase();
+      if (key == 'range') {
         range = line.substring(idx + 1).trim();
+      } else if (key == 'user-agent') {
+        userAgent = line.substring(idx + 1).trim();
       }
     }
-    final path = Uri.tryParse(requestLine[1])?.path ?? '';
+    final path = Uri.tryParse(rawTarget)?.path ?? '';
     final segments = path.split('/').where((s) => s.isNotEmpty).toList();
     final token = segments.length == 2 && segments.first == 'p'
         ? segments[1]
@@ -187,27 +194,32 @@ class CastMediaProxy {
       _entries[token!] = entry;
     }
     if (entry == null) {
+      _traceRequest(rawTarget, method, range, userAgent, 404, 0);
       await _writeStatus(socket, 404, 'Not Found');
       return;
     }
+    final Future<(int, int)> served;
+    switch (entry.kind) {
+      case _ProxyKind.static:
+        served = _serveStatic(socket, method, entry);
+      case _ProxyKind.playlist:
+        served = _servePlaylist(socket, method, entry);
+      case _ProxyKind.stream:
+        served = _serveStream(socket, method, entry, range);
+    }
     try {
-      switch (entry.kind) {
-        case _ProxyKind.static:
-          await _serveStatic(socket, method, entry);
-        case _ProxyKind.playlist:
-          await _servePlaylist(socket, method, entry);
-        case _ProxyKind.stream:
-          await _serveStream(socket, method, entry, range);
-      }
+      final (status, bytes) = await served;
+      _traceRequest(rawTarget, method, range, userAgent, status, bytes);
     } catch (_) {
+      _traceRequest(rawTarget, method, range, userAgent, 502, 0);
       try {
         await _writeStatus(socket, 502, 'Bad Gateway');
       } catch (_) {}
     }
   }
 
-  /// 静态字节（转换后的 VTT）。
-  Future<void> _serveStatic(Socket socket, String method, _ProxyEntry entry) async {
+  /// 静态字节（转换后的 VTT）；返回 (状态码, 发给电视的字节数) 供埋点。
+  Future<(int, int)> _serveStatic(Socket socket, String method, _ProxyEntry entry) async {
     final bytes = entry.bytes!;
     final head = StringBuffer()
       ..write('HTTP/1.1 200 OK\r\n')
@@ -217,10 +229,11 @@ class CastMediaProxy {
     socket.add(utf8.encode(head.toString()));
     if (method != 'HEAD') socket.add(bytes);
     await socket.flush();
+    return (200, method == 'HEAD' ? 0 : bytes.length);
   }
 
-  /// HLS 清单：拉取文本 → 重写 URI 为代理 token → 伺服。
-  Future<void> _servePlaylist(Socket socket, String method, _ProxyEntry entry) async {
+  /// HLS 清单：拉取文本 → 重写 URI 为代理 token → 伺服；返回供埋点。
+  Future<(int, int)> _servePlaylist(Socket socket, String method, _ProxyEntry entry) async {
     final text = await _fetchText(entry.url!, entry.headers, null);
     final rewritten = await _rewritePlaylist(text, entry.url!, entry.headers);
     final bytes = utf8.encode(rewritten);
@@ -232,17 +245,19 @@ class CastMediaProxy {
     socket.add(utf8.encode(head.toString()));
     if (method != 'HEAD') socket.add(bytes);
     await socket.flush();
+    return (200, method == 'HEAD' ? 0 : bytes.length);
   }
 
   /// 直链/分片：Range 透传，状态码与 Content-Range 原样回给电视。
+  /// 返回 (状态码, 转发给电视的字节数) 供埋点。
   ///
   /// 加固：Range 格式校验（非法 416）、上游 ≥400 归一 502、GET 先嗅探
   /// 前 512B——防盗链错误页/失效页（HTML/XML/清单文本）不喂给电视（防黑屏）。
-  Future<void> _serveStream(
+  Future<(int, int)> _serveStream(
       Socket socket, String method, _ProxyEntry entry, String? range) async {
     if (range != null && !validRangeHeader(range)) {
       await _writeStatus(socket, 416, 'Range Not Satisfiable');
-      return;
+      return (416, 0);
     }
     final req = await _client.openUrl('GET', entry.url!);
     entry.headers.forEach(req.headers.set);
@@ -255,7 +270,7 @@ class CastMediaProxy {
     if (res.statusCode >= 400) {
       await drainUpstream();
       await _writeStatus(socket, 502, 'Bad Gateway');
-      return;
+      return (502, 0);
     }
 
     final head = StringBuffer()
@@ -273,17 +288,19 @@ class CastMediaProxy {
       socket.add(utf8.encode(head.toString()));
       await drainUpstream();
       await socket.flush();
-      return;
+      return (res.statusCode, 0);
     }
     // 嗅探 + 转发（单订阅流只听一次）：先攒前 512B 判文本特征（二进制媒体
     // 永远放行），之后的数据块在回调里直接写 socket。命中错误页 → 取消订阅
     // 并回 502（防黑屏）。
+    var served = 0;
     final peeked = BytesBuilder(copy: false);
     final peekReady = Completer<void>();
     final upstreamDone = Completer<void>();
     List<int>? remainder;
     late final StreamSubscription<List<int>> sub;
     sub = res.listen((chunk) {
+      served += chunk.length;
       if (peekReady.isCompleted) {
         socket.add(chunk);
         return;
@@ -310,7 +327,7 @@ class CastMediaProxy {
     if (_looksLikeTextDocument(bytes)) {
       await sub.cancel();
       await _writeStatus(socket, 502, 'Bad Gateway');
-      return;
+      return (502, 0);
     }
     socket.add(utf8.encode(head.toString()));
     socket.add(bytes);
@@ -318,6 +335,7 @@ class CastMediaProxy {
     if (rest != null) socket.add(rest);
     await upstreamDone.future;
     await socket.flush();
+    return (res.statusCode, served);
   }
 
   /// 文本文档特征：清单/错误页/裸 URL。只看开头，二进制媒体不会命中。
@@ -462,6 +480,20 @@ class CastMediaProxy {
       'Connection: close\r\n\r\n',
     ));
     await socket.flush();
+  }
+
+  /// 电视取流埋点（M0 纯采集；不改变任何响应行为）。
+  static void _traceRequest(String url, String method, String? range,
+      String? userAgent, int status, int bytes) {
+    CastDiagnostics.instance.recordMediaRequest(MediaRequestTrace(
+      url: url,
+      method: method,
+      range: range,
+      userAgent: userAgent,
+      statusCode: status,
+      bytesServed: bytes,
+      source: 'proxy',
+    ));
   }
 }
 

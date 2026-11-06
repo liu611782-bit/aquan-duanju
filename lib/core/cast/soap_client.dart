@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:http/http.dart' as http;
 import 'package:xml/xml.dart';
 
+import 'cast_diagnostics.dart';
+
 /// UPnP SOAP 控制客户端（AVTransport / RenderingControl）。
 ///
 /// 兼容经验（MiracastReceiver 服务端反推 + CineFlow 客户端实践）：
@@ -62,6 +64,8 @@ class SoapClient {
   }) async {
     final uri = Uri.tryParse(controlUrl);
     if (uri == null || !uri.hasScheme) {
+      _recordTrace(action: action, headers: const {}, body: body,
+          error: '非法 controlUrl');
       throw SoapException('非法 controlUrl: $controlUrl');
     }
     final actionValue = quotedSoapAction
@@ -77,6 +81,7 @@ class SoapClient {
       'MAN': '"http://schemas.xmlsoap.org/soap/envelope/"; ns=01',
       '01-SOAPACTION': actionValue,
     };
+    final traceHeaders = mPost ? mPostHeaders : postHeaders;
     http.Response res;
     try {
       if (mPost) {
@@ -99,12 +104,23 @@ class SoapClient {
         }
       }
     } on TimeoutException {
+      _recordTrace(action: action, headers: traceHeaders, body: body,
+          error: '超时（${timeout.inSeconds}s）');
       throw SoapException('$action 超时');
     } catch (e) {
+      _recordTrace(action: action, headers: traceHeaders, body: body,
+          error: '$e');
       throw SoapException('$action 请求失败: $e');
     }
     // 部分设备对可选动作（Seek/音量）返回 401/501：调用方按 faultCode 处理。
     final fault = parseSoapFault(res.body);
+    _recordTrace(
+      action: action,
+      headers: traceHeaders,
+      body: body,
+      res: res,
+      fault: fault,
+    );
     if (res.statusCode >= 400 || fault != null) {
       throw SoapException(
         '$action 失败 HTTP ${res.statusCode}',
@@ -123,6 +139,29 @@ class SoapClient {
       ..body = body;
     final streamed = await _client.send(req).timeout(timeout);
     return http.Response.fromStream(streamed).timeout(timeout);
+  }
+
+  /// SOAP 诊断埋点（M0 纯采集）：请求头/请求体/HTTP 码/响应体/fault。
+  ///
+  /// [recordSoap] 自身吞异常，这里无需再包 try/catch；埋点不改变任何协议行为。
+  void _recordTrace({
+    required String action,
+    required Map<String, String> headers,
+    required String body,
+    http.Response? res,
+    (String?, String?)? fault,
+    String? error,
+  }) {
+    CastDiagnostics.instance.recordSoap(SoapTrace(
+      action: action,
+      requestHeaders: headers,
+      requestBody: body,
+      httpStatus: res?.statusCode ?? 0,
+      responseBody: res?.body ?? '',
+      faultCode: fault?.$1,
+      faultDescription: fault?.$2,
+      error: error,
+    ));
   }
 
   void close() => _client.close();

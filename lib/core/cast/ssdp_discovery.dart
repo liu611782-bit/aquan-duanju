@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 import '../error_log.dart';
+import 'cast_diagnostics.dart';
 import 'dlna_device.dart';
 
 /// SSDP 设备发现（UPnP 1.0）：M-SEARCH 三目标 × 4 轮 + NOTIFY 监听。
@@ -188,6 +189,8 @@ class SsdpDiscovery {
   void _handlePacket(String text) {
     final headers = parseSsdpHeaders(text);
     if (headers == null) return;
+    // 诊断埋点（M0）：原始 SSDP 报文（截断 + 去重 + 上限），纯采集。
+    CastDiagnostics.instance.recordSsdpResponse(text);
     final location = headers['LOCATION'] ?? headers['Location'];
     final usn = headers['USN'] ?? headers['Usn'] ?? location ?? '';
     final nts = headers['NTS'];
@@ -215,6 +218,7 @@ class SsdpDiscovery {
       final body = await _clientFactory().fetchDescription(location);
       final device = parseDeviceDescription(body, location);
       if (device == null) return; // 无 AVTransport：不是投屏目标。
+      _traceDeviceSummary(device);
       _devices[usn] = _DeviceEntry(device: device, seenAt: DateTime.now());
       _events?.add(SsdpDeviceFound(device));
     } catch (_) {
@@ -286,6 +290,7 @@ class SsdpDiscovery {
             final device = parseDeviceDescription(body, location);
             // await 之后的同步区不会交错：只让第一个命中的 worker 写表/发事件。
             if (device != null && found == null) {
+              _traceDeviceSummary(device);
               found = device;
               _devices[device.udn] =
                   _DeviceEntry(device: device, seenAt: DateTime.now());
@@ -317,6 +322,14 @@ class SsdpDiscovery {
 
   List<DlnaDevice> get devices =>
       _devices.values.map((e) => e.device).toList();
+
+  /// 设备描述摘要埋点（M0 纯采集；关键字段一行一条，不含完整 XML）。
+  static void _traceDeviceSummary(DlnaDevice d) {
+    CastDiagnostics.instance.recordDeviceSummary(
+      'friendlyName=${d.friendlyName} · model=${d.modelName} · '
+      'manufacturer=${d.manufacturer} · udn=${d.udn} · controlUrl=${d.controlUrl}',
+    );
+  }
 }
 
 class _DeviceEntry {

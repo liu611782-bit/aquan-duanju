@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../error_log.dart';
+import 'cast_diagnostics.dart';
 import 'cast_media_proxy.dart';
 import 'cast_recipe.dart';
 import 'cast_target.dart';
@@ -250,6 +251,9 @@ class CastController extends ChangeNotifier {
   DateTime? _lastGenaAt;
   int _pollTick = 0;
 
+  /// 诊断时间线去重：只记录电视状态变化（M0 纯采集）。
+  String _lastTimelineState = '';
+
   // ---------- 扫描 ----------
 
   void startScan() {
@@ -380,6 +384,14 @@ class CastController extends ChangeNotifier {
     _currentDevice = target;
     _userStopping = false;
     _state = CastSessionState.connecting;
+    _lastTimelineState = '';
+    // 诊断会话（M0）：重置会话级采集，保留发现阶段证据。纯采集，不影响链路。
+    CastDiagnostics.instance.beginSession(
+      deviceName: target.name,
+      protocol: target.protocol.name,
+    );
+    CastDiagnostics.instance
+        .recordTimeline('connecting → ${target.name}（${target.host}）');
     notifyListeners();
 
     var playUrl = media.url;
@@ -412,6 +424,7 @@ class CastController extends ChangeNotifier {
       isMirror: media.isMirror,
     );
     _currentMedia = media;
+    _traceTarget(media);
 
     final transport = _transport = _transportFactory(target);
     // DLNA 走兼容层（预检 → 配方链 → setUri → Play 门控 → Seek 容错）；
@@ -424,6 +437,9 @@ class CastController extends ChangeNotifier {
       if (compat != null) {
         try {
           sink = await compat.preflight().timeout(const Duration(seconds: 2));
+          CastDiagnostics.instance.recordSinks(sink);
+          CastDiagnostics.instance
+              .recordTimeline('能力预检完成：Sink ${sink.length} 条');
         } on Exception catch (e) {
           ErrorLog.instance.record('投屏能力预检', e, StackTrace.current);
         }
@@ -473,18 +489,43 @@ class CastController extends ChangeNotifier {
       }
       if (succeeded != null) await _rememberRecipe(target, succeeded);
       _state = CastSessionState.casting;
+      CastDiagnostics.instance.recordTimeline(
+          'casting（投屏命令已接受${succeeded == null ? '' : '，配方 ${succeeded.didl.name}'}）');
       notifyListeners();
       _startPolling();
       unawaited(_startGena(target));
-    } on Exception {
+    } on Exception catch (e) {
       // 命中配方失败一次即清空，下次投屏重回梯度扫描。
       if (remembered != null) await _forgetRecipe(target);
+      CastDiagnostics.instance.recordTimeline('投屏失败：$e');
       _state = CastSessionState.idle;
       _transport = null;
       _currentDevice = null;
       notifyListeners();
       rethrow;
     }
+  }
+
+  /// 诊断目标字段（M0）：本机服务 base 与监听端口来自会话字段；
+  /// 直投公网 URL 时两者为空态（M0.5 接线路由源 IP）。纯采集。
+  void _traceTarget(CastMedia media) {
+    String? servingBase;
+    int? servingPort;
+    if (media.isLocalFile) {
+      servingBase = _mediaServer.baseUrl;
+      servingPort = _mediaServer.port;
+    } else if (media.headers.isNotEmpty) {
+      servingBase = _castProxy.baseUrl;
+      servingPort = _castProxy.port;
+    }
+    CastDiagnostics.instance.recordTimeline(
+        '媒体地址：${media.isLocalFile ? '本地文件' : (media.headers.isNotEmpty ? '本机代理' : '直投')}');
+    CastDiagnostics.instance.setTarget(
+      selectedIp:
+          servingBase == null ? null : Uri.tryParse(servingBase)?.host,
+      mediaPort: servingPort,
+      mediaUrl: media.url,
+    );
   }
 
   /// 配方记忆是尽力而为：写盘失败只进日志，绝不让已成功的投屏失败。
@@ -530,6 +571,9 @@ class CastController extends ChangeNotifier {
         if (proxied != null) playUrl = proxied;
       }
       final subtitleUri = await _prepareSubtitle(device, next);
+      // 连播换集：诊断目标只换 URL（IP/端口仍是本会话的服务）。
+      CastDiagnostics.instance.setTarget(mediaUrl: playUrl);
+      CastDiagnostics.instance.recordTimeline('连播下一集：${next.title}');
       await transport.setUri(
         Uri.parse(playUrl),
         title: next.title,
@@ -636,6 +680,11 @@ class CastController extends ChangeNotifier {
     _lastDuration = poll.duration;
     _polledAt = DateTime.now();
     _lastRunning = poll.isRunning;
+    if (poll.transportState != _lastTimelineState) {
+      _lastTimelineState = poll.transportState;
+      CastDiagnostics.instance.recordTimeline(
+          'transportState=${poll.transportState.isEmpty ? '未知' : poll.transportState}');
+    }
     if (poll.isStopped && !_userStopping) {
       final position = _lastPosition;
       // 播完自动连投：停在时长结尾（±5s）且注入了下一集提供器；
@@ -644,6 +693,7 @@ class CastController extends ChangeNotifier {
           position >= _lastDuration - const Duration(seconds: 5);
       if (ended && !_autoAdvancing && await _tryAdvance()) return;
       // 电视端主动停止：感知并交还本地（UI 通过 onRemoteStopped 决定续播）。
+      CastDiagnostics.instance.recordTimeline('电视端停止投屏');
       await _finishSession();
       if (device != null) onRemoteStopped?.call(device, position);
       return;
@@ -672,6 +722,7 @@ class CastController extends ChangeNotifier {
     final device = _currentDevice;
     _userStopping = true;
     _state = CastSessionState.stopping;
+    CastDiagnostics.instance.recordTimeline('用户断开投屏');
     notifyListeners();
     var position = _lastPosition;
     try {
