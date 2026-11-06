@@ -120,19 +120,30 @@ class BiliSession {
   }
 
   /// 轮询扫码状态。
-  /// 0=已确认（Cookies 在响应头里）86101=未扫 86090=已扫未确认 86038=已过期。
+  ///
+  /// 响应里有**两层** `code`：外层只表示接口是否成功（正常恒为 `0`），
+  /// 真正的扫码状态在 `data.code`：
+  /// `0`=登录成功（Cookies 在响应头/回调 url 里）、`86101`=未扫、
+  /// `86090`=已扫未确认、`86038`=已过期。
+  ///
+  /// 早期版本读外层 `code`，第一次轮询（2 秒）就命中 0 被当成「登录成功」，
+  /// 表现为二维码弹窗刚打开就自己消失。
   Future<BiliQrPoll> pollQrLogin(String qrcodeKey) async {
     final uri = Uri.parse(
         '$_passport/x/passport-login/web/qrcode/poll?qrcode_key=$qrcodeKey');
     final res = await _client.get(uri, headers: headers(url: _passport));
     final json = jsonDecode(utf8.decode(res.bodyBytes));
     if (json is! Map) return const BiliQrPoll(state: BiliQrState.failed);
-    final code = json['code'] as int? ?? -1;
-    switch (code) {
+    // 外层 code：接口层错误（风控 / 签名 / 参数），不是扫码状态。
+    if ((json['code'] as int? ?? -1) != 0) {
+      return const BiliQrPoll(state: BiliQrState.failed);
+    }
+    final data = json['data'];
+    if (data is! Map) return const BiliQrPoll(state: BiliQrState.failed);
+    switch (data['code'] as int? ?? -1) {
       case 0:
-        final data = json['data'] as Map;
         final url = data['url'] as String? ?? '';
-        // Cookie 三件套从响应头取（web 扫码不回 JSON）。
+        // Cookie 三件套优先取响应头，其次从回调 url 的 query 兜底。
         final cookies = _extractCookies(res.headers['set-cookie']);
         _sessdata = cookies['SESSDATA'] ?? _cookieFromUrl(url, 'SESSDATA');
         _biliJct = cookies['bili_jct'] ?? _cookieFromUrl(url, 'bili_jct');
@@ -151,6 +162,7 @@ class BiliSession {
       case 86038:
         return const BiliQrPoll(state: BiliQrState.expired);
       default:
+        // 86101（未扫码）与其它未知状态都保持等待，不误判成功/过期。
         return const BiliQrPoll(state: BiliQrState.waiting);
     }
   }

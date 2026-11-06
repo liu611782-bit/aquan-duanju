@@ -336,8 +336,9 @@ class _BiliLoginSheetState extends State<_BiliLoginSheet> {
           setState(() => _status = '已扫码，请在手机上确认');
         case BiliQrState.expired:
           _pollTimer?.cancel();
-          // 刚生成的二维码不可能立刻过期：多半是风控/接口异常把它伪装成了
-          // 过期（用户实测「二维码 2 秒后消失」）。不清码、按失败给刷新出口。
+          // 刚生成的二维码不可能立刻过期：多半是风控/接口异常。不清码、
+          // 按失败给刷新出口。（历史上的「2 秒消失」是 poll 读错 code 层级，
+          // 已在 BiliSession.pollQrLogin 修复。）
           final tooFresh =
               DateTime.now().difference(_qrGeneratedAt) <
               const Duration(seconds: 60);
