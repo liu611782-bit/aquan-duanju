@@ -14,6 +14,7 @@ import '../core/cast/soap_client.dart';
 import '../core/cast/ssdp_discovery.dart';
 import '../core/error_log.dart';
 import 'common.dart';
+import 'loading.dart';
 import 'tv_focusable.dart';
 import 'tv_scope.dart';
 
@@ -204,10 +205,7 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
                 Text('投屏到设备', style: theme.textTheme.titleMedium),
                 const Spacer(),
                 if (castController.state == CastSessionState.discovering)
-                  const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2)),
+                  const AppLoading.inline(),
                 const SizedBox(width: 4),
                 // 低调的「投屏诊断」入口：绑定端口 / 设备指纹 / SOAP 状态 /
                 // 镜像服务 / 当前配方，只展示不含 URL 与凭据的诊断信息。
@@ -366,7 +364,7 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
             if (_connecting)
               const Padding(
                 padding: EdgeInsets.only(top: 8),
-                child: LinearProgressIndicator(),
+                child: Center(child: AppLoading.inline()),
               ),
           ],
         ),
@@ -500,10 +498,7 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
         onTap: () {},
         child: OutlinedButton.icon(
           onPressed: null,
-          icon: const SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(strokeWidth: 2)),
+          icon: const AppLoading.inline(),
           label: const Text('正在准备…', style: TextStyle(fontSize: 12)),
         ),
       );

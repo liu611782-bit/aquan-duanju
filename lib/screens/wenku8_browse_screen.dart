@@ -8,6 +8,7 @@ import '../widgets/common.dart';
 import '../widgets/cookie_dialog.dart';
 import '../widgets/skeleton.dart';
 import 'book_source_book_page.dart';
+import '../widgets/loading.dart';
 
 /// 内置 Wenku8 书城：**排行 / 分类** 两个维度浏览，点书进详情。
 ///
@@ -358,11 +359,7 @@ class _Wenku8BrowseScreenState extends State<Wenku8BrowseScreen>
             return const Padding(
               padding: EdgeInsets.symmetric(vertical: 16),
               child: Center(
-                child: SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
+                child: AppLoading.inline(),
               ),
             );
           }

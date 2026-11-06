@@ -7,6 +7,7 @@ import '../core/aqua_api.dart';
 import '../core/image_cache_store.dart';
 import '../core/image_key.dart';
 import 'common.dart';
+import 'loading.dart';
 
 /// 漫画的一页：字节由 core 下载并按整话密钥解密，这里负责缓存与展示。
 class MangaPageImage extends StatelessWidget {
@@ -41,11 +42,7 @@ class MangaPageImage extends StatelessWidget {
             return Container(
               color: Theme.of(context).colorScheme.surfaceContainerHighest,
               alignment: Alignment.center,
-              child: const SizedBox(
-                width: 26,
-                height: 26,
-                child: CircularProgressIndicator(strokeWidth: 2.4),
-              ),
+              child: const AppLoading.inline(),
             );
           }
           return AnimatedOpacity(

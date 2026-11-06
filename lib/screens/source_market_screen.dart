@@ -13,6 +13,7 @@ import '../core/sources/source_market.dart';
 import '../core/sources/source_seed.dart';
 import '../store/stores.dart';
 import '../widgets/common.dart';
+import '../widgets/loading.dart';
 
 /// 源市场：从内置种子与用户清单里自动抓取可用影视源（带 TTFB/总耗时测速），
 /// 勾选或一键 Top N 入库。
@@ -394,11 +395,7 @@ class _SourceMarketScreenState extends State<SourceMarketScreen> {
             ),
           ),
           if (_scanning)
-            const SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
+            const AppLoading.inline(),
         ],
       ),
     );

@@ -4,6 +4,7 @@ import '../core/date_strip_scroll.dart';
 import '../models/models.dart';
 import '../widgets/common.dart';
 import 'detail_screen.dart';
+import '../widgets/loading.dart';
 
 /// 上新日历：newReleases(date)，服务端给出今天前后各一周的日期。
 /// 已上线的作品可点进详情；预告作品显示上线时间与预约人数。
@@ -171,11 +172,7 @@ class _ReleasesScreenState extends State<ReleasesScreen> {
                     return const Center(
                       child: Padding(
                         padding: EdgeInsets.all(12),
-                        child: SizedBox(
-                            width: 22,
-                            height: 22,
-                            child:
-                                CircularProgressIndicator(strokeWidth: 2)),
+                        child: AppLoading.inline(),
                       ),
                     );
                   }

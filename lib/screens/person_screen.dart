@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/models.dart';
 import '../widgets/common.dart';
 import 'detail_screen.dart';
+import '../widgets/loading.dart';
 
 /// 人物页：头像 + 头衔 + 作品流。
 class PersonScreen extends StatefulWidget {
@@ -151,10 +152,7 @@ class _PersonScreenState extends State<PersonScreen> {
                   WidgetsBinding.instance
                       .addPostFrameCallback((_) => _loadMore());
                   return const Center(
-                    child: SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2)),
+                    child: AppLoading.inline(),
                   );
                 }
                 final w = _works[i];

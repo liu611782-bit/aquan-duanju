@@ -13,6 +13,7 @@ import '../widgets/common.dart';
 import '../core/bili/api.dart';
 import 'media_hub_screen.dart' show SourceCover;
 import 'source_player_screen.dart';
+import '../widgets/loading.dart';
 
 /// 换源面板的一次选择：命中源直接带 [hit]，切换时无需按剧名重新搜索。
 class _HitChoice {
@@ -155,11 +156,7 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 16),
               child: Center(
-                child: SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
+                child: AppLoading.inline(),
               ),
             )
           else if (scope.settings.detailSourceSwitch)

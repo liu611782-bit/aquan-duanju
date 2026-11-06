@@ -24,6 +24,7 @@ import '../widgets/cast_panel.dart';
 import '../widgets/player_track_sheet.dart';
 import '../widgets/common.dart';
 import '../widgets/danmaku_overlay.dart';
+import '../widgets/loading.dart';
 
 /// 分集播放地址解析钩子：bili:// 协议等需要播放时现解析的源提供。
 class ResolvedPlay {
@@ -958,7 +959,7 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
                 child: CastFabButton(onPressed: _openCastSheet),
               ),
             if (_loading)
-              const Center(child: CircularProgressIndicator()),
+              const Center(child: AppLoading()),
             // 解析提示只是信息条，不用失败面板；可手动关闭。
             if (_notice != null)
               Positioned(
@@ -1048,12 +1049,7 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
                             ),
                             const Spacer(),
                             if (_buffering)
-                              const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2, color: Colors.white70),
-                              ),
+                              const AppLoading.inline(),
                             if (widget.onSendDanmaku != null)
                               IconButton(
                                 tooltip: '发弹幕',

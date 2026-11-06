@@ -9,6 +9,7 @@ import '../core/sources/source_import.dart';
 import '../core/sources/source_seed.dart';
 import '../store/stores.dart';
 import '../widgets/common.dart';
+import '../widgets/loading.dart';
 
 /// 配置地址管理：自动找源状态 + 本地合并源 + 配置地址列表。
 ///
@@ -361,11 +362,7 @@ class _AutoSourceCardState extends State<_AutoSourceCard> {
                               if (mounted) setState(() {});
                             },
                       icon: state.running
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
+                          ? const AppLoading.inline()
                           : const Icon(Icons.play_arrow),
                       label: Text(state.running ? '找源中…' : '立即找源'),
                     ),
@@ -491,22 +488,14 @@ class _MergedSourceTile extends StatelessWidget {
           IconButton(
             tooltip: '重建',
             icon: rebuilding
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
+                ? const AppLoading.inline()
                 : const Icon(Icons.build_outlined),
             onPressed: rebuilding ? null : onRebuild,
           ),
           IconButton(
             tooltip: '导入到源列表',
             icon: importing
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
+                ? const AppLoading.inline()
                 : const Icon(Icons.download_outlined),
             onPressed: importing ? null : onImport,
           ),

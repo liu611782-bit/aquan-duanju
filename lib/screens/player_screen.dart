@@ -45,6 +45,7 @@ import '../widgets/playback_error_panel.dart';
 import '../widgets/player_info_dialog.dart';
 import '../widgets/player_track_sheet.dart';
 import '../widgets/tv_scope.dart';
+import '../widgets/loading.dart';
 
 /// 播放器页。
 ///
@@ -2726,12 +2727,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: const [
-              SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2, color: Colors.white),
-              ),
+              AppLoading.inline(),
               SizedBox(width: 8),
               Text('缓冲中…',
                   style: TextStyle(color: Colors.white, fontSize: 12)),

@@ -47,6 +47,7 @@ import 'book_detail_screen.dart';
 import 'bookshelf_screen.dart';
 import 'history_screen.dart';
 import 'downloads_screen.dart';
+import '../widgets/loading.dart';
 
 /// 我的页：观看历史、追剧、设置、关于（含免责声明）。
 class MineScreen extends StatefulWidget {
@@ -1514,11 +1515,7 @@ class _ListenSettingsGroupState extends State<ListenSettingsGroup> {
             title: const Text('测试 HTTP 源'),
             subtitle: const Text('发一次真实的合成请求，看状态码/耗时/字节/时长'),
             trailing: _probing
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
+                ? const AppLoading.inline()
                 : const Icon(Icons.play_arrow_outlined),
             onTap: _probing ? null : () => _runHttpProbe(sources, tts),
           ),
@@ -2623,10 +2620,7 @@ class _CachePanelState extends State<CachePanel> {
           title: const Text('存储与缓存'),
           subtitle: Text(subtitle),
           trailing: _busy
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2))
+              ? const AppLoading.inline()
               : TextButton(
                   onPressed: () => _clean(context),
                   child: const Text('清理'),

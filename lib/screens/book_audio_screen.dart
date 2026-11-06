@@ -28,6 +28,7 @@ import '../widgets/reader/follow_pill.dart';
 import '../widgets/reader/sleep_sheet.dart';
 import '../widgets/skeleton.dart';
 import 'reader_screen.dart';
+import '../widgets/loading.dart';
 
 /// 听书页 → 阅读页的定位比例（章内 0..1）。
 ///
@@ -1128,11 +1129,7 @@ class _BookAudioScreenState extends State<BookAudioScreen>
                         shape: const CircleBorder(),
                         padding: EdgeInsets.zero),
                     child: _loadingTrack
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: Colors.white))
+                        ? const AppLoading.inline()
                         : Icon(_playing ? Icons.pause : Icons.play_arrow),
                   ),
                 ),

@@ -16,6 +16,7 @@ import 'live_screen.dart';
 import 'source_detail_screen.dart';
 import 'source_manage_screen.dart';
 import 'source_market_screen.dart';
+import '../widgets/loading.dart';
 
 /// 影视聚合页：TVBox / CMS 源的分类浏览与聚合搜索（入口在发现页顶部）。
 class MediaHubScreen extends StatefulWidget {
@@ -791,11 +792,7 @@ class _SearchTabState extends State<_SearchTab>
             padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Row(
               children: [
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
+                const AppLoading.inline(),
                 const SizedBox(width: 8),
                 Text('已响应 $_done/$_total 个源',
                     style: theme.textTheme.bodySmall),
@@ -824,10 +821,7 @@ class _SearchTabState extends State<_SearchTab>
             padding: const EdgeInsets.symmetric(vertical: 4),
             child: Center(
               child: _loadingMore
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2))
+                  ? const AppLoading.inline()
                   : TextButton.icon(
                       onPressed: _loadMoreResults,
                       icon: const Icon(Icons.expand_more, size: 18),
@@ -983,10 +977,7 @@ class _SourceGrid extends StatelessWidget {
         if (index >= items.length) {
           WidgetsBinding.instance.addPostFrameCallback((_) => onLoadMore!());
           return const Center(
-              child: SizedBox(
-                  width: 22,
-                  height: 22,
-                  child: CircularProgressIndicator(strokeWidth: 2)));
+              child: AppLoading.inline());
         }
         final item = items[index];
         final theme = Theme.of(context);

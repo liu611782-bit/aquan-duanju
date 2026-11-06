@@ -11,6 +11,7 @@ import 'media_hub_screen.dart';
 import 'post_detail_screen.dart';
 
 import '../widgets/voice_button.dart';
+import '../widgets/loading.dart';
 
 /// 搜索页：热搜首屏 → 输入时联想（300ms 防抖）→ 提交后结果流。
 /// 结果流顶部提供内容筛选（综合/真人剧/漫剧/AI 剧），切筛选重新查询。
@@ -419,8 +420,7 @@ class _SearchScreenState extends State<SearchScreen> {
           return const Padding(
             padding: EdgeInsets.all(16),
             child: Center(
-              child: SizedBox(
-                  width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2)),
+              child: AppLoading.inline(),
             ),
           );
         }

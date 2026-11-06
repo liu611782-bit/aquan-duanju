@@ -8,6 +8,7 @@ import '../models/models.dart';
 import '../widgets/common.dart';
 import '../widgets/skeleton.dart';
 import 'detail_screen.dart';
+import '../widgets/loading.dart';
 
 /// 随机播放：全屏竖滑 feed（仿红果「随机看」）。
 ///
@@ -242,7 +243,7 @@ class _RandomFeedScreenState extends State<RandomFeedScreen>
           if (entry == null) {
             _hydrate(index);
             return const Center(
-                child: CircularProgressIndicator(color: Colors.white));
+                child: AppLoading(color: Colors.white));
           }
           return _FeedPage(
             entry: entry,
@@ -609,7 +610,7 @@ class _ActiveVideoState extends State<_ActiveVideo> {
               controls: NoVideoControls),
           if (_loading)
             const Center(
-              child: CircularProgressIndicator(color: Colors.white),
+              child: AppLoading(color: Colors.white),
             ),
         ],
       ),

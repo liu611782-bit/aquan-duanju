@@ -6,6 +6,7 @@ import '../widgets/common.dart';
 import 'detail_screen.dart';
 import 'filter_screen.dart';
 import 'person_screen.dart';
+import '../widgets/loading.dart';
 
 /// 榜单页：shortRank 的内容 tab + 榜 tab + 榜单列表（分页）。
 class RankingsScreen extends StatefulWidget {
@@ -217,10 +218,7 @@ class _RankingsScreenState extends State<RankingsScreen>
                     return const Padding(
                       padding: EdgeInsets.all(16),
                       child: Center(
-                          child: SizedBox(
-                              width: 22,
-                              height: 22,
-                              child: CircularProgressIndicator(strokeWidth: 2))),
+                          child: AppLoading.inline()),
                     );
                   }
                   final item = _items[i];

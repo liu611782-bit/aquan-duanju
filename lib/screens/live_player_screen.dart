@@ -15,6 +15,7 @@ import '../core/sources/source_probe.dart';
 import '../store/stores.dart';
 import '../widgets/cast_panel.dart';
 import '../widgets/common.dart';
+import '../widgets/loading.dart';
 
 /// 直播播放页：频道抽屉 + 备用地址自动切换 + 键盘换台（桌面）。
 /// 直播不写观看历史；只记忆「上次直播源 + 频道」。
@@ -208,7 +209,7 @@ class _LivePlayerScreenState extends State<LivePlayerScreen> {
           children: [
             Center(child: Video(controller: _engine.videoController)),
             if (_loading)
-              const Center(child: CircularProgressIndicator()),
+              const Center(child: AppLoading()),
             if (_error != null)
               Center(
                 child: Column(

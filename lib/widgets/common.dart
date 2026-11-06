@@ -13,12 +13,13 @@ import '../core/books/book_source_store.dart';
 import '../core/image_cache_store.dart';
 import '../core/image_key.dart';
 import '../core/tv/tv_metrics.dart';
-import 'skeleton.dart';
-import 'tv_scope.dart';
 import '../core/reader/reader_speech_controller.dart';
 import '../core/sources/auto_source_manager.dart';
 import '../models/models.dart';
 import '../store/stores.dart';
+import 'loading.dart';
+import 'skeleton.dart';
+import 'tv_scope.dart';
 
 /// 全局单例容器： stores / api 在这里下发（无第三方状态管理依赖）。
 
@@ -959,14 +960,8 @@ class SliverSeriesGrid extends StatelessWidget {
                     .addPostFrameCallback((_) => onLoadMore!());
               }
               // 电视上这个转圈不能占焦点：否则方向键会停在「加载更多」上。
-              return ExcludeFocus(
-                child: const Center(
-                  child: SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                ),
+              return const ExcludeFocus(
+                child: Center(child: AppLoading.inline()),
               );
             }
             final item = items[index];
@@ -1042,12 +1037,8 @@ class SeriesGrid extends StatelessWidget {
             WidgetsBinding.instance.addPostFrameCallback((_) => onLoadMore!());
           }
           // 电视上转圈不占焦点。
-          return ExcludeFocus(
-            child: const Center(
-                child: SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(strokeWidth: 2))),
+          return const ExcludeFocus(
+            child: Center(child: AppLoading.inline()),
           );
         }
         final item = items[i];

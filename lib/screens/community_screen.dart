@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/models.dart';
 import '../widgets/common.dart';
 import 'post_detail_screen.dart';
+import '../widgets/loading.dart';
 
 /// 社区：热点话题榜 → 用话题词搜「讨论」→ 帖子列表。
 ///
@@ -196,11 +197,7 @@ class _CommunityScreenState extends State<CommunityScreen> {
                       return const Padding(
                         padding: EdgeInsets.all(16),
                         child: Center(
-                            child: SizedBox(
-                                width: 22,
-                                height: 22,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2))),
+                            child: AppLoading.inline()),
                       );
                     }
                     final item = _items[i];

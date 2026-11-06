@@ -16,6 +16,7 @@ import 'book_source_book_page.dart';
 import 'book_source_market_screen.dart';
 import 'rss_screen.dart';
 import 'wenku8_browse_screen.dart';
+import '../widgets/loading.dart';
 
 /// 小说聚合：legado 书源聚合搜索 → 书详情/目录 → 接现有阅读器。
 ///
@@ -570,11 +571,7 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
                 if (_cleaning)
                   Row(
                     children: [
-                      const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
+                      const AppLoading.inline(),
                       const SizedBox(width: 6),
                       Text('检测 $_cleanProgress/$_cleanTotal',
                           style: theme.textTheme.bodySmall),
@@ -713,10 +710,7 @@ class _BookSourceManageSheetState extends State<_BookSourceManageSheet> {
                   child: FilledButton.icon(
                     onPressed: _importing ? null : () => _repoImport(),
                     icon: _importing
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2))
+                        ? const AppLoading.inline()
                         : const Icon(Icons.cloud_download_outlined, size: 18),
                     label: const Text('仓库拉取'),
                   ),
