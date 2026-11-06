@@ -129,7 +129,7 @@ class CmsJsonAdapter implements SourceAdapter {
       _clientClosed = false;
     }
     final headers = <String, String>{
-      if (!config.headers.containsKey('User-Agent'))
+      if (!config.headers.keys.any((k) => k.toLowerCase() == 'user-agent'))
         'User-Agent': SourceImporter.defaultUa,
       ...config.headers,
     };
@@ -457,56 +457,66 @@ List<PlayLine> parsePlayLines(String fromRaw, String urlRaw,
   final names = fromRaw.split(r'$$$');
   final blocks = urlRaw.split(r'$$$');
   final lines = <PlayLine>[];
-    for (var i = 0; i < blocks.length && lines.length < _kMaxLines; i++) {
-      final lineName = i < names.length && names[i].trim().isNotEmpty
-          ? names[i].trim()
-          : '线路${i + 1}';
-      final episodes = <UnifiedEpisode>[];
-      for (final seg in blocks[i].split('#')) {
-        if (episodes.length >= _kMaxEpisodes) break;
-        final cleaned = seg.trim();
-        if (cleaned.isEmpty) continue;
-        final sep = cleaned.lastIndexOf(r'$');
-        String title;
-        String url;
-        if (sep <= 0 || sep == cleaned.length - 1) {
-          title = '第${episodes.length + 1}集';
-          url = cleaned;
-        } else {
-          title = cleaned.substring(0, sep).trim();
-          url = cleaned.substring(sep + 1).trim();
-        }
-        // URL 部分做 Markdown 包裹剥离与 \/、\r\n 归一（切分后再清洗，
-        // 否则「第1集$(https://…)」里的括号会挡住 lastIndexOf 的判定）。
-        url = _stripMarkdown(_unslash(url));
-        if (url.isEmpty) continue;
-        // 相对播放地址（/play/xxx）按源 api 域名补全：不补则整条线路
-        // 被 http 前缀检查丢弃（「有 25 集却无可播分集」的根因之一）。
-        if (!url.startsWith('http://') && !url.startsWith('https://')) {
-          if (baseUrl.isEmpty) continue;
-          try {
-            final base = Uri.tryParse(baseUrl);
-            if (base == null || !base.hasScheme) continue;
+  for (var i = 0; i < blocks.length; i++) {
+    final lineName = i < names.length && names[i].trim().isNotEmpty
+        ? names[i].trim()
+        : '线路${i + 1}';
+    final episodes = <UnifiedEpisode>[];
+    // `#` 是集分隔符，但带鉴权 fragment 的 URL 里也可能有 `#`：只有后面
+    // 明显是「标题$URL」的新集才切，否则并入上一段 URL，避免把地址截断。
+    final segments = <String>[];
+    for (final seg in blocks[i].split('#')) {
+      final t = seg.trim();
+      if (t.isEmpty) continue;
+      if (segments.isNotEmpty && !t.contains(r'$')) {
+        segments[segments.length - 1] = '${segments.last}#$t';
+      } else {
+        segments.add(t);
+      }
+    }
+    for (final seg in segments) {
+      if (episodes.length >= _kMaxEpisodes) break;
+      final cleaned = seg.trim();
+      final sep = cleaned.lastIndexOf(r'$');
+      String title;
+      String url;
+      if (sep <= 0 || sep == cleaned.length - 1) {
+        title = '第${episodes.length + 1}集';
+        url = cleaned;
+      } else {
+        title = cleaned.substring(0, sep).trim();
+        url = cleaned.substring(sep + 1).trim();
+      }
+      // URL 部分做 Markdown 包裹剥离与 \/、&amp;、空白归一（切分后再清洗，
+      // 否则「第1集$(https://…)」里的括号会挡住 lastIndexOf 的判定）。
+      url = _stripMarkdown(_unslash(url));
+      if (url.isEmpty) continue;
+      // 相对播放地址（/play/xxx）按源 api 域名补全；没有 baseUrl 时不再
+      // 静默丢弃，保留给播放层 resolvePlayback 用源 api 二次补全。
+      if (!url.startsWith('http://') && !url.startsWith('https://') &&
+          baseUrl.isNotEmpty) {
+        try {
+          final base = Uri.tryParse(baseUrl);
+          if (base != null && base.hasScheme) {
             url = base.resolve(url.startsWith('//')
                 ? '${base.scheme}:$url'
                 : url).toString();
-          } catch (_) {
-            continue;
           }
-        }
-        episodes.add(UnifiedEpisode(
-            title: title.isEmpty ? '第${episodes.length + 1}集' : title,
-            url: url,
-            index: episodes.length + 1));
+        } catch (_) {}
       }
-      if (episodes.isNotEmpty) {
-        lines.add(PlayLine(name: lineName, episodes: episodes));
-      }
+      episodes.add(UnifiedEpisode(
+          title: title.isEmpty ? '第${episodes.length + 1}集' : title,
+          url: url,
+          index: episodes.length + 1));
     }
+    if (episodes.isNotEmpty) {
+      lines.add(PlayLine(name: lineName, episodes: episodes));
+    }
+  }
   // 默认线路 = 集数最多；并列时 m3u8 > mp4 > 其它（排序稳定，defaultLine 取第一个）。
   int rank(PlayLine l) {
     final first = l.episodes.first.url.toLowerCase();
-    final bonus = first.contains('.m3u8')
+    final bonus = first.contains('m3u8')
         ? 50
         : first.contains('.mp4')
             ? 20
@@ -515,10 +525,12 @@ List<PlayLine> parsePlayLines(String fromRaw, String urlRaw,
   }
 
   lines.sort((a, b) => rank(b).compareTo(rank(a)));
+  // 排序之后再截断：旧版在遍历时截断，好线路排第 5 条就永远选不到。
+  if (lines.length > _kMaxLines) return lines.sublist(0, _kMaxLines);
   return lines;
 }
 
-const int _kMaxLines = 4;
+const int _kMaxLines = 12;
 const int _kMaxEpisodes = 240;
 
 /// 兼容 `(https://…)`、`[https://…]`、`([https://…])` 的多层 Markdown 包裹。
@@ -534,8 +546,12 @@ String _stripMarkdown(String seg) {
 }
 
 /// 兼容 `\/` 与 `\r\n` 归一。
-String _unslash(String url) =>
-    url.replaceAll(r'\/', '/').replaceAll('\r', '').replaceAll('\n', '');
+String _unslash(String url) => url
+    .replaceAll(r'\/', '/')
+    .replaceAll('&amp;', '&')
+    .replaceAll('\r', '')
+    .replaceAll('\n', '')
+    .replaceAll(RegExp(r'\s+'), '');
 
 
 /// 封面相对路径补全：`/path` 与 `//host/path` 以源 api 域名为基准。

@@ -3,8 +3,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart' as crypto;
 import 'package:path_provider/path_provider.dart';
+
+import 'image_cache_index.dart';
 
 /// 统一图片字节缓存仓：封面 / 漫画页等**可再生**图片字节的磁盘层。
 ///
@@ -16,7 +17,9 @@ import 'package:path_provider/path_provider.dart';
 /// - 双阈值：条数 ≤ [limit]、字节 ≤ [maxBytes]；访问即续期，淘汰最旧；
 /// - 只管图片字节，**不碰**下载 / 历史 / 正文缓存（清理由设置页显式触发）。
 ///
-/// 内存记账在首次访问时通过扫描目录建立；之后 put/get 维护条数与字节估算。
+/// 内存记账优先从 `aquan_image_index.json` 恢复（冷启动零扫盘）；索引缺失 /
+/// 损坏 / 版本不符才回退「只读 4 字节头 + key」扫盘，并立即重建索引。
+/// 索引只记 `size/atime/fetchedAt`，落盘字节格式与淘汰规则完全不变。
 class ImageCacheStore {
   ImageCacheStore({
     Future<Directory> Function()? directory,
@@ -43,6 +46,11 @@ class ImageCacheStore {
   Future<void> _putQueue = Future<void>.value();
   bool _loaded = false;
 
+  /// 持久化索引（冷启动免扫盘）。null = 尚未加载 / 目录不可用。
+  ImageCacheIndex? _index;
+  Timer? _indexSaveTimer;
+  Future<void> _indexSaveQueue = Future<void>.value();
+
   static Future<Directory> _defaultDirectory() async {
     final support = await getApplicationSupportDirectory();
     return Directory(
@@ -67,6 +75,45 @@ class ImageCacheStore {
     _loaded = true;
     try {
       final dir = await _resolve();
+      final index = await ImageCacheIndex.load(dir);
+      _index = index;
+      if (!index.needsRescan) {
+        // 索引有效：直接恢复内存记账，不列目录、不逐文件 stat。
+        for (final e in index.values) {
+          final file = File(
+              '${dir.path}${Platform.pathSeparator}${_fileName(e.key)}.bin');
+          _entries[e.key] = _ImageCacheEntry(
+            key: e.key,
+            file: file,
+            bytes: e.size,
+            lastAccess: e.atime,
+            fetchedAt: e.fetchedAt,
+          );
+        }
+      } else {
+        // 索引缺失/损坏/版本不符：回退既有「只读 4 字节头 + key」扫盘。
+        await _rescan(dir);
+        for (final entry in _entries.values) {
+          index.upsert(
+            entry.key,
+            size: entry.bytes,
+            atime: entry.lastAccess,
+            // 旧文件里没有 fetchedAt，用文件 mtime 作近似（重启后 TTL 仍有效）。
+            fetchedAt: entry.fetchedAt ?? entry.lastAccess,
+          );
+        }
+        _scheduleIndexSave();
+      }
+    } catch (_) {
+      // 目录不可读：退化为空仓（put 仍会尝试建立）。
+      _entries.clear();
+    }
+    _prune();
+  }
+
+  /// 回退扫盘：**只读** 4 字节长度 + key，绝不 `readAsBytes()` 整文件。
+  Future<void> _rescan(Directory dir) async {
+    try {
       await for (final entity in dir.list(followLinks: false)) {
         if (entity is! File || !entity.path.endsWith('.bin')) continue;
         final entry = await _parseFile(entity);
@@ -83,7 +130,6 @@ class ImageCacheStore {
       // 目录不可读：退化为空仓（put 仍会尝试建立）。
       _entries.clear();
     }
-    _prune();
   }
 
   /// 解析自描述文件；损坏（头非法 / 不可读）返回 null。
@@ -108,6 +154,7 @@ class ImageCacheStore {
         file: file,
         bytes: stat.size,
         lastAccess: stat.modified,
+        fetchedAt: stat.modified,
       );
     } catch (_) {
       return null;
@@ -118,10 +165,13 @@ class ImageCacheStore {
     }
   }
 
-  static String _fileName(String key) =>
-      crypto.sha1.convert(utf8.encode(key)).toString();
+  /// 与索引键同源，保证 `<sha1(key)>.bin` 和索引记录一一对应。
+  static String _fileName(String key) => ImageCacheIndex.hashOf(key);
 
   /// 取缓存字节（命中即续期）。损坏文件当场删除并视为未命中。
+  ///
+  /// 过期项**仍然立即返回旧字节**（TTL 只驱动后台刷新，不阻塞出图）；
+  /// 是否需要刷新由调用方通过 [isExpired] 判断。
   Future<Uint8List?> get(String key) async {
     await _ensureLoaded();
     final entry = _entries.remove(key);
@@ -135,13 +185,31 @@ class ImageCacheStore {
       final payload = Uint8List.sublistView(bytes, 4 + keyLen);
       // LRU 续期（内存序 + 文件 mtime）。
       _entries[key] = entry..touch();
+      // 访问只更新索引里的 atime；TTL 以 fetchedAt 为准，访问不延长有效期。
+      // 落盘合并到下一次结构性写入，避免每次 get 都重写整个索引。
+      _index?.touch(key, atime: entry.lastAccess);
       return payload;
     } catch (_) {
       _entries.remove(key);
+      _index?.remove(key);
+      _scheduleIndexSave();
       try {
         await entry.file.delete();
       } catch (_) {}
       return null;
+    }
+  }
+
+  /// 该 key 是否已过期（供调用方决定是否后台刷新）。
+  ///
+  /// 无索引 / 无记录（例如老版本写的字节、纯内存缓存）一律返回 false：
+  /// 没有 fetchedAt 就不擅自发起刷新，避免首屏重复下载。
+  Future<bool> isExpired(String key) async {
+    try {
+      await _ensureLoaded();
+      return _index?.isStale(key) ?? false;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -179,12 +247,17 @@ class ImageCacheStore {
       }
       await part.rename(target.path);
       final stat = await target.stat();
+      final now = DateTime.now();
       _entries[key] = _ImageCacheEntry(
         key: key,
         file: target,
         bytes: stat.size,
-        lastAccess: DateTime.now(),
+        lastAccess: now,
+        fetchedAt: now,
       );
+      // put 既写内容也刷新 fetchedAt（TTL 从最新一次抓取起算）。
+      _index?.upsert(key, size: stat.size, atime: now, fetchedAt: now);
+      _scheduleIndexSave();
       _prune();
     } catch (_) {
       // 磁盘不可用：退化为无磁盘层（调用方内存层仍在）。
@@ -195,9 +268,12 @@ class ImageCacheStore {
     await _ensureLoaded();
     final entry = _entries.remove(key);
     if (entry == null) return;
+    _index?.remove(key);
     try {
       await entry.file.delete();
     } catch (_) {}
+    // 结构性变更：调用返回时索引已同步落盘。
+    await flushIndex();
   }
 
   /// 清空全仓（设置页显式触发）；不碰仓外任何文件。
@@ -209,9 +285,11 @@ class ImageCacheStore {
       } catch (_) {}
     }
     _entries.clear();
+    _index?.clear();
+    await flushIndex();
   }
 
-  /// 当前条数（首次访问前触发一次目录扫描）。
+  /// 当前条数（首次访问前触发一次索引加载 / 回退扫盘）。
   Future<int> entryCount() async {
     await _ensureLoaded();
     return _entries.length;
@@ -244,9 +322,12 @@ class ImageCacheStore {
         _entries.values.where((e) => !keep.contains(e.key)).toList();
     _entries.removeWhere((k, _) => !keep.contains(k));
     for (final entry in dropped) {
+      // 淘汰同步维护索引，避免下次启动又从索引里「复活」已删条目。
+      _index?.remove(entry.key);
       // 删除失败不回滚记账（下次 ensureLoaded 扫描会对齐）。
       unawaited(entry.file.delete().then((_) {}, onError: (Object _) {}));
     }
+    if (dropped.isNotEmpty) _scheduleIndexSave();
   }
 
   int _total() {
@@ -256,6 +337,33 @@ class ImageCacheStore {
     }
     return sum;
   }
+
+  /// 合并 250ms 内的多次索引变更，只做一次原子写；不阻塞 put / get 返回。
+  void _scheduleIndexSave() {
+    _indexSaveTimer?.cancel();
+    _indexSaveTimer = Timer(const Duration(milliseconds: 250), () {
+      _indexSaveTimer = null;
+      unawaited(_flushIndex());
+    });
+  }
+
+  Future<void> _flushIndex() {
+    final dir = _resolved;
+    final index = _index;
+    if (dir == null || index == null) return Future<void>.value();
+    // 串行化，且执行时才读 index 的当前快照 → 自然合并排队期间的变更。
+    _indexSaveQueue = _indexSaveQueue
+        .then<void>((_) => index.save(dir))
+        .catchError((Object _) {});
+    return _indexSaveQueue;
+  }
+
+  /// 等待索引落盘完成（测试 / 退出前显式同步用）。
+  Future<void> flushIndex() async {
+    _indexSaveTimer?.cancel();
+    _indexSaveTimer = null;
+    await _flushIndex();
+  }
 }
 
 class _ImageCacheEntry {
@@ -264,6 +372,7 @@ class _ImageCacheEntry {
     required this.file,
     required this.bytes,
     required this.lastAccess,
+    this.fetchedAt,
   });
 
   final String key;
@@ -272,6 +381,9 @@ class _ImageCacheEntry {
   /// 实际落盘大小（含 key 头）。
   final int bytes;
   DateTime lastAccess;
+
+  /// 最近一次抓取时间（索引重建时用文件 mtime 近似）。
+  DateTime? fetchedAt;
 
   void touch() => lastAccess = DateTime.now();
 }

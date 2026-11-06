@@ -21,7 +21,19 @@ class ParseEngine {
           caseSensitive: false);
 
   /// 播放地址是否可直接交给播放器（不需要 jx）。
-  static bool isDirectMedia(String url) => _directMedia.hasMatch(url);
+  ///
+  /// 旧实现只认带媒体扩展名的地址，会把 `/api/play?type=m3u8`、
+  /// `/live/channel` 这类合法流误判成「需要解析」；解析接口为空时反而
+  /// 原样丢给 mpv 卡住。这里放宽为「明确是流」即直链。
+  static bool isDirectMedia(String url) {
+    if (_directMedia.hasMatch(url)) return true;
+    final lower = url.toLowerCase();
+    if (!lower.startsWith('http')) return false;
+    return lower.contains('m3u8') ||
+        lower.contains('mpegurl') ||
+        lower.contains('/hls/') ||
+        lower.contains('type=hls');
+  }
 
   /// 是否需要走解析：显式 jx 标记，或地址不是直链。
   static bool needsParse(String url, {bool jx = false}) =>

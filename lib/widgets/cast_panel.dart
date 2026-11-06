@@ -3,13 +3,19 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 import '../core/cast/cast_controller.dart';
 import '../core/cast/cast_target.dart';
+import '../core/cast/web_cast.dart';
 import '../core/cast/mirror/mirror_controller.dart';
 import '../core/cast/cast_service.dart';
+import '../core/cast/soap_client.dart';
+import '../core/cast/ssdp_discovery.dart';
 import '../core/error_log.dart';
 import 'common.dart';
+import 'tv_focusable.dart';
+import 'tv_scope.dart';
 
 /// 投屏全局控制器（跨页面存活）。
 final castController = CastService.instance.controller;
@@ -21,7 +27,7 @@ Future<void> acquireMulticastLock() async {
     await const MethodChannel('aquan/cast')
         .invokeMethod<void>('acquireMulticastLock');
   } catch (_) {
-    // 通道不可用（旧安装包/非 Android）不影响其余发现路径。
+    // 通道不可用/无 Wi-Fi 硬件：仅退化为 NOTIFY/单播发现，不阻断面板。
   }
 }
 
@@ -31,6 +37,41 @@ Future<void> releaseMulticastLock() async {
     await const MethodChannel('aquan/cast')
         .invokeMethod<void>('releaseMulticastLock');
   } catch (_) {}
+}
+
+/// R5：面板设备显示顺序。
+///
+/// 未连接时走既有 [CastService.sortDevices]（钉选 > 最近使用 > 在线 > 名称）。
+/// 连接期间传入 [frozen] 快照：顺序严格按快照，只用最新扫描结果同步在线状态，
+/// 不重排、不插入新设备；[lastId] 由调用方固定为连接开始时的值。
+List<CastTarget> orderedDevices({
+  required Iterable<CastTarget> live,
+  required Set<String> pinnedIds,
+  required String? lastId,
+  List<CastTarget>? frozen,
+}) {
+  final liveList = live.toList();
+  if (frozen == null) {
+    return CastService.instance.sortDevices(
+      liveList,
+      pinnedIds: pinnedIds,
+      lastId: lastId,
+    );
+  }
+  final byId = <String, CastTarget>{for (final d in liveList) d.id: d};
+  return <CastTarget>[
+    for (final f in frozen) byId[f.id] ?? f,
+  ];
+}
+
+/// R5：只有投屏成功才刷新「最近使用」；失败不写，避免失败设备被顶到前面。
+/// [cast] 的异常原样上抛，由 UI 显示固定文案并把 stage/异常写 ErrorLog。
+Future<void> castAndRemember({
+  required Future<void> Function() cast,
+  required Future<void> Function() remember,
+}) async {
+  await cast();
+  await remember();
 }
 
 /// 播放器顶栏投屏按钮入口。
@@ -54,8 +95,14 @@ Future<String?> showCastSheet(
       builder: (sheetContext) => const _CastSessionSheet(),
     );
   }
+  // 组播锁获取失败已在 acquireMulticastLock 内吞掉，面板照常弹出。
   await acquireMulticastLock();
-  controller.startScan();
+  try {
+    controller.startScan();
+  } catch (e, stack) {
+    // 扫描启动失败同样不阻断面板（R4）：原始异常只进 ErrorLog。
+    ErrorLog.instance.record('投屏扫描启动', e, stack);
+  }
   String? result;
   if (context.mounted) {
     await showModalBottomSheet<String>(
@@ -96,7 +143,18 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
   final _ipController = TextEditingController();
   bool _connecting = false;
   bool _mirrorMode = false;
+  bool _webCastBusy = false;
+  bool _webCastSuggested = false;
   String? _error;
+
+  /// R5：连接开始时的设备顺序快照与固定 lastId（连接期间不重排）。
+  List<CastTarget>? _frozenDevices;
+  String? _connectingLastId;
+
+  /// 诊断信息（不含 URL/凭据）：最近连接目标、最近一次 SOAP 状态、当前阶段。
+  CastTarget? _diagDevice;
+  String _diagSoap = '暂无';
+  String _stage = '扫描';
 
   @override
   void initState() {
@@ -123,10 +181,12 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
   Widget _buildSheet(BuildContext context, Widget? _) {
     final theme = Theme.of(context);
     final cast = widget.scope.cast;
-    final devices = CastService.instance.sortDevices(
-      castController.devices,
+    final devices = orderedDevices(
+      live: castController.devices,
       pinnedIds: cast.pinnedIds,
-      lastId: cast.lastDevice?.id,
+      // 连接期间固定为开始时的值，扫描刷新不重排。
+      lastId: _frozenDevices != null ? _connectingLastId : cast.lastDevice?.id,
+      frozen: _frozenDevices,
     );
     final pinnedOffline = [
       for (final d in cast.pinned)
@@ -148,6 +208,16 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
                       width: 16,
                       height: 16,
                       child: CircularProgressIndicator(strokeWidth: 2)),
+                const SizedBox(width: 4),
+                // 低调的「投屏诊断」入口：绑定端口 / 设备指纹 / SOAP 状态 /
+                // 镜像服务 / 当前配方，只展示不含 URL 与凭据的诊断信息。
+                _tvItem(
+                  context,
+                  label: '投屏诊断',
+                  onTap: () => _showDiagnostics(context, devices),
+                  child: Icon(Icons.bug_report_outlined,
+                      size: 18, color: theme.colorScheme.outline),
+                ),
               ],
             ),
             const SizedBox(height: 4),
@@ -158,15 +228,24 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
                       style: theme.textTheme.bodySmall
                           ?.copyWith(color: theme.colorScheme.outline)),
                 ),
-                FilterChip(
+                Semantics(
+                  button: true,
                   selected: _mirrorMode,
-                  label: const Text('镜像屏幕', style: TextStyle(fontSize: 12)),
-                  avatar: Icon(Icons.phone_android,
-                      size: 16,
-                      color: _mirrorMode
-                          ? theme.colorScheme.primary
-                          : theme.colorScheme.outline),
-                  onSelected: (v) => setState(() => _mirrorMode = v),
+                  label: '镜像屏幕',
+                  child: TvFocusable(
+                    enabled: TvScope.isTvOf(context),
+                    onTap: () => setState(() => _mirrorMode = !_mirrorMode),
+                    child: FilterChip(
+                      selected: _mirrorMode,
+                      label: const Text('镜像屏幕', style: TextStyle(fontSize: 12)),
+                      avatar: Icon(Icons.phone_android,
+                          size: 16,
+                          color: _mirrorMode
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.outline),
+                      onSelected: (v) => setState(() => _mirrorMode = v),
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -178,59 +257,77 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
             ],
             const SizedBox(height: 12),
             Flexible(
-              child: ListView(
+              child: ListView.builder(
                 shrinkWrap: true,
-                children: [
-                  for (final d in devices)
-                    ListTile(
-                      dense: true,
-                      leading: Icon(
-                        d.protocol == CastProtocol.chromecast
-                            ? Icons.cast
-                            : Icons.tv,
-                        color: d.online
-                            ? theme.colorScheme.primary
-                            : theme.colorScheme.outline,
-                      ),
-                      title: Text(d.name,
-                          maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(
-                        [
+                itemCount: devices.length +
+                    pinnedOffline.length +
+                    (devices.isEmpty && pinnedOffline.isEmpty ? 1 : 0),
+                itemBuilder: (itemContext, index) {
+                  if (index < devices.length) {
+                    final d = devices[index];
+                    return _tvItem(
+                      itemContext,
+                      label: '设备 ${d.name}',
+                      onTap: () => _connect(d),
+                      child: ListTile(
+                        key: ValueKey(d.id),
+                        dense: true,
+                        leading: Icon(
                           d.protocol == CastProtocol.chromecast
-                              ? 'Chromecast'
-                              : 'DLNA',
-                          if (d.modelName.isNotEmpty) d.modelName,
-                          if (!d.online) '离线',
-                        ].join(' · '),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                              ? Icons.cast
+                              : Icons.tv,
+                          color: d.online
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.outline,
+                        ),
+                        title: Text(d.name,
+                            maxLines: 1, overflow: TextOverflow.ellipsis),
+                        subtitle: Text(
+                          [
+                            d.protocol == CastProtocol.chromecast
+                                ? 'Chromecast'
+                                : 'DLNA',
+                            if (d.modelName.isNotEmpty) d.modelName,
+                            if (!d.online) '离线',
+                          ].join(' · '),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: cast.isPinned(d.id)
+                            ? const Icon(Icons.push_pin, size: 16)
+                            : null,
+                        // 点击交给 TvFocusable：避免 ListTile 内建 InkWell 与
+                        // 外层焦点节点形成双焦点。
                       ),
-                      trailing: cast.isPinned(d.id)
-                          ? const Icon(Icons.push_pin, size: 16)
-                          : null,
+                    );
+                  }
+                  final pinnedIndex = index - devices.length;
+                  if (pinnedIndex < pinnedOffline.length) {
+                    // 钉选过但本轮没扫到的设备：仍可直连（同一局域网通常可达）。
+                    final d = pinnedOffline[pinnedIndex];
+                    return _tvItem(
+                      itemContext,
+                      label: '设备 ${d.name}',
                       onTap: () => _connect(d),
-                    ),
-                  // 钉选过但本轮没扫到的设备：仍可直连（同一局域网通常可达）。
-                  for (final d in pinnedOffline)
-                    ListTile(
-                      dense: true,
-                      leading: Icon(Icons.tv,
-                          color: theme.colorScheme.outline),
-                      title: Text(d.name,
-                          maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: const Text('未在本次扫描出现，点击尝试直连'),
-                      onTap: () => _connect(d),
-                    ),
-                  if (devices.isEmpty && pinnedOffline.isEmpty)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      child: Center(
-                        child: Text('同一 Wi-Fi 下还没有发现可投屏的设备',
-                            style: TextStyle(
-                                color: theme.colorScheme.outline)),
+                      child: ListTile(
+                        key: ValueKey(d.id),
+                        dense: true,
+                        leading: Icon(Icons.tv,
+                            color: theme.colorScheme.outline),
+                        title: Text(d.name,
+                            maxLines: 1, overflow: TextOverflow.ellipsis),
+                        subtitle: const Text('未在本次扫描出现，点击尝试直连'),
                       ),
+                    );
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    child: Center(
+                      child: Text('同一 Wi-Fi 下还没有发现可投屏的设备',
+                          style: TextStyle(color: theme.colorScheme.outline)),
                     ),
-                ],
+                  );
+                },
               ),
             ),
             const SizedBox(height: 8),
@@ -247,12 +344,19 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                OutlinedButton(
-                  onPressed: _addByIp,
-                  child: const Text('直连'),
+                _tvItem(
+                  context,
+                  label: '直连设备 IP',
+                  onTap: _addByIp,
+                  child: OutlinedButton(
+                    onPressed: _addByIp,
+                    child: const Text('直连'),
+                  ),
                 ),
               ],
             ),
+            const SizedBox(height: 8),
+            _webCastButton(context),
             if (_error != null) ...[
               const SizedBox(height: 8),
               Text(_error!,
@@ -275,47 +379,244 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
     setState(() {
       _connecting = true;
       _error = null;
+      _stage = '扫描';
+      _diagDevice = device;
+      // R5：连接开始冻结当前顺序 + 固定 lastId；touchLast 移到成功之后。
+      _frozenDevices = orderedDevices(
+        live: castController.devices,
+        pinnedIds: widget.scope.cast.pinnedIds,
+        lastId: widget.scope.cast.lastDevice?.id,
+      );
+      _connectingLastId = widget.scope.cast.lastDevice?.id;
     });
     try {
-      await widget.scope.cast.touchLast(device);
+      var effectiveMedia = widget.media;
       if (_mirrorMode) {
+        _stage = '预检';
         final mirror = MirrorController.instance;
         if (!await mirror.requestPermission()) {
-          if (mounted) {
-            setState(() {
-              _connecting = false;
-              _error = mirror.lastError ?? '未授权屏幕录制';
-            });
-          }
+          _abort(mirror.lastError ?? '未授权屏幕录制');
           return;
         }
         final url = await mirror.start(api: widget.scope.api);
         if (!mounted) return;
         if (url == null || url.isEmpty) {
-          setState(() {
-            _connecting = false;
-            _error = mirror.lastError ?? '镜像服务启动失败';
-          });
+          _abort(mirror.lastError ?? '镜像服务启动失败');
           return;
         }
-        await castController.castTo(
-          device,
-          CastMedia(url: url, title: '屏幕镜像', isMirror: true),
-        );
-      } else {
-        await castController.castTo(device, widget.media);
+        effectiveMedia = CastMedia(url: url, title: '屏幕镜像', isMirror: true);
       }
+      _stage = '连接';
+      await castAndRemember(
+        cast: () => castController.castTo(device, effectiveMedia),
+        remember: () => widget.scope.cast.touchLast(device),
+      );
+      _stage = '播放';
       if (mounted) Navigator.of(context).pop('started');
     } catch (e, stack) {
-      // 用户看到的是固定文案；SOAP 动作名/状态码只进诊断日志。
-      ErrorLog.instance.record('投屏连接', e, stack);
-      if (mounted) {
-        setState(() {
-          _connecting = false;
-          _error = '设备未响应，可重试或换一台设备';
-        });
-      }
+      // 用户看到的是固定文案；stage 与原始异常/堆栈只进 ErrorLog。
+      ErrorLog.instance.record('投屏连接·$_stage', e, stack);
+      _recordSoapDiagnostic(e);
+      // 标准 DLNA 无响应：明确引导到网页投屏，不留死路。
+      _abort('设备未响应，可重试、换一台设备，或试试下方「网页投屏」',
+          suggestWebCast: true);
     }
+  }
+
+  /// 标准 DLNA 失败后的兜底入口：局域网网页投屏。
+  /// 服务由 TTL / 下一次 start 回收——面板关闭时不能停，否则电视扫码时
+  /// 页面已经不可达。
+  Future<void> _openWebCast() async {
+    if (_webCastBusy) return;
+    final existing = WebCastService.instance.current;
+    if (existing != null) {
+      await _showWebCastDialog(existing);
+      return;
+    }
+    setState(() => _webCastBusy = true);
+    try {
+      final handle = await WebCastService.instance.start(
+        url: widget.media.url,
+        title: widget.media.title,
+        headers: widget.media.headers,
+      );
+      if (!mounted) return;
+      if (handle == null) {
+        setState(() => _error = '网页投屏启动失败，请检查局域网连接');
+        return;
+      }
+      await _showWebCastDialog(handle);
+    } catch (e, stack) {
+      ErrorLog.instance.record('网页投屏', e, stack);
+      if (mounted) {
+        setState(() => _error = '网页投屏启动失败，请检查局域网连接');
+      }
+    } finally {
+      if (mounted) setState(() => _webCastBusy = false);
+    }
+  }
+
+  Future<void> _showWebCastDialog(WebCastHandle handle) {
+    return showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('网页投屏'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            QrImageView(data: handle.url, size: 180),
+            const SizedBox(height: 12),
+            const Text('用电视或手机浏览器扫码，或在同一 Wi-Fi 下输入下面的地址',
+                textAlign: TextAlign.center),
+            const SizedBox(height: 8),
+            SelectableText(handle.url,
+                style: Theme.of(ctx).textTheme.bodySmall),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              onPressed: () =>
+                  Clipboard.setData(ClipboardData(text: handle.url)),
+              icon: const Icon(Icons.copy, size: 16),
+              label: const Text('复制地址'),
+            ),
+            Text('30 分钟内有效', style: Theme.of(ctx).textTheme.bodySmall),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('完成'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _webCastButton(BuildContext context) {
+    const label = '网页投屏';
+    if (_webCastBusy) {
+      return _tvItem(
+        context,
+        label: label,
+        onTap: () {},
+        child: OutlinedButton.icon(
+          onPressed: null,
+          icon: const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2)),
+          label: const Text('正在准备…', style: TextStyle(fontSize: 12)),
+        ),
+      );
+    }
+    return _tvItem(
+      context,
+      label: label,
+      onTap: _openWebCast,
+      child: _webCastSuggested
+          ? FilledButton.icon(
+              onPressed: _openWebCast,
+              icon: const Icon(Icons.qr_code_2, size: 16),
+              label: const Text('网页投屏（推荐）',
+                  style: TextStyle(fontSize: 12)),
+            )
+          : OutlinedButton.icon(
+              onPressed: _openWebCast,
+              icon: const Icon(Icons.qr_code_2, size: 16),
+              label: const Text('网页投屏（二维码）',
+                  style: TextStyle(fontSize: 12)),
+            ),
+    );
+  }
+
+  void _abort(String message, {bool suggestWebCast = false}) {
+    if (!mounted) return;
+    setState(() {
+      _connecting = false;
+      _frozenDevices = null;
+      _error = message;
+      _webCastSuggested = suggestWebCast;
+    });
+  }
+
+  void _recordSoapDiagnostic(Object e) {
+    if (e is SoapException) {
+      // 只取状态码与 faultCode：不把 controlUrl / 凭据带进诊断面板。
+      final status = RegExp(r'HTTP\s+(\d{3})').firstMatch(e.message)?.group(1);
+      _diagSoap = <String>[
+        if (status != null) 'HTTP $status',
+        if (e.faultCode != null) 'faultCode=${e.faultCode}',
+        if (status == null && e.faultCode == null) 'SOAP 请求失败',
+      ].join(' · ');
+    } else {
+      _diagSoap = '非 SOAP 异常（${e.runtimeType}）';
+    }
+  }
+
+  /// 电视上「焦点可见」+ 语义焦点的统一交互容器；非 TV 退化为普通 InkWell。
+  Widget _tvItem(BuildContext context,
+      {required VoidCallback onTap,
+      required Widget child,
+      required String label}) {
+    return Semantics(
+      button: true,
+      label: label,
+      child: TvFocusable(
+        enabled: TvScope.isTvOf(context),
+        onTap: onTap,
+        child: child,
+      ),
+    );
+  }
+
+  /// 低调的「投屏诊断」：只展示不含 URL/凭据的诊断信息。
+  void _showDiagnostics(BuildContext context, List<CastTarget> devices) {
+    final target = _diagDevice ?? (devices.isEmpty ? null : devices.first);
+    final model = target?.modelName ?? '';
+    final maker = target?.manufacturer ?? '';
+    final mirror = MirrorController.instance;
+    final bound = SsdpDiscovery.lastBoundPort;
+    final recipe = _lookupRecipe(target);
+    final lines = <String>[
+      'SSDP 绑定端口：${bound > 0 ? '$bound' : '未绑定（可手动输入 IP 直连）'}',
+      '已发现设备：${devices.length} 台',
+      '设备型号：${model.isEmpty ? '未知' : model}',
+      '设备厂商：${maker.isEmpty ? '未知' : maker}',
+      '最近一次 SOAP 状态：$_diagSoap',
+      '镜像服务状态：${mirror.state.name}'
+          '${mirror.lastError == null ? '' : '（${mirror.lastError}）'}',
+      '当前配方：${recipe ?? '未记忆'}',
+      '当前阶段：$_stage',
+    ];
+    // 统一脱敏：URL 查询串 / token / 凭据不出现在诊断面板与复制内容里。
+    final text = ErrorLog.redact(lines.join('\n'));
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('投屏诊断'),
+        content: SingleChildScrollView(child: SelectableText(text)),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('关闭'),
+          ),
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: text));
+              Navigator.of(dialogContext).pop();
+            },
+            child: const Text('复制'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 优先读 CastStore 暴露的持久化配方表，其次读控制器内存表；都没有 = 未记忆。
+  String? _lookupRecipe(CastTarget? target) {
+    if (target == null) return null;
+    final fromStore = widget.scope.cast.recipes.lookup(target);
+    final fromController = castController.recipes.lookup(target);
+    return (fromStore ?? fromController)?.toString();
   }
 
   Future<void> _addByIp() async {

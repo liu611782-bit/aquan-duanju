@@ -14,6 +14,15 @@ import '../core/bili/api.dart';
 import 'media_hub_screen.dart' show SourceCover;
 import 'source_player_screen.dart';
 
+/// 换源面板的一次选择：命中源直接带 [hit]，切换时无需按剧名重新搜索。
+class _HitChoice {
+  const _HitChoice(this.config, this.hit, {this.expand = false});
+
+  final SourceConfig config;
+  final UnifiedSeries? hit;
+  final bool expand;
+}
+
 /// 第三方源详情：封面 + 简介 + 线路选择 + 分集网格 → 轻量播放器。
 class SourceDetailScreen extends StatefulWidget {
   const SourceDetailScreen({
@@ -21,6 +30,7 @@ class SourceDetailScreen extends StatefulWidget {
     required this.source,
     required this.series,
     required this.adapter,
+    this.groupHits,
     this.resolvePlay,
     this.loadDanmaku,
     this.onSendDanmaku,
@@ -29,6 +39,10 @@ class SourceDetailScreen extends StatefulWidget {
   final SourceConfig source;
   final UnifiedSeries series;
   final SourceAdapter adapter;
+
+  /// 聚合搜索时实际命中的其它源；非空时「换源」只列这些源并直接取详情。
+  /// 其它入口（单源浏览）不传，保持原有全源重搜行为。
+  final List<UnifiedSeries>? groupHits;
 
   /// 播放时解析钩子（B 站等 DASH 双轨源）与弹幕加载。
   final EpisodePlayResolver? resolvePlay;
@@ -48,6 +62,7 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
   int _lineIndex = 0;
   bool _loading = true;
   bool _switching = false;
+  bool _expandAllSources = false;
   Object? _error;
 
   /// 换源后要定位的分集名（归一化后唯一匹配时高亮）。
@@ -307,24 +322,43 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
     );
   }
 
-  /// 换源：在其他（按后端去重后的）启用源里搜同名剧，逐个试详情。
+  /// 换源：优先只列本次聚合搜索实际命中的源，切换时直接取详情、不重搜。
+  /// 无命中列表（单源浏览入口）或用户显式「搜索其它源」时才回退全源重搜。
   Future<void> _showSwitchSource() async {
     if (_switching) return;
     final scope = AppScope.read(context);
     final current = backendSignature(_source);
-    final candidates = dedupeByBackend(scope.sources.enabled)
-        .where((s) => backendSignature(s) != current)
-        .where((s) =>
-            s.kind == SourceKind.cmsJson ||
-            s.kind == SourceKind.cmsXml ||
-            s.kind == SourceKind.spiderJs)
-        .take(20)
-        .toList();
-    if (candidates.isEmpty) {
+    final hits = widget.groupHits;
+    final useHits = !_expandAllSources && hits != null && hits.isNotEmpty;
+    final choices = <_HitChoice>[];
+    if (useHits) {
+      final seen = <String>{};
+      for (final hit in hits) {
+        final cfg = scope.sources.byId(hit.sourceKey);
+        if (cfg == null) continue;
+        final sig = backendSignature(cfg);
+        if (sig == current || !seen.add(sig)) continue;
+        choices.add(_HitChoice(cfg, hit));
+      }
+      choices.sort((a, b) => scope.sourceHealth
+          .scoreOf(b.hit!.sourceKey)
+          .compareTo(scope.sourceHealth.scoreOf(a.hit!.sourceKey)));
+    } else {
+      for (final cfg in dedupeByBackend(scope.sources.enabled)
+          .where((s) => backendSignature(s) != current)
+          .where((s) =>
+              s.kind == SourceKind.cmsJson ||
+              s.kind == SourceKind.cmsXml ||
+              s.kind == SourceKind.spiderJs)
+          .take(20)) {
+        choices.add(_HitChoice(cfg, null));
+      }
+    }
+    if (choices.isEmpty && !useHits) {
       _snack('没有其它可换的源');
       return;
     }
-    final picked = await showModalBottomSheet<SourceConfig>(
+    final picked = await showModalBottomSheet<_HitChoice>(
       context: context,
       showDragHandle: true,
       constraints: const BoxConstraints(maxWidth: 640),
@@ -340,8 +374,10 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      '按剧名在其他源重新查找（最多试 '
-                      '${candidates.length.clamp(0, _maxSwitchTry)} 个）',
+                      useHits
+                          ? '搜索时命中这部剧的 ${choices.length} 个源，切换即播'
+                          : '按剧名在其他源重新查找（最多试 '
+                              '${choices.length.clamp(0, _maxSwitchTry)} 个）',
                       style: Theme.of(sheetContext).textTheme.bodySmall,
                     ),
                   ),
@@ -351,21 +387,34 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
             Flexible(
               child: ListView.builder(
                 shrinkWrap: true,
-                itemCount: candidates.length,
+                itemCount: choices.length + (useHits ? 1 : 0),
                 itemBuilder: (_, index) {
-                  final config = candidates[index];
+                  if (useHits && index == choices.length) {
+                    return ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.search),
+                      title: const Text('搜索其它源'),
+                      subtitle: const Text('扩大到全部启用的源重新查找'),
+                      onTap: () => Navigator.of(sheetContext).pop(
+                        _HitChoice(_source, null, expand: true),
+                      ),
+                    );
+                  }
+                  final choice = choices[index];
                   return ListTile(
                     dense: true,
                     leading: const Icon(Icons.live_tv),
-                    title: Text(config.name,
+                    title: Text(choice.config.name,
                         maxLines: 1, overflow: TextOverflow.ellipsis),
                     subtitle: Text(
-                      config.api,
+                      useHits
+                          ? '${choice.hit!.lines.length} 条线路 · 搜索已命中'
+                          : choice.config.api,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(sheetContext).textTheme.bodySmall,
                     ),
-                    onTap: () => Navigator.of(sheetContext).pop(config),
+                    onTap: () => Navigator.of(sheetContext).pop(choice),
                   );
                 },
               ),
@@ -375,12 +424,19 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
       ),
     );
     if (picked == null || !mounted) return;
+    if (picked.expand) {
+      setState(() => _expandAllSources = true);
+      await _showSwitchSource();
+      if (mounted) setState(() => _expandAllSources = false);
+      return;
+    }
     await _switchTo(picked);
   }
 
   static const int _maxSwitchTry = 8;
 
-  Future<void> _switchTo(SourceConfig config) async {
+  Future<void> _switchTo(_HitChoice choice) async {
+    final config = choice.config;
     final adapter = buildSourceAdapter(config);
     if (adapter == null) {
       _snack('该源暂不支持切换');
@@ -402,28 +458,31 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
     }
 
     setState(() => _switching = true);
-    UnifiedSeries? found;
-    try {
-      final query = series.title.trim();
-      await for (final event in adapter
-          .search(query)
-          .timeout(const Duration(seconds: 8), onTimeout: (sink) => sink.close())) {
-        if (event is SourceHits) {
-          for (final hit in event.items) {
-            if (hit.normalizedTitle != series.normalizedTitle) continue;
-            if (series.year.isNotEmpty &&
-                hit.year.isNotEmpty &&
-                hit.year != series.year) {
-              continue;
+    // 命中源直接复用搜索结果，不再按剧名重搜（也就不会再弹「没找到」）。
+    UnifiedSeries? found = choice.hit;
+    if (found == null) {
+      try {
+        final query = series.title.trim();
+        await for (final event in adapter
+            .search(query)
+            .timeout(const Duration(seconds: 8), onTimeout: (sink) => sink.close())) {
+          if (event is SourceHits) {
+            for (final hit in event.items) {
+              if (hit.normalizedTitle != series.normalizedTitle) continue;
+              if (series.year.isNotEmpty &&
+                  hit.year.isNotEmpty &&
+                  hit.year != series.year) {
+                continue;
+              }
+              found = hit;
+              break;
             }
-            found = hit;
-            break;
           }
+          if (found != null) break;
         }
-        if (found != null) break;
+      } catch (_) {
+        // 搜索失败按「没找到」处理，下面给统一文案。
       }
-    } catch (_) {
-      // 搜索失败按「没找到」处理，下面给统一文案。
     }
 
     if (found == null) {
@@ -477,13 +536,15 @@ class _SourceDetailScreenState extends State<SourceDetailScreen> {
   }
 
   /// 历史里可用的直链：新记录在 `playUrl`，老记录把 URL 存在 `episodeId`。
+  static bool _isPlayableUrl(String url) =>
+      url.startsWith('http://') || url.startsWith('https://');
+
   static String _fallbackUrlOf(HistoryEntry? history) {
     if (history == null) return '';
-    if (history.playUrl.isNotEmpty) return history.playUrl;
-    if (history.episodeId.startsWith('http://') ||
-        history.episodeId.startsWith('https://')) {
-      return history.episodeId;
-    }
+    // spider 源把「解析令牌」写进 playUrl，旧实现不校验就当直链起播，
+    // 表现为「从历史记录进入永远播不出来」。
+    if (_isPlayableUrl(history.playUrl)) return history.playUrl;
+    if (_isPlayableUrl(history.episodeId)) return history.episodeId;
     return '';
   }
 

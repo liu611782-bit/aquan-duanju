@@ -20,6 +20,14 @@
     <!-- 应用内更新：下载完 APK 后调起系统安装器（用户仍需确认安装）。 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
+    <!-- 电视端：同一个包同时面向手机与电视。
+         - 两条 required=false 必须都写，否则商店/系统会按「必须电视」或
+           「必须触屏」过滤掉一半设备；
+         - 运行形态由 aquan/tv 通道读系统特性判定（见 lib/core/tv/tv_mode.dart），
+           不靠这些声明做分支。 -->
+    <uses-feature android:name="android.software.leanback" android:required="false"/>
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
+
     <!-- extractNativeLibs：内置的 libffmpeg.so 是 PIE 可执行文件，必须被系统
          解压到 nativeLibraryDir 才能 exec（castrelay 的 Android 解密中继）。
          见 android/ffmpeg/README.md。 -->
@@ -27,6 +35,7 @@
         android:label="阿圈短剧"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:banner="@drawable/tv_banner"
         android:usesCleartextTraffic="true"
         android:extractNativeLibs="true"
         android:enableOnBackInvokedCallback="true">
@@ -49,7 +58,11 @@
               />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
+                <!-- 手机与国内盒子用这个普通入口；Android TV / Google TV 读下面
+                     的 LEANBACK_LAUNCHER。两个 category 放同一个 filter 即可同时
+                     出现在两种桌面上。 -->
                 <category android:name="android.intent.category.LAUNCHER"/>
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
             </intent-filter>
         </activity>
         <!-- 听书：通知栏 / 锁屏 / 耳机线控。**MainActivity 自己继承

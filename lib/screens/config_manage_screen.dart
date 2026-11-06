@@ -200,6 +200,9 @@ class _ConfigManageScreenState extends State<ConfigManageScreen> {
         sourceUrl: mergedSourceUrl,
       );
       final added = await scope.sources.addCandidates(report.added);
+      if (report.parses.isNotEmpty) {
+        await scope.marketSites.addParses(report.parses);
+      }
       _snack(added > 0
           ? '已从合并源导入 $added 个站点'
           : '合并源里的站点都已存在');

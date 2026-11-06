@@ -201,21 +201,21 @@ List<SeriesSummary> rankItemsToSummaries(List<RankItem> items) {
 ///
 /// 只认 `position`，**不读 `recommend_info.rank`**：服务端对同一页的多行都会
 /// 下发 `rank: 1`（实测两个相邻卡片同时是「第1」），用它必然重复。
-/// `position` 是解析器按返回顺序生成的 `len(items)+1`，页内唯一且递增。
 ///
-/// 另外两条约束：
-/// - `position` 是**页内**序号，下一页从 1 重来，所以翻页必须由调用方把已加载
-///   的原始条目数作为 [offset] 传进来，否则第二页又从「第1」开始；
-/// - `promoted` 行（「平台推荐」）不显示名次，但它**仍占一个 position**，
-///   所以 [offset] 要按包含它的原始条目数累加，不能用去重后的展示条目数。
-Map<String, String> rankBadges(List<RankItem> items, {int offset = 0}) {
+/// 关键：`position` 在 Go 侧 `sdk.ShortRank` 已做过跨页全局化
+/// （`Position += len(cur.Seen)`），第二页拿到的是 11、12…，而不是页内的
+/// 1、2…。调用方**不得再叠加已加载条目数**，否则首页 1~10、次页会变成
+/// 21~30，中间整段名次凭空消失。
+///
+/// `promoted` 行（「平台推荐」）不显示名次，但仍占一个 position。
+Map<String, String> rankBadges(List<RankItem> items) {
   final out = <String, String>{};
   for (final item in items) {
     final id = item.seriesId.trim();
     if (id.isEmpty || item.promoted) continue;
-    final pagePlace = item.position;
-    if (pagePlace <= 0) continue;
-    out[id] = '第${pagePlace + offset}';
+    final place = item.position;
+    if (place <= 0) continue;
+    out[id] = '第$place';
   }
   return out;
 }

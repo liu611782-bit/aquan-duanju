@@ -18,6 +18,22 @@ import 'dart:typed_data';
 /// 这里没有用 `dart:io` 的 [HttpServer]：它在 HEAD 请求上会把
 /// `Content-Length` 强制归零，而电视探测长度恰恰依赖这个头。改用
 /// [ServerSocket] 手写响应，`Connection: close` 一请求一连接，简单可控。
+
+/// DLNA 响应头 + 宽松 CORS（本地媒体服务 / 投屏代理 / 网页投屏共用）。
+///
+/// 严格校验 DIDL/响应头的接收端（WMP、QQLiveTV、Hisilicon 等）依赖
+/// `transferMode` / `contentFeatures` / `realTimeInfo`；CORS 允许局域网网页
+/// 投屏页里的 `<video>` 跨域拉流。
+///
+/// 注意：这里只加 DLNA 与**放宽型** CORS 头，**不加** `x-frame-options`、
+/// `x-content-type-options` 之类的限制性安全头——部分渲染器见到会拒播
+/// （见 cast-contract.md P0「零安全头」语义，既有测试断言这些头必须缺席）。
+const String kDlnaResponseHeaders = 'transferMode.dlna.org: Streaming\r\n'
+    'contentFeatures.dlna.org: DLNA.ORG_OP=01;DLNA.ORG_CI=0;'
+    'DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n'
+    'realTimeInfo.dlna.org: DLNA.ORG_TLAG=*\r\n'
+    'Access-Control-Allow-Origin: *\r\n';
+
 class LocalMediaServer {
   LocalMediaServer({
     this.defaultPort = 18080,

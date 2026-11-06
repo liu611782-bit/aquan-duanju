@@ -12,7 +12,9 @@ import '../core/download_service.dart';
 import '../core/books/book_source_store.dart';
 import '../core/image_cache_store.dart';
 import '../core/image_key.dart';
+import '../core/tv/tv_metrics.dart';
 import 'skeleton.dart';
+import 'tv_scope.dart';
 import '../core/reader/reader_speech_controller.dart';
 import '../core/sources/auto_source_manager.dart';
 import '../models/models.dart';
@@ -239,13 +241,14 @@ class SkeletonGrid extends StatelessWidget {
 }
 
 /// 剧集卡片：封面（竖版）+ 标题 + 副行（集数/热度/状态）。
-class SeriesCard extends StatelessWidget {
+class SeriesCard extends StatefulWidget {
   const SeriesCard({
     super.key,
     required this.item,
     required this.onTap,
     this.subtitle,
     this.badge,
+    this.tvFocus = false,
   });
 
   final SeriesSummary item;
@@ -253,13 +256,26 @@ class SeriesCard extends StatelessWidget {
   final String? subtitle;
   final String? badge;
 
+  /// 电视形态：聚焦时放大 + 主色描边。
+  ///
+  /// 遥控器没有悬停与触摸反馈，不靠焦点视觉用户根本不知道当前选中的是哪张。
+  final bool tvFocus;
+
+  @override
+  State<SeriesCard> createState() => _SeriesCardState();
+}
+
+class _SeriesCardState extends State<SeriesCard> {
+  bool _focused = false;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final sub = subtitle ??
+    final item = widget.item;
+    final sub = widget.subtitle ??
         (item.episodeCount > 0 ? '共${item.episodeCount}集' : item.category);
-    return InkWell(
-      onTap: onTap,
+    final card = InkWell(
+      onTap: widget.onTap,
       borderRadius: BorderRadius.circular(12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -272,7 +288,7 @@ class SeriesCard extends StatelessWidget {
                   borderRadius: BorderRadius.circular(12),
                   child: CoverImage(url: item.coverUrl),
                 ),
-                if (badge != null)
+                if (widget.badge != null)
                   Positioned(
                     left: 6,
                     top: 6,
@@ -284,7 +300,7 @@ class SeriesCard extends StatelessWidget {
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
-                        badge!,
+                        widget.badge!,
                         style: TextStyle(
                           color: theme.colorScheme.onPrimary,
                           fontSize: 10,
@@ -313,6 +329,40 @@ class SeriesCard extends StatelessWidget {
                 ?.copyWith(color: theme.colorScheme.outline),
           ),
         ],
+      ),
+    );
+    if (!widget.tvFocus) return card;
+    return Focus(
+      // 只监听，不抢焦点：真正的焦点在 InkWell 上，hasFocus 会随子孙变化。
+      canRequestFocus: false,
+      onFocusChange: (focused) {
+        if (focused == _focused) return;
+        setState(() => _focused = focused);
+      },
+      child: AnimatedScale(
+        scale: _focused ? kTvFocusScale : 1,
+        duration: const Duration(milliseconds: 120),
+        curve: Curves.easeOut,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeOut,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: _focused ? theme.colorScheme.primary : Colors.transparent,
+              width: 2,
+            ),
+            boxShadow: _focused
+                ? [
+                    BoxShadow(
+                      color: theme.colorScheme.primary.withValues(alpha: 0.35),
+                      blurRadius: 18,
+                    ),
+                  ]
+                : const [],
+          ),
+          child: card,
+        ),
       ),
     );
   }
@@ -465,20 +515,38 @@ class AquaImageProvider extends ImageProvider<AquaImageProvider> {
 
 /// 封面字节的三级缓存：内存 LRU → 磁盘（ImageCacheStore，LRU+上限）→ 核心转码。
 /// 磁盘与内存里存的都是转码后可直接解码的字节；相同 URL 的并发请求合并。
+///
+/// 命中过期项时**立即返回旧字节**，后台刷新走独立低优先级队列：不进
+/// [_acquire] 的 6/TV 3 下载闸门，且最多 1 个在跑（其余排队）。
 class AquaImageCache {
-  AquaImageCache({this.fetchOverride});
+  AquaImageCache({
+    this.fetchOverride,
+    this.staleChecker,
+    this.onStaleRefresh,
+  });
 
   /// 测试注入点：不给就调 [AquaApi.fetchImage]。
   final Future<AquaImage> Function(String url)? fetchOverride;
 
+  /// 测试注入点：判断某 key 是否需要后台刷新；不给就查磁盘索引的 TTL。
+  final Future<bool> Function(String key)? staleChecker;
+
+  /// 过期后台刷新钩子（诊断 / 测试观察用）：真正发起刷新时回调该 url。
+  /// 回调在独立任务里触发，不参与 [load] 的返回值。
+  final void Function(String url)? onStaleRefresh;
+
   static AquaImageCache instance = AquaImageCache();
 
+  /// 电视档位：低端盒子常见 1GB 内存 + 弱 CPU，缓存与并发都收紧。
+  /// 启动时由 `main.dart` 按运行形态设置，之后不再变。
+  bool tvProfile = false;
+
   /// 内存层双阈值：条数 + 字节。只有条数上限时，512 条大图仍可能吃掉几百 MB。
-  static const int _maxEntries = 512;
-  static const int _maxBytes = 96 << 20;
+  int get _maxEntries => tvProfile ? 256 : 512;
+  int get _maxBytes => tvProfile ? 48 << 20 : 96 << 20;
 
   /// 并发下载上限：网格首屏会一次要十几张，全放出去会互相抢带宽，首图更慢。
-  static const int _maxConcurrent = 6;
+  int get _maxConcurrent => tvProfile ? 3 : 6;
 
   final Map<String, Uint8List> _memory = {};
   int _memoryBytes = 0;
@@ -486,6 +554,12 @@ class AquaImageCache {
 
   int _active = 0;
   final List<Completer<void>> _waiters = [];
+
+  // 独立低优先级刷新通道：不占下载闸门，最多 1 个并发，其余 FIFO 排队。
+  static const int _maxRefreshInFlight = 1;
+  int _refreshInFlight = 0;
+  final List<_StaleRefreshTask> _refreshQueue = [];
+  final Set<String> _refreshQueued = <String>{};
 
   /// 载入图片字节。[url] 可带签名：缓存 key 会先规范化（见 `image_key.dart`），
   /// 否则签名一变就整盘 miss，每次都要重新下载 + HEIC 转码。
@@ -498,7 +572,11 @@ class AquaImageCache {
       String key, String url, AquaImageFetcher api) async {
     try {
       final hit = await cached(key);
-      if (hit != null) return hit;
+      if (hit != null) {
+        // 命中即返回；过期检查与刷新都在独立低优先级任务里，不 await。
+        _maybeRefreshStale(key, url, api);
+        return hit;
+      }
       await _acquire();
       try {
         final image = await (fetchOverride ?? api.fetchImage)(url);
@@ -515,6 +593,55 @@ class AquaImageCache {
       }
     } finally {
       _inFlight.remove(key);
+    }
+  }
+
+  /// 命中后异步判断过期并排队刷新；任何失败都静默，旧图始终可用。
+  void _maybeRefreshStale(String key, String url, AquaImageFetcher api) {
+    unawaited(_checkAndQueue(key, url, api));
+  }
+
+  Future<void> _checkAndQueue(
+      String key, String url, AquaImageFetcher api) async {
+    bool stale;
+    try {
+      stale = staleChecker != null
+          ? await staleChecker!(key)
+          : await ImageCacheStore.instance.isExpired(key);
+    } catch (_) {
+      return; // 索引不可用：不擅自发起刷新。
+    }
+    if (!stale || !_refreshQueued.add(key)) return;
+    _refreshQueue.add(_StaleRefreshTask(key, url, api));
+    _pumpRefresh();
+  }
+
+  void _pumpRefresh() {
+    if (_refreshInFlight >= _maxRefreshInFlight || _refreshQueue.isEmpty) {
+      return;
+    }
+    final task = _refreshQueue.removeAt(0);
+    _refreshInFlight++;
+    unawaited(_runRefresh(task));
+  }
+
+  Future<void> _runRefresh(_StaleRefreshTask task) async {
+    try {
+      // 低优先级：先让出事件循环，确保当前可见项的 load 先占下载闸门。
+      await Future<void>.delayed(Duration.zero);
+      onStaleRefresh?.call(task.url);
+      final image = await (fetchOverride ?? task.api.fetchImage)(task.url);
+      _memoryPut(task.key, image.bytes);
+      try {
+        // put 会刷新 fetchedAt，下次命中不再判过期。
+        await ImageCacheStore.instance.put(task.key, image.bytes);
+      } catch (_) {}
+    } catch (_) {
+      // 刷新失败静默：旧图仍在，下次命中再试。
+    } finally {
+      _refreshInFlight--;
+      _refreshQueued.remove(task.key);
+      _pumpRefresh();
     }
   }
 
@@ -573,22 +700,48 @@ class AquaImageCache {
   }
 }
 
+class _StaleRefreshTask {
+  const _StaleRefreshTask(this.key, this.url, this.api);
+
+  final String key;
+  final String url;
+  final AquaImageFetcher api;
+}
+
 /// 封面预取：列表首屏的封面在滚动到之前先拉一次。
 ///
 /// 只预热前 [limit] 张，且走 [AquaImageCache] 的并发闸门；失败静默（真正可见
 /// 时 CoverImage 会再请求一次）。预取命中时 `load` 直接返回内存/磁盘字节，
 /// 不再占用下载名额。
+///
+/// 调度按可见性分两级：可见窗口 + 相邻 [neighborCount] 项立即提交，其余进
+/// 低优先级队列，且**滚动期间暂停提交**——低优先级预取不会把并发闸门占满，
+/// 当前可见的 CoverImage 始终能先拿到名额。可见起点可由 [firstVisibleIndex]
+/// 直接给出；缺省时按 SeriesGrid 网格布局从 ScrollNotification 的偏移近似估算
+/// （既有调用点无需改动，全部新增参数都有默认值）。
 class CoverPrefetch extends StatefulWidget {
   const CoverPrefetch({
     super.key,
     required this.urls,
     required this.child,
     this.limit = 12,
+    this.firstVisibleIndex = 0,
+    this.visibleCount = 8,
+    this.neighborCount = 6,
   });
 
   final List<String> urls;
   final Widget child;
   final int limit;
+
+  /// 当前首个可见项下标（外部已知时优先用，跳过偏移估算）。
+  final int firstVisibleIndex;
+
+  /// 一屏可见项数（用于圈定高优先级窗口）。
+  final int visibleCount;
+
+  /// 可见窗口前后各额外预取的项数。
+  final int neighborCount;
 
   @override
   State<CoverPrefetch> createState() => _CoverPrefetchState();
@@ -596,6 +749,20 @@ class CoverPrefetch extends StatefulWidget {
 
 class _CoverPrefetchState extends State<CoverPrefetch> {
   String _warmed = '';
+  int _generation = 0;
+  int _firstVisible = 0;
+  bool _scrolling = false;
+  final Set<String> _scheduled = <String>{};
+  final List<String> _lowQueue = <String>[];
+  Timer? _scrollIdle;
+  Timer? _pumpTimer;
+
+  @override
+  void dispose() {
+    _scrollIdle?.cancel();
+    _pumpTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -603,34 +770,143 @@ class _CoverPrefetchState extends State<CoverPrefetch> {
         .take(widget.limit)
         .where((u) => u.isNotEmpty)
         .toList(growable: false);
-    final signature = urls.join('|');
+    final signature = <String>[
+      urls.join('|'),
+      '${widget.firstVisibleIndex}',
+      '${widget.visibleCount}',
+      '${widget.neighborCount}',
+    ].join('#');
     if (signature != _warmed) {
       _warmed = signature;
+      _generation++;
+      _scheduled.clear();
+      _lowQueue.clear();
+      _firstVisible = widget.firstVisibleIndex;
       if (urls.isNotEmpty) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => _warm(urls));
+        final snapshot = List<String>.of(urls);
+        final gen = _generation;
+        WidgetsBinding.instance
+            .addPostFrameCallback((_) => _schedule(snapshot, gen));
       }
     }
-    return widget.child;
+    return NotificationListener<ScrollNotification>(
+      onNotification: _onScroll,
+      child: widget.child,
+    );
   }
 
-  void _warm(List<String> urls) {
+  bool _onScroll(ScrollNotification n) {
+    if (n is ScrollUpdateNotification) {
+      _scrolling = true;
+      _scrollIdle?.cancel();
+      _scrollIdle = Timer(const Duration(milliseconds: 120), _onScrollIdle);
+      final next = _estimateFirstVisible(n.metrics.pixels);
+      if (next != _firstVisible) {
+        _firstVisible = next;
+        _promoteVisible();
+      }
+    } else if (n is ScrollEndNotification) {
+      _onScrollIdle();
+    }
+    return false; // 不吞通知，GridView 自己还要用。
+  }
+
+  void _onScrollIdle() {
+    _scrollIdle?.cancel();
+    _scrollIdle = null;
+    _scrolling = false;
+    _pumpLow(_generation);
+  }
+
+  /// 按 SeriesGrid 的 SliverGridDelegateWithFixedCrossAxisCount 反推首个可见行。
+  /// 只用于排优先级，近似即可；外部给了 [CoverPrefetch.firstVisibleIndex] 时
+  /// 直接采用精确值。
+  int _estimateFirstVisible(double pixels) {
+    if (widget.firstVisibleIndex != 0) return widget.firstVisibleIndex;
+    if (pixels <= 0) return 0;
+    final cols = seriesGridColumns(context, null);
+    final width = MediaQuery.sizeOf(context).width;
+    final itemWidth = (width - 24 - (cols - 1) * 12) / cols;
+    if (itemWidth <= 0) return 0;
+    final rowHeight = itemWidth / 0.62 + 14;
+    final row = (pixels / rowHeight).floor();
+    return (row * cols).clamp(0, widget.urls.length);
+  }
+
+  void _schedule(List<String> urls, int gen) {
+    if (!mounted || gen != _generation) return;
+    final from = (_firstVisible - widget.neighborCount).clamp(0, urls.length);
+    final to = (_firstVisible + widget.visibleCount + widget.neighborCount)
+        .clamp(0, urls.length);
+    // 高优先级：可见 + 相邻，按到可见起点的距离排序后先提交。
+    final high = <int>[for (var i = from; i < to; i++) i]
+      ..sort((a, b) =>
+          (a - _firstVisible).abs().compareTo((b - _firstVisible).abs()));
+    for (final i in high) {
+      if (_scheduled.add(urls[i])) _submit(urls[i]);
+    }
+    // 其余按顺序进低优先级队列，滚动时暂停提交。
+    for (var i = 0; i < urls.length; i++) {
+      if (i >= from && i < to) continue;
+      final url = urls[i];
+      if (_scheduled.add(url)) _lowQueue.add(url);
+    }
+    _pumpLow(gen);
+  }
+
+  /// 可见窗口变化：把新窗口内的项立即提交，插到低优先级队列前面。
+  void _promoteVisible() {
+    if (!mounted) return;
+    final urls = widget.urls
+        .take(widget.limit)
+        .where((u) => u.isNotEmpty)
+        .toList(growable: false);
+    final from = (_firstVisible - widget.neighborCount).clamp(0, urls.length);
+    final to = (_firstVisible + widget.visibleCount + widget.neighborCount)
+        .clamp(0, urls.length);
+    for (var i = from; i < to; i++) {
+      final url = urls[i];
+      if (_scheduled.add(url)) {
+        _lowQueue.remove(url);
+        _submit(url);
+      }
+    }
+  }
+
+  void _pumpLow(int gen) {
+    _pumpTimer?.cancel();
+    if (!mounted || gen != _generation || _scrolling || _lowQueue.isEmpty) {
+      return;
+    }
+    // 低优先级节流：每 60ms 只放一个，避免瞬时占满并发闸门。
+    _pumpTimer = Timer(const Duration(milliseconds: 60), () {
+      if (!mounted || gen != _generation) return;
+      if (!_scrolling && _lowQueue.isNotEmpty) {
+        _submit(_lowQueue.removeAt(0));
+      }
+      _pumpLow(gen);
+    });
+  }
+
+  void _submit(String url) {
     if (!mounted) return;
     final api = AppScope.read(context).api;
-    for (final url in urls) {
-      unawaited(
-        AquaImageCache.instance.load(url, api).then(
-              (_) {},
-              onError: (Object _) {},
-            ),
-      );
-    }
+    unawaited(
+      AquaImageCache.instance.load(url, api).then(
+            (_) {},
+            onError: (Object _) {},
+          ),
+    );
   }
 }
 
 /// 网格列数：与 [SeriesGrid]、[SliverSeriesGrid] 共用同一套断点。
+///
+/// 电视形态下走 [tvColumnsFor]（少一档、封面更大），其余形态沿用原断点。
 int seriesGridColumns(BuildContext context, int? columns) {
   if (columns != null) return columns;
   final width = MediaQuery.sizeOf(context).width;
+  if (TvScope.isTvOf(context)) return tvColumnsFor(width);
   return width >= 1100 ? 6 : width >= 800 ? 4 : width >= 560 ? 3 : 2;
 }
 
@@ -663,6 +939,7 @@ class SliverSeriesGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cols = seriesGridColumns(context, columns);
+    final tv = TvScope.isTvOf(context);
     final childCount = items.length + (hasMore ? cols : 0);
     return SliverPadding(
       padding: padding,
@@ -681,19 +958,27 @@ class SliverSeriesGrid extends StatelessWidget {
                 WidgetsBinding.instance
                     .addPostFrameCallback((_) => onLoadMore!());
               }
-              return const Center(
-                child: SizedBox(
-                  width: 22,
-                  height: 22,
-                  child: CircularProgressIndicator(strokeWidth: 2),
+              // 电视上这个转圈不能占焦点：否则方向键会停在「加载更多」上。
+              return ExcludeFocus(
+                child: const Center(
+                  child: SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
                 ),
               );
             }
             final item = items[index];
-            return SeriesCard(
-              item: item,
-              onTap: () => onTap(item),
-              badge: badgeOf?.call(item),
+            return FocusTraversalOrder(
+              // 显式序号：网格的行列顺序必须与视觉一致，不能依赖构建顺序。
+              order: NumericFocusOrder(index.toDouble()),
+              child: SeriesCard(
+                item: item,
+                onTap: () => onTap(item),
+                badge: badgeOf?.call(item),
+                tvFocus: tv,
+              ),
             );
           },
           childCount: childCount,
@@ -733,9 +1018,11 @@ class SeriesGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cols = seriesGridColumns(context, columns);
+    final tv = TvScope.isTvOf(context);
     final childCount = items.length + (hasMore ? cols : 0) + (header != null ? 1 : 0);
     return CoverPrefetch(
       urls: [for (final item in items) item.coverUrl],
+      limit: TvScope.isTvOf(context) ? 8 : 12,
       child: GridView.builder(
       controller: controller,
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
@@ -754,17 +1041,24 @@ class SeriesGrid extends StatelessWidget {
           if (hasMore && onLoadMore != null) {
             WidgetsBinding.instance.addPostFrameCallback((_) => onLoadMore!());
           }
-          return const Center(
-              child: SizedBox(
-                  width: 22,
-                  height: 22,
-                  child: CircularProgressIndicator(strokeWidth: 2)));
+          // 电视上转圈不占焦点。
+          return ExcludeFocus(
+            child: const Center(
+                child: SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2))),
+          );
         }
         final item = items[i];
-        return SeriesCard(
-          item: item,
-          onTap: () => onTap(item),
-          badge: badgeOf?.call(item),
+        return FocusTraversalOrder(
+          order: NumericFocusOrder(i.toDouble()),
+          child: SeriesCard(
+            item: item,
+            onTap: () => onTap(item),
+            badge: badgeOf?.call(item),
+            tvFocus: tv,
+          ),
         );
       },
       ),

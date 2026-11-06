@@ -13,6 +13,7 @@ import '../core/reader/reader_speech_controller.dart';
 import '../core/window_geometry.dart';
 import '../update/update_service.dart';
 import '../widgets/common.dart';
+import '../widgets/tv_scope.dart';
 import '../widgets/reader/reader_audio_bar.dart';
 
 import 'discover_screen.dart';
@@ -159,7 +160,9 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
 
   @override
   Widget build(BuildContext context) {
-    final wide = MediaQuery.sizeOf(context).width >= 760;
+    final width = MediaQuery.sizeOf(context).width;
+    final wide = width >= 760;
+    final tv = TvScope.isTvOf(context);
     final pages = [
       const DiscoverScreen(),
       RandomFeedScreen(active: _tab == 1),
@@ -178,11 +181,13 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                 selectedIndex: _tab,
                 onDestinationSelected: (i) => setState(() => _tab = i),
                 labelType: NavigationRailLabelType.all,
+                // 电视观看距离远：导航图标与列宽都要放大，否则三米外看不清。
+                minWidth: tv ? 96 : null,
                 destinations: [
                   for (final t in _tabs)
                     NavigationRailDestination(
-                      icon: Icon(t.$1),
-                      selectedIcon: Icon(t.$2),
+                      icon: Icon(t.$1, size: tv ? 30 : null),
+                      selectedIcon: Icon(t.$2, size: tv ? 30 : null),
                       label: Text(t.$3),
                     ),
                 ],

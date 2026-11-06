@@ -18,20 +18,34 @@ RankItem row(
     );
 
 void main() {
-  group('rankBadges 跨页名次', () {
-    test('首页无偏移：第1、第2', () {
+  group('rankBadges 使用 Go 侧已全局化的 position', () {
+    test('首页显示第1、第2', () {
       final badges = rankBadges([row('a', position: 1), row('b', position: 2)]);
       expect(badges['a'], '第1');
       expect(badges['b'], '第2');
     });
 
-    test('第二页按已加载原始条目数接续', () {
-      final badges = rankBadges(
-        [row('x', position: 1), row('y', position: 2)],
-        offset: 24,
-      );
-      expect(badges['x'], '第25');
-      expect(badges['y'], '第26');
+    test('第二页直接用全局 position，不再叠加已加载条数', () {
+      final badges = rankBadges([
+        row('x', position: 11),
+        row('y', position: 12),
+      ]);
+      expect(badges['x'], '第11');
+      expect(badges['y'], '第12');
+    });
+
+    test('回归：首页 1~10，第二页必须 11~20，不能跳到 21', () {
+      final first = rankBadges([
+        for (var i = 1; i <= 10; i++) row('a$i', position: i),
+      ]);
+      final second = rankBadges([
+        for (var i = 11; i <= 20; i++) row('b$i', position: i),
+      ]);
+      expect(first['a10'], '第10');
+      expect(second['b11'], '第11');
+      expect(second['b20'], '第20');
+      expect(second.values, isNot(contains('第21')));
+      expect(second.values, isNot(contains('第31')));
     });
 
     test('忽略不可靠的 rank：重复 rank 不再产生重复名次', () {
@@ -43,8 +57,8 @@ void main() {
       expect(badges['b'], '第2', reason: '服务端两行都给 rank=1，也不能重复');
     });
 
-    test('rank 有值也不参与计算，只用 position + offset', () {
-      final badges = rankBadges([row('a', rank: 5, position: 1)], offset: 20);
+    test('rank 有值也不参与计算', () {
+      final badges = rankBadges([row('a', rank: 5, position: 21)]);
       expect(badges['a'], '第21');
     });
 
@@ -57,9 +71,8 @@ void main() {
       expect(badges['a'], '第2');
     });
 
-    test('页内序号为 0 的行被跳过，不会被偏移成有效名次', () {
-      final badges = rankBadges([row('a')], offset: 30);
-      expect(badges, isEmpty);
+    test('position 为 0 的行被跳过', () {
+      expect(rankBadges([row('a')]), isEmpty);
     });
 
     test('演员行（无 series_id）被跳过', () {
@@ -71,20 +84,21 @@ void main() {
       expect(badges['a'], '第2');
     });
 
-    test('翻三页时偏移可累加（模拟调用方累计 rawCount）', () {
-      var offset = 0;
+    test('多页名次连续且互不覆盖', () {
       final seen = <String, String>{};
-      for (final page in const [24, 24, 24]) {
-        final items = [
-          for (var i = 1; i <= 3; i++)
-            row('p$offset-$i', position: i),
-        ];
-        seen.addAll(rankBadges(items, offset: offset));
-        offset += page;
+      var place = 1;
+      for (var page = 0; page < 3; page++) {
+        final items = <RankItem>[];
+        for (var i = 0; i < 10; i++) {
+          items.add(row('p${page}_$i', position: place++));
+        }
+        seen.addAll(rankBadges(items));
       }
-      expect(seen['p0-1'], '第1');
-      expect(seen['p24-1'], '第25');
-      expect(seen['p48-1'], '第49');
+      expect(seen.length, 30);
+      expect(seen['p0_0'], '第1');
+      expect(seen['p1_0'], '第11');
+      expect(seen['p2_0'], '第21');
+      expect(seen['p2_9'], '第30');
     });
   });
 }

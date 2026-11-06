@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show HttpClient;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -6,13 +7,15 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../core/player/player_engine.dart';
+import '../core/player/mpv_headers.dart';
+import '../core/player/playback_failure_gate.dart';
 import '../core/cast/cast_controller.dart';
 import '../core/aqua_api.dart';
 import '../core/bili/api.dart';
 import '../core/error_log.dart';
-import '../core/next_episode_prompt.dart';
 import '../core/player/track_preference.dart';
 import '../core/sources/media_proxy.dart';
+import '../core/sources/resolved_playback.dart';
 import '../core/sources/parse_engine.dart';
 import '../core/sources/source_adapter.dart';
 import '../core/sources/source_import.dart';
@@ -75,6 +78,9 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   bool _proxyUsed = false;
   bool _directRetried = false;
   String? _error;
+
+  /// 解析接口的提示（如「高清需登录」）：只做轻提示，复用失败面板会误报。
+  String? _notice;
   bool _loading = true;
 
   /// 本次播放请求代号：切集/换线后，旧请求的 await 结果一律丢弃。
@@ -90,6 +96,14 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   PlayLine get _line {
     final lines = widget.series.lines;
     return lines[_lineIndex.clamp(0, lines.length - 1)];
+  }
+
+  /// 换线后线路长度可能不同：所有取集的地方一律走这里，避免用已过期的
+  /// `widget.line.episodes.length` 造成 RangeError。
+  UnifiedEpisode get _episode {
+    final eps = _line.episodes;
+    if (eps.isEmpty) return UnifiedEpisode(title: '', url: '', index: 0);
+    return eps[_index.clamp(0, eps.length - 1)];
   }
 
   Duration _position = Duration.zero;
@@ -119,12 +133,31 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   StreamSubscription<bool>? _completedSub;
   StreamSubscription<bool>? _bufferingSub;
 
-  /// 下一集提示条（播完前引导；本播放器由 completed 无条件推进，
-  /// 提示条取消后拦截该推进，避免「点了取消还自动跳集」）。
-  final Set<String> _nextPromptConsumed = {};
-  bool _nextPromptVisible = false;
-  int _nextPromptRemainingMs = 0;
-  Timer? _nextPromptTimer;
+  /// mpv 的 403 / 404 / 协议不支持 / 解码失败不会让 `open()` 抛异常，只走
+  /// error stream。不订阅就会「黑屏转圈但 UI 显示播放中」，失败链永不触发。
+  StreamSubscription<String>? _errorSub;
+
+  /// 当前一次打开尝试的上下文：error stream 回调靠它复用同一条失败链。
+  ResolvedPlayback? _attemptPlayback;
+  bool _attemptForceDirect = false;
+  String _attemptStage = '';
+  bool _playingConfirmed = false;
+
+  /// 同一 epoch 只处理一次失败（catch 与 error stream 可能同时到达）。
+  int _failureHandledEpoch = -1;
+
+  /// mpv 在开播阶段常先报一条非致命错误（某个分片 / 音轨 / 广告段失败后
+  /// 回退），主画面随后仍能出画。给一个宽限期，期间出画就撤销失败判定，
+  /// 避免「正在正常播放却弹播放失败」。
+  Timer? _errorGraceTimer;
+
+  /// 是否已经有可见播放进度：区分「真的打不开」与「运行期非致命错误」。
+  bool get _isVisiblyPlaying => hasVisiblePlayback(
+        playingConfirmed: _playingConfirmed,
+        playing: _playing,
+        position: _position,
+        buffering: _buffering,
+      );
 
   @override
   void initState() {
@@ -159,6 +192,36 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
         ? null
         : histEntry!.subtitleTrackKey;
     _tracksSub = _engine.stream.tracks.listen((_) => _applyTrackPreference());
+    _errorSub = _engine.stream.error.listen((message) {
+      if (message.isEmpty) return;
+      final playback = _attemptPlayback;
+      if (playback == null || !_isCurrentOpen(_openEpoch)) return;
+      // 已经出画 / 有播放进度 / 正在缓冲 → 只是运行期非致命错误（分片、
+      // 字幕、音轨回退等），只留痕，绝不弹失败面板、绝不换线。
+      if (_isVisiblyPlaying) {
+        ErrorLog.instance.record(
+            '源播放运行期错误(${_diagLabel(playback, '运行期')})',
+            message,
+            StackTrace.current);
+        _errorGraceTimer?.cancel();
+        _errorGraceTimer = null;
+        return;
+      }
+      // 开播阶段：mpv 可能先报错再自行回退成功。延迟判定，期间出画即撤销。
+      final epoch = _openEpoch;
+      final forceDirect = _attemptForceDirect;
+      final stage = _attemptStage;
+      _errorGraceTimer?.cancel();
+      _errorGraceTimer = Timer(playbackErrorGrace, () {
+        if (!mounted || !_isCurrentOpen(epoch)) return;
+        if (_isVisiblyPlaying) return;
+        unawaited(_handleFailure(message, StackTrace.current,
+            epoch: epoch,
+            playback: playback,
+            forceDirect: forceDirect,
+            stage: stage));
+      });
+    });
     castController.onRemoteStopped = (device, position) {
       if (!mounted) return;
       final behavior =
@@ -183,8 +246,9 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
     unawaited(_releaseProxy());
     _historyTimer?.cancel();
     _hideTimer?.cancel();
-    _nextPromptTimer?.cancel();
     _tracksSub?.cancel();
+    _errorSub?.cancel();
+    _errorGraceTimer?.cancel();
     _posSub?.cancel();
     _durSub?.cancel();
     _playingSub?.cancel();
@@ -197,24 +261,86 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   /// 这次打开是否仍然有效：页面还在，且没有被更晚的打开顶掉。
   bool _isCurrentOpen(int epoch) => mounted && epoch == _openEpoch;
 
-  Future<void> _open({bool forceDirect = false}) async {
+  /// 本地播放与投屏共用同一份解析结果，杜绝「APP 内 403、投屏却能播」的
+  /// 链路分叉。两条路径都必须从这里取 url 与 headers。
+  ResolvedPlayback _playback(UnifiedEpisode ep,
+          {required bool adFilterEnabled}) =>
+      resolvePlayback(
+        rawUrl: ep.url,
+        sourceHeaders: widget.source.headers,
+        adFilterEnabled: adFilterEnabled,
+        baseUrl: widget.source.api,
+      );
+
+  /// 去广告代理启用前的轻量探测：只取前 16 字节，任何失败都直接走直链。
+  /// 探测本身绝不能阻断播放。
+  Future<bool> _probeProxy(ResolvedPlayback playback) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 3);
+    try {
+      final req = await client.getUrl(Uri.parse(playback.url));
+      playback.headers.forEach((k, v) => req.headers.set(k, v));
+      req.headers.set('Range', 'bytes=0-16');
+      final res = await req.close().timeout(const Duration(seconds: 3));
+      await res.drain();
+      return res.statusCode >= 200 && res.statusCode < 400;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// [fresh] = 一次全新的播放请求（换集 / 重试 / 用户主动换线路）。
+  /// 递归回退（代理→直链、换线）必须传 false，否则会把回退额度重置成死循环。
+  Future<void> _open({bool forceDirect = false, bool fresh = true}) async {
+    if (fresh) {
+      // 旧实现从不复位这三个状态：第一集代理失败后，后续每集仍走代理却
+      // 不再回退直链，换线额度耗尽后任何失败直接终态 —— 表现为「第一集能播，
+      // 之后全播不出来」。
+      _directRetried = false;
+      _autoSwitchCount = 0;
+      _proxyUsed = false;
+      _failureHandledEpoch = -1;
+    }
+    _errorGraceTimer?.cancel();
+    _errorGraceTimer = null;
     final epoch = ++_openEpoch;
-    _nextPromptConsumed.clear();
-    _cancelNextPromptTimer();
-    _nextPromptVisible = false;
-    final ep = _line.episodes[_index];
+    _playingConfirmed = false;
+    _attemptForceDirect = forceDirect;
+    _attemptStage = '探测';
+    final ep = _episode;
+    if (ep.url.trim().isEmpty) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = '该分集没有播放地址，请换线路或换源';
+        });
+      }
+      return;
+    }
     // async 间隙不再读 context：开头一次性取好。
-    final jxParses = AppScope.read(context).marketSites.parses;
-    final adFilterEnabled = AppScope.read(context).settings.sourcesAdFilter;
-    // 去广告代理：CMS 源默认包裹（B 站/红果走 resolvePlay 不经此路径）。
-    final wantProxy = !forceDirect &&
+    final scope = AppScope.read(context);
+    final jxParses = scope.marketSites.parses;
+    final playback =
+        _playback(ep, adFilterEnabled: scope.settings.sourcesAdFilter);
+    _attemptPlayback = playback;
+    // 默认路径 = 直链 + mpv 双保险头注入。去广告代理只在「用户开启 + 是 HLS
+    // + 上游探测通过 + 本集还没试过直链回退」时启用。
+    var wantProxy = !forceDirect &&
+        !_directRetried &&
         widget.resolvePlay == null &&
         widget.source.kind != SourceKind.spider &&
-        adFilterEnabled;
-    if (!wantProxy) await _releaseProxy();
+        playback.needsProxy;
+    if (wantProxy && !await _probeProxy(playback)) wantProxy = false;
+    if (!_isCurrentOpen(epoch)) return;
+    if (!wantProxy) {
+      _proxyUsed = false;
+      await _releaseProxy();
+    }
     setState(() {
       _loading = true;
       _error = null;
+      _notice = null;
     });
     try {
       var url = ep.url;
@@ -228,7 +354,8 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
         url = resolved.videoUrl;
         audioUrl = resolved.audioUrl;
         if (resolved.notice != null) {
-          setState(() => _error = resolved.notice);
+          // 解析提示（如「高清需登录」）不是播放失败，只走轻提示条。
+          setState(() => _notice = resolved.notice);
         }
         if (widget.loadDanmaku != null) {
           try {
@@ -240,64 +367,126 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
         }
       }
       if (wantProxy) {
+        _attemptStage = '代理';
         // 必须先 acquire 才能 wrap：wrap 直接读已监听端口的 server.port。
         await _acquireProxy();
         if (!_isCurrentOpen(epoch)) return;
-        url = MediaProxy.instance.wrap(url, headers: _headers());
+        url = MediaProxy.instance.wrap(url, headers: playback.headers);
         _proxyUsed = true;
       }
       // 音轨分离：mpv audio-files 选项在 loadfile 前设置才生效。
+      _attemptStage = '初始化';
       await _engine.initialize();
+      if (!_isCurrentOpen(epoch)) return;
+      // Media(httpHeaders:) 在部分平台不落到 libmpv 请求上（防盗链源全 403），
+      // 补 http-header-fields / user-agent 原生属性做双保险。
+      _attemptStage = '头注入';
+      await MpvHeaders.install(_engine, playback.headers);
       if (!_isCurrentOpen(epoch)) return;
       await _engine.setProperty('audio-files', audioUrl ?? '');
       if (!_isCurrentOpen(epoch)) return;
       // jx：非直链地址先走解析接口（配置里的 type=1 parse）。
-      if (!ParseEngine.isDirectMedia(url) && jxParses.isNotEmpty) {
-        final parsed = await ParseEngine().resolve(url, parses: jxParses);
-        if (!_isCurrentOpen(epoch)) return;
-        if (parsed != null) url = parsed.url;
+      if (!ParseEngine.isDirectMedia(url)) {
+        _attemptStage = '解析';
+        if (jxParses.isEmpty) {
+          ErrorLog.instance.record(
+              _diagLabel(playback, '无解析接口'),
+              '该地址不是媒体直链且没有配置 jx 解析接口，请到源市场扫描或粘贴带 parses 的配置',
+              StackTrace.current);
+        } else {
+          final parsed = await ParseEngine().resolve(url, parses: jxParses);
+          if (!_isCurrentOpen(epoch)) return;
+          if (parsed != null) {
+            url = parsed.url;
+          } else {
+            ErrorLog.instance.record(
+                _diagLabel(playback, '解析失败'),
+                '全部 ${jxParses.length} 个解析接口均失败，仍尝试原地址',
+                StackTrace.current);
+          }
+        }
       }
-      await _engine.open(Media(url, httpHeaders: _headers()));
+      _attemptStage = '打开';
+      await _engine.open(Media(url, httpHeaders: playback.headers));
       if (!_isCurrentOpen(epoch)) return;
       _subscribe();
       _danmaku = danmaku;
       setState(() {
         _loading = false;
-        _playing = true;
+        _error = null;
       });
       _armHideTimer();
       _recordHistory(finished: false);
-    } catch (e) {
-      ErrorLog.instance.record('源播放', e, StackTrace.current);
-      if (!_isCurrentOpen(epoch)) return;
-      // 代理路径失败：回退直链重试一次；必须显式绕过代理，否则会再炸一次。
-      if (_proxyUsed && !_directRetried) {
-        _directRetried = true;
-        _proxyUsed = false;
-        await _releaseProxy();
-        await _open(forceDirect: true);
-        return;
-      }
-      // 自动换线：同源还有下一条线路就切过去重试（xiugou-tv 语义简化版）。
-      if (_autoSwitchCount < widget.series.lines.length - 1 &&
-          _lineIndex + 1 < widget.series.lines.length) {
-        _autoSwitchCount++;
-        setState(() {
-          _lineIndex++;
-          _index = 0;
-        });
-        await _open(forceDirect: forceDirect);
-        return;
-      }
-      // 终态失败才写健康分：换线优先级与 30 分钟冷却都依赖失败计数。
-      await _health.recordFailure(widget.source.id, '$e', playFailure: true);
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = '播放失败，可回详情页换线路或换源';
-      });
+    } catch (e, stack) {
+      await _handleFailure(e, stack,
+          epoch: epoch,
+          playback: playback,
+          forceDirect: forceDirect,
+          stage: _attemptStage);
     }
   }
+
+  /// 播放失败的单一入口：catch 与 mpv error stream 共用，保证任何失败都会
+  /// 走「代理→直链→换线→终态」的完整恢复链并落盘诊断。
+  Future<void> _handleFailure(
+    Object error,
+    StackTrace stack, {
+    required int epoch,
+    required ResolvedPlayback playback,
+    required bool forceDirect,
+    required String stage,
+  }) async {
+    if (!_isCurrentOpen(epoch)) return;
+    if (_failureHandledEpoch == epoch) return;
+    _failureHandledEpoch = epoch;
+    ErrorLog.instance.record(_diagLabel(playback, stage), error, stack);
+    // 已经在出画（有进度 / playing / 缓冲中）：把画面换成失败面板是错的，
+    // 这类错误只留日志。真正的「打不开」在宽限期结束时仍无进度才走到这里。
+    if (_isVisiblyPlaying) return;
+    // 代理路径失败：回退直链重试一次；必须显式绕过代理，否则会再炸一次。
+    if (_proxyUsed && !_directRetried) {
+      _directRetried = true;
+      _proxyUsed = false;
+      await _releaseProxy();
+      await _open(forceDirect: true, fresh: false);
+      return;
+    }
+    // 自动换线：同源还有下一条线路就切过去重试。
+    final lines = widget.series.lines;
+    if (_autoSwitchCount < lines.length - 1 && _lineIndex + 1 < lines.length) {
+      _autoSwitchCount++;
+      setState(() {
+        _lineIndex++;
+        _index = 0;
+      });
+      await _open(forceDirect: forceDirect, fresh: false);
+      return;
+    }
+    // 终态失败才写健康分：换线优先级与冷却都依赖失败计数。
+    await _health.recordFailure(widget.source.id, '$error', playFailure: true);
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _playing = false;
+      _error = '播放失败（$stage）。可点「重试」或「换线路」；'
+          '若仍失败请到「我的 → 关于」复制错误日志';
+      _notice = null;
+    });
+  }
+
+  /// 出画后撤销宽限期内的待定失败，并清掉可能已显示的误报面板。
+  void _clearPendingFailure() {
+    _errorGraceTimer?.cancel();
+    _errorGraceTimer = null;
+    if (_error != null && mounted) {
+      setState(() => _error = null);
+    }
+  }
+
+  String _diagLabel(ResolvedPlayback playback, String stage) =>
+      '源播放[${widget.source.name}/${widget.series.title}/${_line.name}/'
+      '${_episode.title}/$stage/${playback.diagnostic}/'
+      '${_proxyUsed ? 'proxy' : 'direct'}]';
 
   Future<void> _acquireProxy() async {
     if (_proxyRef) return;
@@ -311,23 +500,18 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
     await MediaProxy.instance.release();
   }
 
+  /// B 站等 resolvePlay 分支仍用源级头（不经过 resolvePlayback 的 HLS 判定）。
   Map<String, String> _headers() {
     final h = Map.of(widget.source.headers);
-    if (!h.containsKey('User-Agent')) {
+    if (headerOf(h, 'user-agent') == null) {
       h['User-Agent'] = SourceImporter.defaultUa;
     }
     return h;
   }
 
-  /// 投屏用的「防盗链信号头」：带 Referer 或自定义 UA 的源，电视大概率拉不动，
-  /// 经本机代理中转；仅默认 UA 的源直投（保住投屏后手机可离开前台的体验）。
-  Map<String, String> _castHeaders() {
-    final h = _headers();
-    final hasReferer = (h['Referer'] ?? '').trim().isNotEmpty;
-    final customUa =
-        (h['User-Agent'] ?? '').isNotEmpty && h['User-Agent'] != SourceImporter.defaultUa;
-    return (hasReferer || customUa) ? h : const {};
-  }
+  /// 投屏用的「防盗链信号头」：与本地播放共用同一份 [ResolvedPlayback]。
+  Map<String, String> _castHeaders(ResolvedPlayback playback) =>
+      castHeadersOf(playback);
 
   /// 应用按剧轨道偏好（stream.tracks 驱动，每集一次；序号越界保持默认）。
   void _applyTrackPreference() {
@@ -389,7 +573,8 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
     _posSub = _engine.stream.position.listen((p) {
       if (!mounted) return;
       setState(() => _position = p);
-      _maybeUpdateNextPrompt(p);
+      // 有播放进度 = 已经出画：撤销待定的失败判定与已误报的面板。
+      if (p > Duration.zero) _clearPendingFailure();
     });
     _durSub = _engine.stream.duration.listen((d) {
       if (!mounted) return;
@@ -397,7 +582,20 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
     });
     _playingSub = _engine.stream.playing.listen((v) {
       if (!mounted) return;
-      setState(() => _playing = v);
+      setState(() {
+        _playing = v;
+        if (v) {
+          _loading = false;
+          // 出画即撤销失败面板（非致命错误曾被误报成「播放失败」）。
+          _error = null;
+        }
+      });
+      if (v) _clearPendingFailure();
+      if (v && !_playingConfirmed) {
+        _playingConfirmed = true;
+        // 真正出画才记成功，对冲终态 recordFailure 造成的健康分单调下降。
+        unawaited(_health.recordSuccess(widget.source.id, 0).catchError((_) {}));
+      }
     });
     _bufferingSub = _engine.stream.buffering.listen((v) {
       if (!mounted) return;
@@ -407,86 +605,14 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
       if (!mounted || !completed) return;
       _recordHistory(finished: true);
       if (_index < _line.episodes.length - 1) {
-        // 提示条被用户取消：本集停在片尾，不再自动跳集。
-        if (_nextPromptConsumed.contains('next')) return;
         setState(() => _index++);
         _open();
       }
     });
   }
 
-  /// 下一集提示条：位置事件驱动（出现 / 倒计时 / seek 回退收起）。
-  /// 本播放器没有片尾配置，outroConfigured 恒为 false。
-  void _maybeUpdateNextPrompt(Duration position) {
-    if (!mounted) return;
-    if (_nextPromptVisible) {
-      final remaining = _duration - position;
-      if (remaining <= Duration.zero) return; // 自然播完交给 completed
-      if (shouldHideNextPromptOnSeek(
-        position: position,
-        duration: _duration,
-        outroConfigured: false,
-      )) {
-        _hideNextPrompt(release: true);
-      } else {
-        setState(() => _nextPromptRemainingMs = remaining.inMilliseconds);
-      }
-      return;
-    }
-    final prompt = nextEpisodePrompt(
-      position: position,
-      duration: _duration,
-      hasNext: _index < _line.episodes.length - 1,
-      // 本播放器由 completed 无条件推进；提示条仅引导，取消可拦截推进。
-      autoNext: false,
-      outroConfigured: false,
-      consumed: _nextPromptConsumed,
-    );
-    if (prompt == null) return;
-    setState(() {
-      _nextPromptVisible = true;
-      _nextPromptRemainingMs = prompt.remainingMs;
-    });
-    _nextPromptTimer = Timer(
-      Duration(milliseconds: prompt.remainingMs),
-      () {
-        if (mounted) _hideNextPrompt();
-      },
-    );
-  }
-
-  void _cancelNextPromptTimer() {
-    _nextPromptTimer?.cancel();
-    _nextPromptTimer = null;
-  }
-
-  void _hideNextPrompt({bool release = false}) {
-    _cancelNextPromptTimer();
-    if (release) releasePrompt(_nextPromptConsumed);
-    _nextPromptVisible = false;
-    if (mounted) setState(() {});
-  }
-
-  /// 提示条「立即播放」：直接切下一集。
-  void _confirmNextPrompt() {
-    _cancelNextPromptTimer();
-    _nextPromptVisible = false;
-    consumePrompt(_nextPromptConsumed);
-    _recordHistory(finished: true);
-    if (_index < _line.episodes.length - 1) {
-      setState(() => _index++);
-      _open();
-    }
-  }
-
-  /// 提示条「取消」：本集不再出现，且自然播完后不再自动跳集。
-  void _dismissNextPrompt() {
-    consumePrompt(_nextPromptConsumed);
-    _hideNextPrompt();
-  }
-
   Future<void> _recordHistory({required bool finished}) async {
-    final ep = _line.episodes[_index];
+    final ep = _episode;
     await _history.record(
       seriesId: widget.series.historyKey,
       title: widget.series.title,
@@ -500,48 +626,6 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
       sourceKey: widget.source.id,
       // 详情接口挂掉时的兜底直链（spider 源这里是令牌，仍按原样存）。
       playUrl: ep.url,
-    );
-  }
-
-  /// 下一集提示条（底部居中；倒计时 + 立即播放 / 取消）。
-  Widget _buildNextPromptBar(BuildContext context) {
-    final remaining = Duration(milliseconds: _nextPromptRemainingMs);
-    final mm = remaining.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final ss = remaining.inSeconds.remainder(60).toString().padLeft(2, '0');
-    final nextNo = (_index + 2).clamp(1, _line.episodes.length);
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 96,
-      child: Center(
-        child: Material(
-          color: Colors.black.withValues(alpha: 0.74),
-          borderRadius: BorderRadius.circular(24),
-          child: Padding(
-            padding: const EdgeInsets.only(left: 14, right: 4),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.skip_next_rounded,
-                    color: Colors.white, size: 18),
-                const SizedBox(width: 8),
-                Text('即将播放：第 $nextNo 集 · $mm:$ss',
-                    style: const TextStyle(color: Colors.white, fontSize: 13)),
-                TextButton(
-                  onPressed: _confirmNextPrompt,
-                  child: const Text('立即播放',
-                      style: TextStyle(color: Colors.amberAccent)),
-                ),
-                TextButton(
-                  onPressed: _dismissNextPrompt,
-                  child: const Text('取消',
-                      style: TextStyle(color: Colors.white70)),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
     );
   }
 
@@ -651,8 +735,8 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
         final relay = await scope.api.castRelayStart(
           url: resolved.videoUrl,
           audioUrl: resolved.audioUrl ?? '',
-          userAgent: h['User-Agent'] ?? '',
-          referer: h['Referer'] ?? '',
+          userAgent: headerOf(h, 'user-agent') ?? '',
+          referer: headerOf(h, 'referer') ?? '',
         );
         _castRelayApi = scope.api;
         _castRelaySession = relay['session'] as String?;
@@ -666,13 +750,16 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
         return null; // 解析/中继失败：本轮连投终止（首次投屏则 UI 报错）。
       }
     }
+    // 与 _open 共用同一份解析结果：URL 与 headers 口径完全一致。
+    final playback =
+        _playback(ep, adFilterEnabled: scope.settings.sourcesAdFilter);
     return CastMedia(
-      url: ep.url,
+      url: playback.url,
       title: title,
       position: index == _index ? _position : Duration.zero,
       episodeIndex: ep.index,
       episodeCount: _line.episodes.length,
-      headers: _castHeaders(),
+      headers: _castHeaders(playback),
     );
   }
 
@@ -686,7 +773,7 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   }
 
   Future<void> _openCastSheet() async {
-    final ep = _line.episodes[_index];
+    final ep = _episode;
     final scope = AppScope.read(context);
     final media = await _resolveCastMedia(ep, _index, scope);
     if (media == null || !mounted) {
@@ -731,13 +818,26 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   }
 
   Future<void> _switchEpisode(int index) async {
-    setState(() => _index = index.clamp(0, widget.line.episodes.length - 1));
+    final eps = _line.episodes;
+    final maxIndex = eps.isEmpty ? 0 : eps.length - 1;
+    setState(() => _index = index.clamp(0, maxIndex));
+    await _open();
+  }
+
+  /// 用户主动换线路：不占用自动换线额度，且按 fresh 复位所有回退状态。
+  Future<void> _retryNextLine() async {
+    final lines = widget.series.lines;
+    if (lines.isEmpty) return;
+    setState(() {
+      _lineIndex = (_lineIndex + 1) % lines.length;
+      _index = 0;
+    });
     await _open();
   }
 
   @override
   Widget build(BuildContext context) {
-    final ep = _line.episodes[_index];
+    final ep = _episode;
     // 桌面端 Esc/Backspace 返回：AppBar 只在控件条显示时可见，
     // 没有键盘出口的话全屏播 B 站视频就"退不出来"。
     return Focus(
@@ -859,7 +959,39 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
               ),
             if (_loading)
               const Center(child: CircularProgressIndicator()),
-            if (_error != null)
+            // 解析提示只是信息条，不用失败面板；可手动关闭。
+            if (_notice != null)
+              Positioned(
+                top: 56,
+                left: 16,
+                right: 16,
+                child: SafeArea(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(_notice!,
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 12)),
+                        ),
+                        InkWell(
+                          onTap: () => setState(() => _notice = null),
+                          child: const Icon(Icons.close,
+                              size: 16, color: Colors.white54),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            // 双保险：只要已经出画，就不再把失败面板盖到画面上。
+            if (_error != null && !_isVisiblyPlaying)
               Center(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -868,14 +1000,23 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
                         style:
                             const TextStyle(color: Colors.white70)),
                     const SizedBox(height: 12),
-                    FilledButton.tonal(
-                      onPressed: _open,
-                      child: const Text('重试'),
+                    Wrap(
+                      spacing: 8,
+                      alignment: WrapAlignment.center,
+                      children: [
+                        FilledButton.tonal(
+                          onPressed: _open,
+                          child: const Text('重试'),
+                        ),
+                        OutlinedButton(
+                          onPressed: _retryNextLine,
+                          child: const Text('换线路'),
+                        ),
+                      ],
                     ),
                   ],
                 ),
               ),
-            if (_nextPromptVisible) _buildNextPromptBar(context),
             if (_showControls) ...[
               Positioned(
                 left: 0,

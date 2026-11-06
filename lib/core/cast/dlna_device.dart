@@ -1,5 +1,7 @@
 import 'package:xml/xml.dart';
 
+import 'didl.dart';
+
 /// DLNA 设备模型与描述 XML 解析。
 ///
 /// 描述文档语义（UPnP Device Architecture 1.0）：
@@ -11,8 +13,10 @@ class DlnaDevice {
     required this.udn,
     required this.friendlyName,
     this.modelName = '',
+    this.manufacturer = '',
     required this.controlUrl,
     this.renderingControlUrl = '',
+    this.connectionManagerUrl = '',
     this.eventSubUrl = '',
     this.location = '',
     DateTime? discoveredAt,
@@ -23,9 +27,15 @@ class DlnaDevice {
   final String friendlyName;
   final String modelName;
 
+  /// 厂商名（设备配方指纹的一段）；旧描述/旧持久化缺省空串。
+  final String manufacturer;
+
   /// AVTransport controlURL（绝对地址）。
   final String controlUrl;
   final String renderingControlUrl;
+
+  /// ConnectionManager controlURL（GetProtocolInfo 预检）；空 = 无预检能力。
+  final String connectionManagerUrl;
 
   /// AVTransport 事件订阅地址（GENA）；空 = 不支持，纯轮询。
   final String eventSubUrl;
@@ -37,18 +47,23 @@ class DlnaDevice {
         'udn': udn,
         'name': friendlyName,
         'model': modelName,
+        'manufacturer': manufacturer,
         'control_url': controlUrl,
         'rendering_control_url': renderingControlUrl,
+        'connection_manager_url': connectionManagerUrl,
         'event_sub_url': eventSubUrl,
         'location': location,
       };
 
+  /// v1/v2 没有 `manufacturer` / `connection_manager_url`：缺省空串即可读。
   factory DlnaDevice.fromPersistJson(Map<String, dynamic> json) => DlnaDevice(
         udn: json['udn'] as String? ?? '',
         friendlyName: json['name'] as String? ?? '',
         modelName: json['model'] as String? ?? '',
+        manufacturer: json['manufacturer'] as String? ?? '',
         controlUrl: json['control_url'] as String? ?? '',
         renderingControlUrl: json['rendering_control_url'] as String? ?? '',
+        connectionManagerUrl: json['connection_manager_url'] as String? ?? '',
         eventSubUrl: json['event_sub_url'] as String? ?? '',
         location: json['location'] as String? ?? '',
       );
@@ -132,6 +147,11 @@ Uri? rebuildControlUrl({
 }
 
 /// 解析设备描述 XML；没有 AVTransport 服务时返回 null（非投屏目标）。
+///
+/// 遍历**所有** `<device>`（含 embedded device）找 AVTransport /
+/// RenderingControl / ConnectionManager；命中 AVTransport 的那个 device
+/// 才是 friendlyName / UDN / manufacturer 的归属（国产盒子常把渲染器放在
+/// 嵌入设备里，只认根 device 会拿到错误型号甚至丢弃设备）。
 DlnaDevice? parseDeviceDescription(String xmlText, String location) {
   XmlDocument doc;
   try {
@@ -139,30 +159,46 @@ DlnaDevice? parseDeviceDescription(String xmlText, String location) {
   } catch (_) {
     return null;
   }
+
+  // 先看直接子级，避免 embedded device 的同名节点串到父级；
+  // 描述文件偶有不规范嵌套，再退化为全后代搜索。
   String? textOf(XmlElement parent, String localName) {
+    for (final e in parent.childElements) {
+      if (e.name.local == localName) return e.innerText.trim();
+    }
     for (final e in parent.descendantElements) {
-      if (e.name.local == localName) {
-        return e.innerText.trim();
-      }
+      if (e.name.local == localName) return e.innerText.trim();
     }
     return null;
   }
 
-  final root = doc.rootElement;
-  // root 可能带命名空间前缀（device/Device）；按 localName 找第一个 device。
-  XmlElement? device;
-  for (final e in root.descendantElements) {
-    if (e.name.local == 'device') {
-      device = e;
-      break;
+  // 只取「本 device 直属」的 service：embedded device 的服务应由它自己认领，
+  // 否则父 device 会通过 descendantElements 把子 device 的 AVTransport 抢走。
+  Iterable<XmlElement> servicesOf(XmlElement device) sync* {
+    for (final child in device.childElements) {
+      if (child.name.local == 'service') yield child;
+      if (child.name.local == 'serviceList') {
+        for (final s in child.childElements) {
+          if (s.name.local == 'service') yield s;
+        }
+      }
     }
   }
-  if (device == null) return null;
+
+  final root = doc.rootElement;
+  // root 可能带命名空间前缀（device/Device）；按 localName 收集全部 device。
+  final devices = <XmlElement>[
+    if (root.name.local == 'device') root,
+    for (final e in root.descendantElements)
+      if (e.name.local == 'device') e,
+  ];
+  if (devices.isEmpty) return null;
 
   // URLBase：描述内相对地址的基址；缺省用 LOCATION 本身。
-  final urlBase = textOf(doc.rootElement, 'URLBase');
-  final baseUri = Uri.tryParse(urlBase != null && urlBase.isNotEmpty ? urlBase : location) ??
-      Uri.parse(location);
+  final urlBase = textOf(root, 'URLBase');
+  final baseUri =
+      Uri.tryParse(urlBase != null && urlBase.isNotEmpty ? urlBase : location) ??
+          Uri.parse(location);
   Uri resolve(String ref) {
     final uri = Uri.tryParse(ref);
     if (uri == null) return baseUri;
@@ -176,80 +212,83 @@ DlnaDevice? parseDeviceDescription(String xmlText, String location) {
 
   String? avtControl;
   String? rcsControl;
+  String? cmControl;
   String? avtEventSub;
-  for (final service in device.descendantElements) {
-    if (service.name.local != 'service') continue;
-    final serviceType = textOf(service, 'serviceType') ?? '';
-    final isAvt = serviceType.contains('AVTransport');
-    final isRcs = serviceType.contains('RenderingControl');
-    if (!isAvt && !isRcs) continue;
-    final rawControl = textOf(service, 'controlURL') ?? '';
-    // 先按 URLBase/LOCATION 解析相对地址，再按「设备自指 / 域名 vs IP」兜底重建。
-    final resolved = rawControl.isEmpty
-        ? location
-        : resolve(rawControl).toString();
-    final rebuilt = rebuildControlUrl(
-      controlUrl: rawControl.isEmpty ? '' : resolved,
-      location: location,
-    );
-    if (rebuilt == null) continue;
-    if (isAvt) {
-      avtControl ??= rebuilt.toString();
-      final rawEvent = textOf(service, 'eventSubURL') ?? '';
-      if (rawEvent.isNotEmpty) {
-        avtEventSub ??=
-            rebuildControlUrl(controlUrl: resolve(rawEvent).toString(), location: location)
-                ?.toString();
+  XmlElement? avtDevice;
+  for (final device in devices) {
+    for (final service in servicesOf(device)) {
+      final serviceType = textOf(service, 'serviceType') ?? '';
+      final isAvt = serviceType.contains('AVTransport');
+      final isRcs = serviceType.contains('RenderingControl');
+      final isCm = serviceType.contains('ConnectionManager');
+      if (!isAvt && !isRcs && !isCm) continue;
+      final rawControl = textOf(service, 'controlURL') ?? '';
+      // ConnectionManager 是可选能力；没有 controlURL 时不猜路径，
+      // 免得把 AVTransport 的惯例路径当预检地址多发一次请求。
+      if (isCm && rawControl.isEmpty) continue;
+      // 先按 URLBase/LOCATION 解析相对地址，再按「设备自指 / 域名 vs IP」兜底重建。
+      final resolved = rawControl.isEmpty
+          ? location
+          : resolve(rawControl).toString();
+      final rebuilt = rebuildControlUrl(
+        controlUrl: rawControl.isEmpty ? '' : resolved,
+        location: location,
+      );
+      if (rebuilt == null) continue;
+      if (isAvt) {
+        if (avtControl == null) {
+          avtControl = rebuilt.toString();
+          avtDevice = device;
+        }
+        final rawEvent = textOf(service, 'eventSubURL') ?? '';
+        if (rawEvent.isNotEmpty) {
+          avtEventSub ??= rebuildControlUrl(
+                  controlUrl: resolve(rawEvent).toString(), location: location)
+              ?.toString();
+        }
+      } else if (isRcs) {
+        rcsControl ??= rebuilt.toString();
+      } else {
+        cmControl ??= rebuilt.toString();
       }
-    } else {
-      rcsControl ??= rebuilt.toString();
     }
   }
   if (avtControl == null) return null;
 
-  final udn = textOf(device, 'UDN') ?? '';
+  final picked = avtDevice ?? devices.first;
+  final udn = textOf(picked, 'UDN') ?? '';
   return DlnaDevice(
     udn: udn.isEmpty ? location : udn,
-    friendlyName: textOf(device, 'friendlyName') ?? '未命名设备',
-    modelName: textOf(device, 'modelName') ?? '',
+    friendlyName: textOf(picked, 'friendlyName') ?? '未命名设备',
+    modelName: textOf(picked, 'modelName') ?? '',
+    manufacturer: textOf(picked, 'manufacturer') ?? '',
     controlUrl: avtControl,
     renderingControlUrl: rcsControl ?? '',
+    connectionManagerUrl: cmControl ?? '',
     eventSubUrl: avtEventSub ?? '',
     location: location,
   );
 }
 
-/// DIDL-Lite 元数据（SetAVTransportURI 的 CurrentURIMetadataData）。
-/// 部分盒子校验非空才收，统一带最小 DIDL。
-/// [subtitleUrl] 非空时带 `sec:SubtitleUri`（三星扩展，多数国产电视兼容外挂字幕投送）。
+/// DIDL-Lite 元数据（SetAVTransportURI 的 CurrentURIMetaData）。
+///
+/// 保留旧签名与旧语义（部分盒子校验非空才收，统一带最小 DIDL；
+/// [subtitleUrl] 非空时带 `sec:SubtitleUri`），实现转发到
+/// `didl.dart` 的 [DidlVariant.minimal] 变体，避免两套生成逻辑漂移。
 String buildDidlLite({
   required String title,
   String? duration,
   String itemClass = 'object.item.videoItem',
   Uri? subtitleUrl,
-}) {
-  final escaped = _escapeXml(title);
-  final resAttrs = duration != null && duration.isNotEmpty
-      ? ' duration="${_escapeXml(duration)}"'
-      : '';
-  final subtitle = subtitleUrl == null
-      ? ''
-      : '\n    <sec:SubtitleUri>${_escapeXml(subtitleUrl.toString())}</sec:SubtitleUri>';
-  return '''
-<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"
-           xmlns:dc="http://purl.org/dc/elements/1.1/"
-           xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"
-           xmlns:sec="http://www.sec.co.kr/">
-  <item id="aquan-1" parentID="0" restricted="1">
-    <dc:title>$escaped</dc:title>
-    <upnp:class>$itemClass</upnp:class>
-    <res$resAttrs></res>$subtitle
-  </item>
-</DIDL-Lite>''';
-}
-
-String _escapeXml(String s) => s
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
+}) =>
+    buildDidl(
+      DidlRequest(
+        // 旧调用点没有媒体 URI，`<res>` 保持空内容；新调用点走 buildDidl。
+        uri: Uri(),
+        title: title,
+        subtitleUri: subtitleUrl,
+      ),
+      DidlVariant.minimal,
+      durationText: duration,
+      itemClass: itemClass,
+    );

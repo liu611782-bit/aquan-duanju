@@ -61,8 +61,12 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {
-    // 测试跑在宿主平台（Windows）：显式注入 Android 分支。
-    MirrorController.instance.debugAndroidMode = true;
+    // 测试跑在宿主平台（Windows）：显式注入 Android 分支；单例跨用例存活，
+    // 每个用例重置状态与启动超时预算，避免互相污染。
+    MirrorController.instance
+      ..debugAndroidMode = true
+      ..debugStartTimeout = const Duration(seconds: 15)
+      ..debugState = MirrorState.idle;
     // 每个用例重挂 mock：记录调用 + 可编程回执。
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_castChannel, (call) async {
@@ -149,5 +153,40 @@ void main() {
     expect(received, contains('stopMirror'),
         reason: '镜像会话结束必须停掉采集服务');
     controller.dispose();
+  });
+
+  test('启动超时后晚到事件不二次 complete（15s 超时护栏）', () async {
+    final mirror = MirrorController.instance;
+    // 缩短启动预算，让「超时 → 晚到事件」这条路径可以在单测里跑完。
+    mirror.debugStartTimeout = const Duration(milliseconds: 40);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_castChannel, (call) async {
+      if (call.method == 'startMirror') {
+        // 服务在超时之后才回 mirrorStopped（晚到事件）。
+        unawaited(Future<void>.delayed(const Duration(milliseconds: 90)).then(
+          (_) => pushEvent(const MethodCall('mirrorStopped', {'reason': 'error'})),
+        ));
+        return true;
+      }
+      return null;
+    });
+
+    final url = await mirror.start();
+    expect(url, isNull, reason: '超时必须优雅返回 null，而不是挂起或崩溃');
+    expect(mirror.state, MirrorState.idle);
+    expect(mirror.lastError, isNotNull);
+
+    // 晚到 / 重复的 mirrorStopped 与 mirrorStarted 都不得二次 complete 或抛异常。
+    await pushEvent(const MethodCall('mirrorStopped', {'reason': 'late-stop'}));
+    await pushEvent(const MethodCall('mirrorStarted', {
+      'url': 'http://192.168.1.5:18380/stream.ts',
+      'audio': false,
+    }));
+    expect(mirror.state, MirrorState.idle,
+        reason: '超时后迟到的启动回执不复活状态机');
+    expect(mirror.url, isNull);
+
+    // 排空模拟的延迟事件，避免溢出到下一个用例。
+    await Future<void>.delayed(const Duration(milliseconds: 120));
   });
 }

@@ -133,11 +133,22 @@ class ErrorLog extends ChangeNotifier {
   /// 全部内容（复制用）。
   String get text => _entries.map((e) => e.toString()).join('\n\n');
 
-  /// 抹掉 URL 查询串、常见凭据字段与 CENC 解密密钥，避免密钥进日志。
+  /// 抹掉 URL 查询串的值但保留参数名、常见凭据字段与 CENC 解密密钥。
+  ///
+  /// 旧实现把整个 query 抹成 `?…`，播放失败时完全看不出地址是否带鉴权、
+  /// 是否走 HLS 参数；保留键名既能定位又不泄露 token。
   static String redact(String text) => text
       .replaceAllMapped(
-        RegExp(r'(https?://[^\s?#"]+)\?[^\s"]*'),
-        (m) => '${m[1]}?…',
+        RegExp(r'(https?://[^\s?#"]+)\?([^\s"]*)'),
+        (m) {
+          final keys = m[2]!
+              .split('&')
+              .map((kv) => kv.split('=').first)
+              .where((k) => k.isNotEmpty)
+              .take(8)
+              .join(',');
+          return keys.isEmpty ? '${m[1]}?' : '${m[1]}?[$keys]';
+        },
       )
       .replaceAllMapped(
         // Authorization: Bearer xxx —— 认证方案后面的值一起抹掉

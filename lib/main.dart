@@ -28,11 +28,15 @@ import 'screens/home_screen.dart';
 import 'core/books/book_source_store.dart';
 import 'core/ops_switches.dart';
 import 'core/sources/auto_source_manager.dart';
+import 'core/tv/tv_mode.dart';
+import 'core/tv/tv_platform.dart';
 import 'update/update_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'store/stores.dart';
 import 'theme/app_theme.dart';
 import 'widgets/common.dart';
+import 'widgets/tv_focus_scope.dart';
+import 'widgets/tv_scope.dart';
 
 /// 全局根导航：单实例转交过来的命令（AI 让「搜某部剧并播放」）需要
 /// 从 App 顶层直接推详情页。
@@ -100,6 +104,22 @@ Future<void> _start(List<String> args) async {
     }
   }
   final settings = await SettingsStore.load();
+  // 运行形态只在启动时判定一次：TV 锁横屏，后续所有布局都读同一个结果。
+  final formFactor = resolveFormFactor(
+    isAndroid: Platform.isAndroid,
+    isDesktop: _isDesktop,
+    probe: await probeTvPlatform(),
+    override: parseTvOverride(settings.tvMode),
+  );
+  if (formFactor == AppFormFactor.tv) {
+    // 电视恒横屏；手机/桌面不动。
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    // 低端电视盒子内存/带宽都紧：图片缓存与并发降级一次，运行期不再变。
+    AquaImageCache.instance.tvProfile = true;
+  }
   SingleInstance? instance;
   // 单实例转交 / aquan-cli 只用于桌面端；Android 由系统 singleTop 管理，
   // 不需要绑定回环端口（也避免 release 权限问题拖垮启动）。
@@ -125,7 +145,11 @@ Future<void> _start(List<String> args) async {
     }
   }
   if (!command.isEmpty) CommandBus.instance.emit(command);
-  runApp(AquaApp(settings: settings, instance: instance));
+  runApp(AquaApp(
+    settings: settings,
+    instance: instance,
+    formFactor: formFactor,
+  ));
 }
 
 /// 下载目录：优先用户自定义目录；不可写时回退到应用数据目录/downloads。
@@ -235,10 +259,18 @@ class _StartupFailureApp extends StatelessWidget {
 /// 启动引导：设备注册 / 数据加载失败时给可重试的引导页，
 /// 而不是卡死或白屏（fqapp「打开后一直卡在初始化」的同款问题）。
 class AquaApp extends StatefulWidget {
-  const AquaApp({super.key, required this.settings, required this.instance});
+  const AquaApp({
+    super.key,
+    required this.settings,
+    required this.instance,
+    this.formFactor = AppFormFactor.phone,
+  });
 
   final SettingsStore settings;
   final SingleInstance? instance;
+
+  /// 启动时判定一次的运行形态（手机 / 桌面 / 电视）。
+  final AppFormFactor formFactor;
 
   @override
   State<AquaApp> createState() => _AquaAppState();
@@ -571,16 +603,25 @@ class _AquaAppState extends State<AquaApp> {
         lives: _lives!,
         readerSettings: _readerSettings!,
         speech: _speech!,
-        child: AnimatedBuilder(
-          animation: widget.settings,
-          builder: (context, _) => MaterialApp(
-            title: '阿圈短剧',
-            debugShowCheckedModeBanner: false,
-            navigatorKey: rootNavigatorKey,
-            theme: AppTheme.light(),
-            darkTheme: AppTheme.dark(),
-            themeMode: AppTheme.modeOf(widget.settings),
-            home: const HomeScreen(),
+        child: TvScope(
+          formFactor: widget.formFactor,
+          child: AnimatedBuilder(
+            animation: widget.settings,
+            builder: (context, _) => MaterialApp(
+              title: '阿圈短剧',
+              debugShowCheckedModeBanner: false,
+              navigatorKey: rootNavigatorKey,
+              theme: AppTheme.light(),
+              darkTheme: AppTheme.dark(),
+              themeMode: AppTheme.modeOf(widget.settings),
+              // 电视上让方向键优先移动焦点：包在 MaterialApp.builder 里才能覆盖
+              // 所有路由（含 push 出来的详情/播放页）。
+              builder: (context, child) => TvFocusScope(
+                enabled: TvScope.isTvOf(context),
+                child: child ?? const SizedBox.shrink(),
+              ),
+              home: const HomeScreen(),
+            ),
           ),
         ),
       );

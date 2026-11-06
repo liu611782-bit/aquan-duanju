@@ -93,7 +93,7 @@ void main() {
   });
 
   group('extractParses', () {
-    test('仅收 type=1 且 url 为 http', () {
+    test('收 type=1/2 且 url 为 http，排除 type=0 嗅探', () {
       const cfg = '''
 {"parses":[
   {"name":"Json并发","type":2,"url":"http://p1/?url="},
@@ -102,8 +102,9 @@ void main() {
   {"name":"坏的","type":1,"url":"javascript:1"}
 ]}''';
       final parses = SourceImporter.extractParses(jsonDecode(cfg) as Map);
-      expect(parses.length, 1);
-      expect(parses.single.url, 'http://p2/?url=');
+      expect(parses.length, 2);
+      expect(parses.first.url, 'http://p1/?url=');
+      expect(parses.last.url, 'http://p2/?url=');
     });
   });
 

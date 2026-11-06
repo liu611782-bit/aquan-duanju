@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.util.Log
 import androidx.core.content.FileProvider
 import com.aquan.duanju.mirror.MirrorService
 import com.ryanheise.audioservice.AudioServiceActivity
@@ -27,6 +28,7 @@ class MainActivity : AudioServiceActivity() {
     private var pendingMirrorResult: MethodChannel.Result? = null
 
     private companion object {
+        const val TAG = "MainActivity"
         const val REQ_POST_NOTIFICATIONS = 4001
         const val REQ_MIRROR_PERMISSION = 4002
     }
@@ -34,66 +36,126 @@ class MainActivity : AudioServiceActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         // DLNA 投屏设备发现：不持 MulticastLock 时多数机型收不到 SSDP 组播响应。
+        // 所有 aquan/cast 方法统一 runCatching + 结构化返回：任何原生异常都不会
+        // 冒出通道（R4），原始堆栈只写 logcat，不回传 Dart 作用户可见文案。
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aquan/cast")
             .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "acquireMulticastLock" -> {
-                        try {
-                            if (multicastLock == null) {
-                                val wifi = applicationContext
-                                    .getSystemService(Context.WIFI_SERVICE) as WifiManager
-                                multicastLock = wifi.createMulticastLock("aquan-cast").apply {
-                                    setReferenceCounted(false)
-                                    acquire()
+                runCatching {
+                    when (call.method) {
+                        "acquireMulticastLock" -> {
+                            val ok = runCatching {
+                                if (multicastLock == null) {
+                                    // 无 Wi-Fi 硬件的盒子拿不到 WifiManager：
+                                    // as? 空安全，不再因强转 null 抛未捕获异常。
+                                    val wifi = applicationContext
+                                        .getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                                        ?: return@runCatching false
+                                    multicastLock = wifi.createMulticastLock("aquan-cast").apply {
+                                        setReferenceCounted(false)
+                                        acquire()
+                                    }
+                                }
+                                true
+                            }.getOrElse { e ->
+                                Log.w(TAG, "multicast lock unavailable", e)
+                                false
+                            }
+                            result.success(ok)
+                        }
+                        "releaseMulticastLock" -> {
+                            runCatching { multicastLock?.release() }
+                                .onFailure { Log.w(TAG, "release multicast lock", it) }
+                            multicastLock = null
+                            result.success(true)
+                        }
+                        "requestMirrorPermission" -> {
+                            // 系统投屏确认框：onActivityResult 回填 {granted, ...}。
+                            if (pendingMirrorResult != null) {
+                                result.success(mapOf("granted" to false, "reason" to "busy"))
+                            } else {
+                                pendingMirrorResult = result
+                                val launched = runCatching {
+                                    val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                                        as? MediaProjectionManager
+                                        ?: error("MediaProjectionManager unavailable")
+                                    startActivityForResult(
+                                        pm.createScreenCaptureIntent(),
+                                        REQ_MIRROR_PERMISSION,
+                                    )
+                                    true
+                                }.getOrElse { e ->
+                                    Log.w(TAG, "mirror permission launch failed", e)
+                                    false
+                                }
+                                if (!launched) {
+                                    pendingMirrorResult = null
+                                    result.success(
+                                        mapOf("granted" to false, "reason" to "unavailable")
+                                    )
                                 }
                             }
-                            result.success(true)
-                        } catch (e: Exception) {
-                            // 个别系统无 Wi-Fi 服务：发现功能退化为仅 NOTIFY/单播。
-                            result.success(false)
                         }
-                    }
-                    "releaseMulticastLock" -> {
-                        try {
-                            multicastLock?.release()
-                        } catch (_: Exception) {
-                        }
-                        multicastLock = null
-                        result.success(true)
-                    }
-                    "requestMirrorPermission" -> {
-                        // 系统投屏确认框：onActivityResult 回填 {granted, withAudioCapable}。
-                        if (pendingMirrorResult != null) {
-                            result.success(mapOf("granted" to false, "reason" to "busy"))
-                            return@setMethodCallHandler
-                        }
-                        pendingMirrorResult = result
-                        try {
-                            val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE)
-                                as MediaProjectionManager
-                            startActivityForResult(pm.createScreenCaptureIntent(), REQ_MIRROR_PERMISSION)
-                        } catch (e: Exception) {
-                            pendingMirrorResult = null
-                            result.success(mapOf("granted" to false, "reason" to "${e.message}"))
-                        }
-                    }
-                    "startMirror" -> {
-                        try {
-                            if (MirrorService.isRunning()) {
-                                result.success(null)
-                                return@setMethodCallHandler
+                        "startMirror" -> {
+                            val started = runCatching {
+                                if (MirrorService.isRunning()) {
+                                    false
+                                } else {
+                                    MirrorService.dartChannel = MethodChannel(
+                                        flutterEngine.dartExecutor.binaryMessenger, "aquan/cast"
+                                    )
+                                    // 授权 Intent 已由 onActivityResult 存进 MirrorService
+                                    // 进程内，不再经 startForegroundService 的 extra 二次传递
+                                    // （Android 14 起 token 只能消费一次）。
+                                    MirrorService.start(
+                                        applicationContext,
+                                        call.argument<Boolean>("withAudio") ?: true,
+                                    )
+                                    true
+                                }
+                            }.getOrElse { e ->
+                                Log.w(TAG, "start mirror failed", e)
+                                false
                             }
-                            MirrorService.dartChannel =
-                                MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aquan/cast")
-                            MirrorService.start(applicationContext, call.argument<Boolean>("withAudio") ?: true)
+                            // Dart 侧 invokeMethod<bool> 只 await、不读值：结构化返回。
+                            result.success(started)
+                        }
+                        "stopMirror" -> {
+                            runCatching { MirrorService.stop(applicationContext) }
+                                .onFailure { Log.w(TAG, "stop mirror failed", it) }
                             result.success(true)
-                        } catch (e: Exception) {
-                            result.error("MIRROR_START", "${e.message}", null)
+                        }
+                        else -> result.notImplemented()
+                    }
+                }.onFailure { e ->
+                    // 兜底：即便分支有遗漏也不把异常抛回 Flutter 线程；
+                    // 回复可能已提交，这里再包一层避免二次回复异常外泄。
+                    Log.e(TAG, "aquan/cast ${call.method} crashed", e)
+                    runCatching {
+                        if (call.method == "requestMirrorPermission") {
+                            result.success(mapOf("granted" to false, "reason" to "internal-error"))
+                        } else {
+                            result.success(null)
                         }
                     }
-                    "stopMirror" -> {
-                        MirrorService.stop(applicationContext)
-                        result.success(true)
+                }
+            }
+
+        // TV 判定：电视盒子 / Android TV 与手机共用同一个包，启动时读系统特性。
+        // 只读、不产生副作用；任何异常都回空 map，Dart 侧会按「有触摸屏」处理。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aquan/tv")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "probe" -> {
+                        try {
+                            val pm = packageManager
+                            result.success(mapOf(
+                                "leanback" to pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK),
+                                "television" to pm.hasSystemFeature(PackageManager.FEATURE_TELEVISION),
+                                "touchscreen" to pm.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN),
+                            ))
+                        } catch (e: Exception) {
+                            result.success(emptyMap<String, Boolean>())
+                        }
                     }
                     else -> result.notImplemented()
                 }
@@ -174,11 +236,26 @@ class MainActivity : AudioServiceActivity() {
         if (requestCode != REQ_MIRROR_PERMISSION) return
         val result = pendingMirrorResult
         pendingMirrorResult = null
-        if (data != null && resultCode == android.app.Activity.RESULT_OK) {
-            MirrorService.saveProjection(resultCode, data)
-            result?.success(mapOf("granted" to true))
-        } else {
-            result?.success(mapOf("granted" to false, "reason" to "denied"))
+        val granted = runCatching {
+            if (data != null && resultCode == android.app.Activity.RESULT_OK) {
+                // token 只在服务进程内保存一次，由 MirrorService 启动时一次性消费；
+                // 绝不塞进 startForegroundService 的 extra（Android 14 起禁止二次传递）。
+                MirrorService.saveProjection(resultCode, data)
+                true
+            } else {
+                false
+            }
+        }.getOrElse { e ->
+            Log.e(TAG, "save projection failed", e)
+            false
+        }
+        // 回复本身也可能抛（result 已失效）：包住，绝不向系统回调外抛异常。
+        runCatching {
+            if (granted) {
+                result?.success(mapOf("granted" to true))
+            } else {
+                result?.success(mapOf("granted" to false, "reason" to "denied"))
+            }
         }
     }
 

@@ -21,7 +21,6 @@ import '../core/error_log.dart';
 import '../core/aqua_error.dart';
 import '../core/cast/cast_controller.dart';
 import '../core/muted_hint.dart';
-import '../core/next_episode_prompt.dart';
 import '../core/playback_diagnostics.dart';
 import '../core/player/playback_buffer_monitor.dart';
 import '../core/player/playback_health.dart';
@@ -29,7 +28,9 @@ import '../core/playback_failure.dart';
 import '../core/playback_fallback.dart';
 import '../core/playback_recovery.dart';
 import '../core/playback_utils.dart';
+import '../core/player_gestures.dart';
 import '../core/player_layout.dart';
+import '../core/player_volume.dart';
 import '../core/player/player_engine.dart';
 import '../core/player/track_preference.dart';
 import '../core/progress_throttle.dart';
@@ -43,6 +44,7 @@ import '../widgets/episode_picker.dart';
 import '../widgets/playback_error_panel.dart';
 import '../widgets/player_info_dialog.dart';
 import '../widgets/player_track_sheet.dart';
+import '../widgets/tv_scope.dart';
 
 /// 播放器页。
 ///
@@ -157,11 +159,6 @@ class _PlayerScreenState extends State<PlayerScreen>
       MutedPlaybackHintRegistry();
   bool _mutedHintVisible = false;
 
-  /// 下一集提示条（播完前引导；与片尾跳过互斥，见 next_episode_prompt.dart）。
-  final Set<String> _nextPromptConsumed = {};
-  bool _nextPromptVisible = false;
-  int _nextPromptRemainingMs = 0;
-  Timer? _nextPromptTimer;
   Timer? _mutedHintTimer;
 
   /// 播放器 OSD。
@@ -198,7 +195,21 @@ class _PlayerScreenState extends State<PlayerScreen>
   Object? _loadError;
   bool _loadingStream = true;
   bool _fittedWindow = false;
-  bool _muted = false;
+
+  /// 电视形态（启动时判定一次，见 TvScope）。
+  bool _isTv = false;
+
+  /// 遥控器长按左右键的连发定时器与累计位移。
+  Timer? _seekRepeat;
+  Duration _seekAccum = Duration.zero;
+
+  /// 当前音量（0-100），由 `stream.volume` 同步驱动底栏滑块。
+  double _volume = 100;
+
+  /// 静音前的音量：取消静音时回到这个值，而不是硬拉 100。
+  double _lastVolume = 100;
+
+  StreamSubscription<double>? _volumeSub;
 
   /// 桌面迷你置顶小窗状态（还原时恢复原窗口位置）。
   bool _mini = false;
@@ -262,8 +273,17 @@ class _PlayerScreenState extends State<PlayerScreen>
     };
     unawaited(_installMpvOptions());
     _playSkip = AppScope.read(context).playSkip.entryFor(widget.series.id);
-    // 恢复上次音量。
-    _engine.setVolume(AppScope.read(context).settings.volume);
+    // 恢复上次音量；滑块状态由 stream.volume 双向同步（滚轮/快捷键改也跟得上）。
+    _volume = AppScope.read(context).settings.volume;
+    _lastVolume = _volume > 0 ? _volume : 100;
+    _engine.setVolume(_volume);
+    _volumeSub = _engine.stream.volume.listen((v) {
+      if (!mounted || v == _volume) return;
+      setState(() {
+        _volume = v;
+        if (v > 0) _lastVolume = v;
+      });
+    });
     _posSub = _engine.stream.position.listen(_onPosition);
     _durSub = _engine.stream.duration.listen((d) {
       if (!mounted) return;
@@ -297,6 +317,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     // 立刻把「想去这一集」写进历史，否则起播慢/失败时退出，历史还停在旧集。
     // 页内的自动连播/换线不经这里，语义不变。
     _openEpisode(_index, widget.startAt, manual: true);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // TvScope 运行期不变，这里只是取一次；放 didChangeDependencies 而不是
+    // build，避免每次重建都去查 InheritedWidget。
+    _isTv = TvScope.isTvOf(context);
   }
 
   // ---------- Windows 系统媒体控制（SMTC）：媒体键 + 音量浮层 ----------
@@ -430,10 +458,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     _sleepTimer?.cancel();
     _hideTimer?.cancel();
     _fallbackTimer?.cancel();
-    _nextPromptTimer?.cancel();
+    _stopSeekRepeat();
     _osdTimer?.cancel();
     _mutedHintTimer?.cancel();
     _tracksSub?.cancel();
+    _volumeSub?.cancel();
     _posSub?.cancel();
     _durSub?.cancel();
     _completedSub?.cancel();
@@ -679,11 +708,74 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// 桌面端键盘快捷键：空格暂停、←/→ 快进退 10 秒、↑/↓ 音量、
   /// F 全屏、M 静音、PageUp/PageDown 上下集、Esc 退出全屏/返回。
+  ///
+  /// 电视遥控器只有方向键 + 确定 + 返回：确定键显隐控制栏、左右键快退快进、
+  /// 媒体键播放暂停与切集。控制栏可见时方向键让给焦点移动（返回 ignored）。
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
+    // 遥控器长按左右键：按下开始连发，松手停止。KeyUp 必须在下面的
+    // KeyDown/KeyRepeat 过滤之前处理，否则永远收不到「松手」。
+    if (_isTv && event is KeyUpEvent) {
+      final k = event.logicalKey;
+      if (k == LogicalKeyboardKey.arrowLeft ||
+          k == LogicalKeyboardKey.arrowRight ||
+          k == LogicalKeyboardKey.mediaRewind ||
+          k == LogicalKeyboardKey.mediaFastForward) {
+        _stopSeekRepeat();
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
     final key = event.logicalKey;
+
+    if (_isTv) {
+      if (key == LogicalKeyboardKey.select ||
+          key == LogicalKeyboardKey.enter) {
+        _toggleControls();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.mediaRewind ||
+          key == LogicalKeyboardKey.mediaFastForward) {
+        if (event is KeyRepeatEvent) return KeyEventResult.handled;
+        _startSeekRepeat(
+            key == LogicalKeyboardKey.mediaRewind ? -1 : 1);
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.arrowLeft ||
+          key == LogicalKeyboardKey.arrowRight) {
+        // 控制栏可见时左右键在按钮之间移动焦点，不抢。
+        if (_showControls) return KeyEventResult.ignored;
+        // 系统自己也会送 KeyRepeatEvent；这里只认第一下，后续交给我们的
+        // 400ms 定时器，避免按住 1 秒就跳了几十次。
+        if (event is KeyRepeatEvent) return KeyEventResult.handled;
+        _startSeekRepeat(key == LogicalKeyboardKey.arrowLeft ? -1 : 1);
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.escape) {
+        if (_showControls) {
+          setState(() => _showControls = false);
+          return KeyEventResult.handled;
+        }
+        // 控制栏已收：交给 Navigator 逐级返回。
+        return KeyEventResult.ignored;
+      }
+    }
+
+    if (key == LogicalKeyboardKey.mediaPlayPause) {
+      _togglePlayPause();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.mediaTrackNext) {
+      _goNext(manual: true);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.mediaTrackPrevious) {
+      _goPrev(manual: true);
+      return KeyEventResult.handled;
+    }
+
     if (key == LogicalKeyboardKey.space) {
       _engine.playOrPause();
       return KeyEventResult.handled;
@@ -699,12 +791,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowUp) {
+      // 电视上控制栏可见时把上下键让给焦点移动。
+      if (_isTv && _showControls) return KeyEventResult.ignored;
       final v = (_engine.state.volume + 5).clamp(0.0, 100.0);
       _engine.setVolume(v);
       _showOsd(Icons.volume_up_rounded, '音量 ${v.round()}%');
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowDown) {
+      if (_isTv && _showControls) return KeyEventResult.ignored;
       final v = (_engine.state.volume - 5).clamp(0.0, 100.0);
       _engine.setVolume(v);
       _showOsd(Icons.volume_down_rounded, '音量 ${v.round()}%');
@@ -719,12 +814,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.keyM) {
-      _muted = !_muted;
-      _engine.setVolume(_muted ? 0 : 100);
-      _showOsd(
-        _muted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
-        _muted ? '已静音' : '取消静音',
-      );
+      _toggleMute();
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.keyC) {
@@ -882,9 +972,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     _playSkip = scope.playSkip.entryFor(widget.series.id);
     _endingHandled = false;
-    _nextPromptConsumed.clear();
-    _cancelNextPromptTimer();
-    _nextPromptVisible = false;
+    _stopSeekRepeat();
     _openingNoticePending = false;
     _playbackFailure = null;
     _rawPlaybackError = null;
@@ -1138,7 +1226,6 @@ class _PlayerScreenState extends State<PlayerScreen>
       _flushHistory();
     }
     _maybeSkipEnding(previous, position);
-    _maybeUpdateNextPrompt(position);
   }
 
   /// 播放器报错：按错误类型分级 + 多候选自动换线。
@@ -1349,90 +1436,6 @@ class _PlayerScreenState extends State<PlayerScreen>
       _engine.seek(threshold);
       _showOsd(Icons.skip_next_rounded, '已跳过片尾');
     }
-  }
-
-  /// 本集是否走片尾跳过路径（下一集提示条与之互斥）。
-  bool get _outroConfigured {
-    final settings = AppScope.read(context).settings;
-    return settings.skipIntroOutro && (_playSkip?.endingMs ?? 0) > 0;
-  }
-
-  /// 下一集提示条：位置事件驱动（出现 / 倒计时 / seek 回退收起）。
-  void _maybeUpdateNextPrompt(Duration position) {
-    if (_disposed || !mounted || _episodeEnded) return;
-    final outro = _outroConfigured;
-    if (_nextPromptVisible) {
-      final remaining = _duration - position;
-      if (remaining <= Duration.zero) return; // 自然播完交给 _onEnded
-      if (shouldHideNextPromptOnSeek(
-        position: position,
-        duration: _duration,
-        outroConfigured: outro,
-      )) {
-        _hideNextPrompt(release: true);
-      } else if (!_nextPromptConsumed.contains('next')) {
-        setState(() => _nextPromptRemainingMs = remaining.inMilliseconds);
-      }
-      return;
-    }
-    final prompt = nextEpisodePrompt(
-      position: position,
-      duration: _duration,
-      hasNext: _index < widget.episodes.length - 1,
-      autoNext: AppScope.read(context).settings.autoNext,
-      outroConfigured: outro,
-      consumed: _nextPromptConsumed,
-    );
-    if (prompt == null) return;
-    setState(() {
-      _nextPromptVisible = true;
-      _nextPromptRemainingMs = prompt.remainingMs;
-    });
-    final remaining = Duration(milliseconds: prompt.remainingMs);
-    if (prompt.autoAdvance) {
-      // 倒计时到点自动切集；用户取消/换集/播完都会先撤销本定时器或被守卫拦下。
-      _nextPromptTimer = Timer(remaining, () {
-        if (_disposed || !mounted || _episodeEnded) return;
-        _nextPromptVisible = false;
-        consumePrompt(_nextPromptConsumed);
-        _episodeEnded = true;
-        _recordHistory(finished: true);
-        _goNext();
-      });
-    } else {
-      // 非自动连播：提示条到自然播完自动消失（不暂停，保持现状语义）。
-      _nextPromptTimer = Timer(remaining, () {
-        if (mounted && !_disposed) _hideNextPrompt();
-      });
-    }
-  }
-
-  void _cancelNextPromptTimer() {
-    _nextPromptTimer?.cancel();
-    _nextPromptTimer = null;
-  }
-
-  void _hideNextPrompt({bool release = false}) {
-    _cancelNextPromptTimer();
-    if (release) releasePrompt(_nextPromptConsumed);
-    _nextPromptVisible = false;
-    if (mounted) setState(() {});
-  }
-
-  /// 提示条「立即播放」。
-  void _confirmNextPrompt() {
-    _cancelNextPromptTimer();
-    _nextPromptVisible = false;
-    consumePrompt(_nextPromptConsumed);
-    _episodeEnded = true;
-    _recordHistory(finished: true);
-    _goNext();
-  }
-
-  /// 提示条「取消」：本集不再出现。
-  void _dismissNextPrompt() {
-    consumePrompt(_nextPromptConsumed);
-    _hideNextPrompt();
   }
 
   Future<void> _flushHistory() async {
@@ -1673,8 +1676,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
         volume = v;
     }
-    _muted = false;
-    _engine.setVolume(volume);
+    unawaited(_engine.setVolume(volume));
     _showOsd(Icons.volume_up_rounded, '音量 ${volume.round()}%');
     return {'ok': true, 'volume': volume.round()};
   }
@@ -2177,6 +2179,64 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_showControls) _scheduleHide();
   }
 
+  /// 遥控器长按左右键的连发：每 400ms 跳 10 秒，松手停止。
+  void _startSeekRepeat(int sign) {
+    _stopSeekRepeat();
+    _seekAccum = Duration.zero;
+    _seekStep(sign);
+    _seekRepeat = Timer.periodic(
+      const Duration(milliseconds: 400),
+      (_) => _seekStep(sign),
+    );
+  }
+
+  void _seekStep(int sign) {
+    final delta = Duration(seconds: 10 * sign);
+    _seekAccum += delta;
+    unawaited(_engine.seek(_position + delta));
+    final back = sign < 0;
+    _showOsd(
+      back ? Icons.fast_rewind_rounded : Icons.fast_forward_rounded,
+      '${back ? '快退' : '快进'} ${_seekAccum.inSeconds.abs()} 秒',
+    );
+  }
+
+  void _stopSeekRepeat() {
+    _seekRepeat?.cancel();
+    _seekRepeat = null;
+  }
+
+  /// 静音 / 恢复。恢复时回到静音前的音量，而不是硬拉 100。
+  ///
+  /// 本地状态先改再调引擎：引擎的 volume 事件是异步推的，等它回来再刷滑块会
+  /// 有一帧滞后（拖动时尤其明显）。
+  void _toggleMute() {
+    if (_volume > 0) {
+      _lastVolume = _volume;
+      setState(() => _volume = 0);
+      unawaited(_engine.setVolume(0));
+      _showOsd(Icons.volume_off_rounded, '已静音');
+    } else {
+      final v = _lastVolume > 0 ? _lastVolume : 100.0;
+      setState(() => _volume = v);
+      unawaited(_engine.setVolume(v));
+      _showOsd(Icons.volume_up_rounded, '取消静音');
+    }
+  }
+
+  /// 双击暂停/继续，并给出 OSD 反馈。
+  ///
+  /// 读 `state.playing` 要在 `playOrPause` 之前：之后读到的已经是新状态，
+  /// 提示会反着说。
+  void _togglePlayPause() {
+    final wasPlaying = _engine.state.playing;
+    unawaited(_engine.playOrPause());
+    _showOsd(
+      wasPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+      wasPlaying ? '已暂停' : '继续播放',
+    );
+  }
+
   void _onHorizontalDragStart(DragStartDetails d) {
     _dragKind = _DragKind.seek;
     _dragStartPos = d.localPosition.dx;
@@ -2387,7 +2447,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     return Focus(
       autofocus: true,
       onKeyEvent: _onKeyEvent,
-      child: Scaffold(
+      child: PopScope(
+        // 电视返回键：控制栏可见时先收起，再按才退出播放页。
+        // 非电视形态 canPop 恒 true，旧行为完全不变。
+        canPop: !_isTv || !_showControls,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop && mounted) setState(() => _showControls = false);
+        },
+        child: Scaffold(
         backgroundColor: Colors.black,
         body: Stack(
           fit: StackFit.expand,
@@ -2406,17 +2473,28 @@ class _PlayerScreenState extends State<PlayerScreen>
               child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: _toggleControls,
-              onDoubleTapDown: (d) {
-                if (_isDesktop) {
-                  _toggleFullscreen();
-                  return;
-                }
-                final half = MediaQuery.sizeOf(context).width / 2;
-                if (d.localPosition.dx < half) {
-                  _engine.seek(_position - const Duration(seconds: 10));
+              // 桌面端保留「双击全屏」；移动端的双击让给暂停/继续。
+              onDoubleTapDown: (_) {
+                if (_isDesktop) unawaited(_toggleFullscreen());
+              },
+              onDoubleTap: () {
+                if (_isDesktop) return;
+                _togglePlayPause();
+              },
+              // 移动端快进快退改为长按左右各 1/3；中间留空，避免误触。
+              onLongPressStart: (d) {
+                if (_isDesktop) return;
+                final zone = longPressZoneAt(
+                  dx: d.localPosition.dx,
+                  width: MediaQuery.sizeOf(context).width,
+                );
+                if (zone == LongPressZone.rewind) {
+                  unawaited(
+                      _engine.seek(_position - const Duration(seconds: 10)));
                   _showOsd(Icons.fast_rewind_rounded, '快退 10 秒');
-                } else {
-                  _engine.seek(_position + const Duration(seconds: 10));
+                } else if (zone == LongPressZone.forward) {
+                  unawaited(
+                      _engine.seek(_position + const Duration(seconds: 10)));
                   _showOsd(Icons.fast_forward_rounded, '快进 10 秒');
                 }
               },
@@ -2437,7 +2515,6 @@ class _PlayerScreenState extends State<PlayerScreen>
             if (_playbackFailure != null) _buildPlaybackErrorPanel(context),
             if (_osdText != null) _buildOsdOverlay(context),
             if (_mutedHintVisible) _buildMutedHint(context),
-            if (_nextPromptVisible) _buildNextPromptBar(context),
             if (_buffering &&
                 _prepared &&
                 !_loadingStream &&
@@ -2445,13 +2522,15 @@ class _PlayerScreenState extends State<PlayerScreen>
               _buildBufferingBadge(),
             if (_showControls) _buildControls(context),
             // 投屏入口常驻：控件条 4 秒自动隐藏后，顶栏按钮会一起消失。
-            if (!_showControls)
+            // 电视自己就是播放端，投屏没有意义，直接不显示。
+            if (!_showControls && !_isTv)
               Positioned(
                 top: 10,
                 right: 10,
                 child: CastFabButton(onPressed: _openCastSheet),
               ),
           ],
+        ),
         ),
       ),
     );
@@ -2696,52 +2775,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
-  /// 下一集提示条（底部居中；倒计时 + 立即播放 / 取消）。
-  Widget _buildNextPromptBar(BuildContext context) {
-    final remaining = Duration(milliseconds: _nextPromptRemainingMs);
-    final mm = remaining.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final ss = remaining.inSeconds.remainder(60).toString().padLeft(2, '0');
-    final nextNo = (_index + 2).clamp(1, widget.episodes.length);
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 96,
-      child: IgnorePointer(
-        ignoring: false,
-        child: Center(
-          child: Material(
-            color: Colors.black.withValues(alpha: 0.74),
-            borderRadius: BorderRadius.circular(24),
-            child: Padding(
-              padding: const EdgeInsets.only(left: 14, right: 4),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.skip_next_rounded,
-                      color: Colors.white, size: 18),
-                  const SizedBox(width: 8),
-                  Text('即将播放：第 $nextNo 集 · $mm:$ss',
-                      style: const TextStyle(
-                          color: Colors.white, fontSize: 13)),
-                  TextButton(
-                    onPressed: _confirmNextPrompt,
-                    child: const Text('立即播放',
-                        style: TextStyle(color: Colors.amberAccent)),
-                  ),
-                  TextButton(
-                    onPressed: _dismissNextPrompt,
-                    child: const Text('取消',
-                        style: TextStyle(color: Colors.white70)),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _buildOsdOverlay(BuildContext context) {
     return IgnorePointer(
       child: Center(
@@ -2755,13 +2788,14 @@ class _PlayerScreenState extends State<PlayerScreen>
             mainAxisSize: MainAxisSize.min,
             children: [
               if (_osdIcon != null) ...[
-                Icon(_osdIcon, color: Colors.white, size: 20),
-                const SizedBox(width: 8),
+                // 电视 3 米外观看：图标与文字都要放大，否则等于没提示。
+                Icon(_osdIcon, color: Colors.white, size: _isTv ? 28 : 20),
+                SizedBox(width: _isTv ? 10 : 8),
               ],
               Text(_osdText ?? '',
-                  style: const TextStyle(
+                  style: TextStyle(
                       color: Colors.white,
-                      fontSize: 14,
+                      fontSize: _isTv ? 18 : 14,
                       fontWeight: FontWeight.w600)),
             ],
           ),
@@ -2806,6 +2840,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
     return GestureDetector(
       onTap: _toggleControls,
+      // 控制栏可见时它盖在视频层上面，双击会被这层吃掉。桌面端不接的话会退化成
+      // 两次 onTap（表现为「只是把控制栏藏起来」），视频层的全屏识别根本没机会参与。
+      onDoubleTap: _isDesktop
+          ? () => unawaited(_toggleFullscreen())
+          : _togglePlayPause,
       child: Container(
         color: Colors.black26,
         child: Column(
@@ -2827,14 +2866,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ),
                   ListenableBuilder(
                     listenable: castController,
-                    builder: (context, _) => IconButton(
-                      tooltip: '投屏',
-                      icon: Icon(castController.isCasting
-                          ? Icons.cast_connected
-                          : Icons.cast_outlined),
-                      color: Colors.white,
-                      onPressed: _openCastSheet,
-                    ),
+                    // 电视自己就是播放端，顶栏也不给投屏入口（下载仍保留）。
+                    builder: (context, _) => _isTv
+                        ? const SizedBox.shrink()
+                        : IconButton(
+                            tooltip: '投屏',
+                            icon: Icon(castController.isCasting
+                                ? Icons.cast_connected
+                                : Icons.cast_outlined),
+                            color: Colors.white,
+                            onPressed: _openCastSheet,
+                          ),
                   ),
                   if (_definitions.isNotEmpty)
                     PopupMenuButton<String>(
@@ -2944,6 +2986,42 @@ class _PlayerScreenState extends State<PlayerScreen>
                             color: Colors.white),
                       ),
                       const Spacer(),
+                      // 音量：桌面端专用。窗口太窄时隐藏（见 player_volume.dart）。
+                      if (showVolumeBar(
+                        desktop: _isDesktop,
+                        width: MediaQuery.sizeOf(context).width,
+                      )) ...[
+                        IconButton(
+                          tooltip: _volume > 0 ? '静音 (M)' : '取消静音 (M)',
+                          onPressed: _toggleMute,
+                          icon: Icon(volumeIconFor(_volume),
+                              color: Colors.white),
+                        ),
+                        SizedBox(
+                          width: 100,
+                          child: SliderTheme(
+                            data: SliderTheme.of(context).copyWith(
+                              trackHeight: 3,
+                              thumbShape: const RoundSliderThumbShape(
+                                  enabledThumbRadius: 6),
+                              overlayShape: SliderComponentShape.noOverlay,
+                            ),
+                            child: Slider(
+                              value: _volume.clamp(0.0, 100.0),
+                              max: 100,
+                              onChanged: (v) {
+                                // 本地先更新：只等引擎回调的话滑块跟不上手指。
+                                setState(() => _volume = v);
+                                unawaited(_engine.setVolume(v));
+                              },
+                              onChangeEnd: (v) => _showOsd(
+                                volumeIconFor(v),
+                                v <= 0 ? '已静音' : '音量 ${v.round()}%',
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                       // 更多：片头片尾 / 音轨字幕 / 播放信息 / 快捷键。
                       // 收进一个菜单，避免窄屏底栏溢出。
                       PopupMenuButton<String>(
@@ -3162,6 +3240,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   : Icons.picture_in_picture,
                               color: Colors.white),
                         ),
+                      // 电视恒横屏（启动时已锁定），不显示方向切换。
+                      if (!_isTv)
                       IconButton(
                         tooltip: _isDesktop
                             ? '全屏 (F)'

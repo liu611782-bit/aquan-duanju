@@ -5,6 +5,9 @@
 /// `sourceKey + ':' + sourceItemId`（sourceKey 为空即红果，保持旧数据兼容）。
 library;
 
+// ImportReport 需要携带 TVBox 的 parses[]；Dart 允许库间循环 import，
+// 这样不必把 ParseApi 搬走、也不影响所有既有调用点的 import 路径。
+import 'source_import.dart';
 
 /// 源类型：type=1 JSON CMS / type=0 XML CMS / type=3 爬虫源
 /// （[spider] = jar/JVM 族暂不支持；[spiderJs] = .js 爬虫，QuickJS 运行时执行）。
@@ -414,12 +417,22 @@ class ImportReport {
   /// TVBox lives 直播配置（写入 LivesStore，不与点播源混存）。
   final List<LiveConfig> lives = [];
 
+  /// TVBox `parses[]`：写入 MarketSitesStore 供播放页 jx 解析使用。
+  /// 手贴 / 扫码 / 合并源导入此前会整个丢掉它，导致 play 页地址无法解析。
+  final List<ParseApi> parses = [];
+
   void add(SourceCandidate c) => added.add(c);
   void skip(SourceCandidate c) => skipped.add(c);
   void fail(String reason) => failed.add(reason);
   void addLives(List<LiveConfig> configs) => lives.addAll(configs);
+  void addParses(List<ParseApi> items) => parses.addAll(items);
 
-  bool get isEmpty => added.isEmpty && skipped.isEmpty && failed.isEmpty;
+  bool get isEmpty =>
+      added.isEmpty &&
+      skipped.isEmpty &&
+      failed.isEmpty &&
+      lives.isEmpty &&
+      parses.isEmpty;
   bool get hasProblems => skipped.isNotEmpty || failed.isNotEmpty;
 }
 

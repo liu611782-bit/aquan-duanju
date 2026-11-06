@@ -60,6 +60,14 @@ class MediaProxy {
     _token = null;
   }
 
+  /// 应用退出 / 测试清理：取消空闲定时器、复位引用计数并立即停服。
+  Future<void> shutdown() async {
+    _idleTimer?.cancel();
+    _idleTimer = null;
+    _refs = 0;
+    await _stop();
+  }
+
   /// 把一个上游媒体 URL 包成代理 URL（headers 随请求携带，base64url JSON）。
   String wrap(String upstreamUrl, {Map<String, String> headers = const {}}) {
     final base = 'http://127.0.0.1:${_server!.port}/mp/$_token';
@@ -69,6 +77,24 @@ class MediaProxy {
         : base64Url.encode(utf8.encode(jsonEncode(headers))).replaceAll('=', '');
     return '$base?u=$u${h.isEmpty ? '' : '&h=$h'}';
   }
+
+  /// DLNA 接收端常探测的响应头；网页投屏的跨域播放也需要 CORS。
+  static const Map<String, String> dlnaHeaders = <String, String>{
+    'transferMode.dlna.org': 'Streaming',
+    'contentFeatures.dlna.org':
+        'DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000',
+    'realTimeInfo.dlna.org': 'DLNA.ORG_TLAG=*',
+    'Access-Control-Allow-Origin': '*',
+  };
+
+  static const List<String> _hopByHopHeaders = <String>[
+    'host',
+    'connection',
+    'accept-encoding',
+    'sec-fetch-mode',
+    'sec-fetch-site',
+    'sec-fetch-dest',
+  ];
 
   Future<void> _handle(HttpRequest req) async {
     final token = _token;
@@ -81,18 +107,30 @@ class MediaProxy {
     }
     final upstream = _decodeB64(req.uri.queryParameters['u']!);
     final headers = _decodeHeaders(req.uri.queryParameters['h']);
+    // 只转发源级防盗链头；浏览器/代理自带的逐跳头会让部分 CDN 直接 403。
+    // 旧实现写了 `'Range': ... ?? ''`，`..remove('')` 删的是空「键」而不是空
+    // 「值」，空 Range 头照样发给上游，HLS 分片经常因此 400/416。
+    final forward = <String, String>{...headers};
+    forward.removeWhere(
+        (key, _) => _hopByHopHeaders.contains(key.toLowerCase()));
+    final range = req.headers.value('Range');
+    if (range != null && range.isNotEmpty) forward['Range'] = range;
+
     final client = http.Client();
     try {
       final upstreamUri = Uri.parse(upstream);
-      final res = await client.get(upstreamUri, headers: {
-        'Range': req.headers.value('Range') ?? '',
-        ...headers,
-      }..remove(''));
+      final request = http.Request('GET', upstreamUri)
+        ..headers.addAll(forward);
+      // 真流式：分片不再整包读进内存。单订阅流只消费一次——manifest 分支
+      // 用 toBytes()，分片分支直接 addStream()，绝不二次监听。
+      final res = await client.send(request);
       final contentType = res.headers['content-type'] ?? '';
       final looksLikeManifest = upstream.toLowerCase().contains('.m3u8') ||
           contentType.contains('mpegurl');
+      dlnaHeaders.forEach((k, v) => req.response.headers.set(k, v));
       if (looksLikeManifest) {
-        final text = utf8.decode(res.bodyBytes, allowMalformed: true);
+        final bytes = await res.stream.toBytes();
+        final text = utf8.decode(bytes, allowMalformed: true);
         final rewritten = HlsAdFilter.rewriteManifest(text, upstreamUri,
             (abs) => wrap(abs, headers: headers));
         req.response.headers.contentType =
@@ -101,7 +139,6 @@ class MediaProxy {
         await req.response.close();
         return;
       }
-      // 分片/密钥：流式透传（Range 已透传给上游）。
       req.response.statusCode = res.statusCode;
       final resType = res.headers['content-type'];
       if (resType != null) req.response.headers.set('content-type', resType);
@@ -110,7 +147,7 @@ class MediaProxy {
         req.response.headers.set('content-range', contentRange);
       }
       req.response.headers.set('accept-ranges', 'bytes');
-      req.response.add(res.bodyBytes);
+      await req.response.addStream(res.stream);
       await req.response.close();
     } finally {
       client.close();

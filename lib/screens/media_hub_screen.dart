@@ -895,6 +895,7 @@ class _SearchTabState extends State<_SearchTab>
         source: config,
         series: primary,
         adapter: adapter,
+        groupHits: group.hits,
       ),
     ));
   }

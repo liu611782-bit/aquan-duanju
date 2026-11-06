@@ -192,8 +192,9 @@ class FongmiSpiderAdapter implements SourceAdapter {
     final vodId = vod['vod_id']?.toString() ?? '';
     final playFrom = vod['vod_play_from']?.toString() ?? '';
     final playUrl = vod['vod_play_url']?.toString() ?? '';
-    final lines =
-        playUrl.isEmpty ? <PlayLine>[] : parsePlayLines(playFrom, playUrl);
+    final lines = playUrl.isEmpty
+        ? <PlayLine>[]
+        : parsePlayLines(playFrom, playUrl, baseUrl: config.api);
     return UnifiedSeries(
       sourceKey: config.id,
       sourceItemId: vodId,

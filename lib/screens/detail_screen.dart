@@ -10,6 +10,7 @@ import '../widgets/common.dart';
 import '../widgets/back_to_top.dart';
 import '../widgets/download_sheet.dart';
 import '../widgets/skeleton.dart';
+import '../widgets/tv_scope.dart';
 import 'player_screen.dart';
 import 'search_screen.dart';
 
@@ -189,6 +190,63 @@ class _DetailScreenState extends State<DetailScreen> {
     ));
   }
 
+  /// 电视横屏才分栏：竖屏/手机仍然走单列，避免信息被挤成两窄条。
+  bool _isTvSplit(BuildContext context) {
+    if (!TvScope.isTvOf(context)) return false;
+    final size = MediaQuery.sizeOf(context);
+    return size.width > size.height;
+  }
+
+  Widget _buildTvSplit(BuildContext context) {
+    final theme = Theme.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          flex: 4,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.only(bottom: 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    BackButton(onPressed: () => Navigator.pop(context)),
+                    Expanded(
+                      child: Text(
+                        _series?.title ?? widget.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleMedium,
+                      ),
+                    ),
+                  ],
+                ),
+                _header(context),
+                _sameNameSection(context),
+                if (_recommend != null && _recommend!.items.isNotEmpty)
+                  _recommendSection(context),
+              ],
+            ),
+          ),
+        ),
+        const VerticalDivider(width: 1),
+        Expanded(
+          flex: 6,
+          child: CustomScrollView(
+            controller: _pageScroll,
+            slivers: [
+              SliverToBoxAdapter(child: _episodeSection(context)),
+              if (_album != null && _album!.seasons.length > 1)
+                SliverToBoxAdapter(child: _seasonsSection(context)),
+              const SliverToBoxAdapter(child: SizedBox(height: 32)),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final series = _series;
@@ -198,26 +256,34 @@ class _DetailScreenState extends State<DetailScreen> {
           : _error != null
               ? ErrorRetryView(error: _error!, onRetry: _reload)
               : SafeArea(
-                  child: CustomScrollView(
-                    controller: _pageScroll,
-                    slivers: [
-                      SliverAppBar(
-                        pinned: true,
-                        title: Text(series?.title ?? widget.title,
-                            maxLines: 1, overflow: TextOverflow.ellipsis),
-                        leading: BackButton(onPressed: () => Navigator.pop(context)),
-                      ),
-                      SliverToBoxAdapter(child: _header(context)),
-                      SliverToBoxAdapter(child: _episodeSection(context)),
-                      if (_album != null && _album!.seasons.length > 1)
-                        SliverToBoxAdapter(child: _seasonsSection(context)),
-                      SliverToBoxAdapter(child: _sameNameSection(context)),
-                      if (_recommend != null && _recommend!.items.isNotEmpty)
-                        SliverToBoxAdapter(child: _recommendSection(context)),
-                      const SliverToBoxAdapter(
-                          child: SizedBox(height: 32)),
-                    ],
-                  ),
+                  // 电视横屏左右分栏：左侧信息/同名/推荐，右侧选集与季。
+                  // 单列布局在 16:9 大屏上要滚很久才能看到剧集。
+                  child: _isTvSplit(context)
+                      ? _buildTvSplit(context)
+                      : CustomScrollView(
+                          controller: _pageScroll,
+                          slivers: [
+                            SliverAppBar(
+                              pinned: true,
+                              title: Text(series?.title ?? widget.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis),
+                              leading: BackButton(
+                                  onPressed: () => Navigator.pop(context)),
+                            ),
+                            SliverToBoxAdapter(child: _header(context)),
+                            SliverToBoxAdapter(child: _episodeSection(context)),
+                            if (_album != null && _album!.seasons.length > 1)
+                              SliverToBoxAdapter(child: _seasonsSection(context)),
+                            SliverToBoxAdapter(child: _sameNameSection(context)),
+                            if (_recommend != null &&
+                                _recommend!.items.isNotEmpty)
+                              SliverToBoxAdapter(
+                                  child: _recommendSection(context)),
+                            const SliverToBoxAdapter(
+                                child: SizedBox(height: 32)),
+                          ],
+                        ),
                 ),
       // 详情页已经有「继续播放」FAB，不能抢占插槽：回顶按钮排在它上方。
       floatingActionButton: Column(

@@ -21,7 +21,11 @@ import (
 //
 //export AquaNew
 func AquaNew(profilePath, configJSON *C.char) *C.char {
-	return cString(core.New(goString(profilePath), goString(configJSON)))
+	// Dart 可调导出统一走 core.Guard（defer recover）：panic 转既有 error
+	// envelope，绝不跨 FFI abort；方法表与 Dart 侧调用签名不变。
+	return cString(core.Guard(func() string {
+		return core.New(goString(profilePath), goString(configJSON))
+	}))
 }
 
 // AquaCall 阻塞执行一次 SDK 调用（必须在后台线程调用）：
@@ -30,14 +34,16 @@ func AquaNew(profilePath, configJSON *C.char) *C.char {
 //
 //export AquaCall
 func AquaCall(handle C.int, method, argsJSON *C.char) *C.char {
-	return cString(core.Call(int32(handle), goString(method), goString(argsJSON)))
+	return cString(core.Guard(func() string {
+		return core.Call(int32(handle), goString(method), goString(argsJSON))
+	}))
 }
 
 // AquaVersion 返回核心版本号。
 //
 //export AquaVersion
 func AquaVersion() *C.char {
-	return cString(core.Version)
+	return cString(core.Guard(func() string { return core.Version }))
 }
 
 // AquaFreeString 释放 AquaNew/AquaCall/AquaVersion 返回的字符串。
@@ -45,6 +51,8 @@ func AquaVersion() *C.char {
 //
 //export AquaFreeString
 func AquaFreeString(s *C.char) {
+	// 无返回值的导出同样兜底 recover，保持统一护栏口径。
+	defer func() { _ = recover() }()
 	C.free(unsafe.Pointer(s))
 }
 

@@ -18,51 +18,85 @@ class SoapClient {
   final Duration timeout;
 
   /// 执行一个 SOAP action，返回「返回值名 → 值」；失败抛 [SoapException]。
+  ///
+  /// 三个可选参数只服务于「按设备配方选择请求头形态」，默认全部关闭：
+  /// - [quotedSoapAction] = false → SOAPACTION 不带引号（部分国产盒子）；
+  /// - [uppercaseSoapAction] = false → 头名用 `SoapAction` 而非 `SOAPACTION`；
+  /// - [mPost] = true → 直接发 M-POST（记住了 405 的设备，省一次往返）。
+  /// 缺省时头、405→M-POST 降级、一次重试、fault 解析与响应兜底完全不变。
   Future<Map<String, String>> sendAction(
     String controlUrl,
     String serviceType,
     String action,
-    Map<String, String> args,
-  ) async {
+    Map<String, String> args, {
+    bool quotedSoapAction = true,
+    bool uppercaseSoapAction = true,
+    bool mPost = false,
+  }) async {
     final body = buildEnvelope(serviceType, action, args);
+    Future<Map<String, String>> once() => _send(
+          controlUrl,
+          serviceType,
+          action,
+          body,
+          quotedSoapAction: quotedSoapAction,
+          uppercaseSoapAction: uppercaseSoapAction,
+          mPost: mPost,
+        );
     try {
-      return await _send(controlUrl, serviceType, action, body);
+      return await once();
     } on SoapException {
       // 设备偶发 504/超时：重试一次。
-      return _send(controlUrl, serviceType, action, body);
+      return once();
     }
   }
 
-  Future<Map<String, String>> _send(String controlUrl, String serviceType,
-      String action, String body) async {
+  Future<Map<String, String>> _send(
+    String controlUrl,
+    String serviceType,
+    String action,
+    String body, {
+    bool quotedSoapAction = true,
+    bool uppercaseSoapAction = true,
+    bool mPost = false,
+  }) async {
     final uri = Uri.tryParse(controlUrl);
     if (uri == null || !uri.hasScheme) {
       throw SoapException('非法 controlUrl: $controlUrl');
     }
+    final actionValue = quotedSoapAction
+        ? '"$serviceType#$action"'
+        : '$serviceType#$action';
+    final actionHeader = uppercaseSoapAction ? 'SOAPACTION' : 'SoapAction';
+    final postHeaders = <String, String>{
+      'Content-Type': 'text/xml; charset="utf-8"',
+      actionHeader: actionValue,
+    };
+    final mPostHeaders = <String, String>{
+      'Content-Type': 'text/xml; charset="utf-8"',
+      'MAN': '"http://schemas.xmlsoap.org/soap/envelope/"; ns=01',
+      '01-SOAPACTION': actionValue,
+    };
     http.Response res;
     try {
-      res = await _client
-          .post(uri,
-              headers: {
-                'Content-Type': 'text/xml; charset="utf-8"',
-                'SOAPACTION': '"$serviceType#$action"',
-              },
-              body: body)
-          .timeout(timeout);
-      if (res.statusCode == 405) {
-        // 405 Method Not Allowed → 设备强制要求 M-POST（UPnP 1.1 规范动作，
-        // go2tv 实机兼容蓝本）。逐跳头本就未设置，无需剔除；
-        // SOAPACTION 改为 MAN 命名空间形式 `01-SOAPACTION`。
-        res = await _sendRaw(
-          'M-POST',
-          uri,
-          {
-            'Content-Type': 'text/xml; charset="utf-8"',
-            'MAN': '"http://schemas.xmlsoap.org/soap/envelope/"; ns=01',
-            '01-SOAPACTION': '"$serviceType#$action"',
-          },
-          body,
-        );
+      if (mPost) {
+        // 配方记住该设备只吃 M-POST：直接发，若回 405 再退回普通 POST。
+        // 逐跳头本就未设置，无需剔除。
+        res = await _sendRaw('M-POST', uri, mPostHeaders, body);
+        if (res.statusCode == 405) {
+          res = await _client
+              .post(uri, headers: postHeaders, body: body)
+              .timeout(timeout);
+        }
+      } else {
+        res = await _client
+            .post(uri, headers: postHeaders, body: body)
+            .timeout(timeout);
+        if (res.statusCode == 405) {
+          // 405 Method Not Allowed → 设备强制要求 M-POST（UPnP 1.1 规范动作，
+          // go2tv 实机兼容蓝本）；SOAPACTION 改为 MAN 命名空间形式。
+          res = await _sendRaw('M-POST', uri, mPostHeaders, body);
+        }
       }
     } on TimeoutException {
       throw SoapException('$action 超时');
@@ -115,11 +149,18 @@ String buildEnvelope(
       's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
       '<s:Body><u:$action xmlns:u="$serviceType">');
   args.forEach((name, value) {
-    buffer.write('<$name>${_xmlEscape(value)}</$name>');
+    // CurrentURIMetaData 是整段 DIDL 的 CDATA 文本节点：内部已转义过一次，
+    // 这里再 _xmlEscape 会把 `<![CDATA[` 变成字面量 `&lt;![CDATA[`，
+    // 接收端拿到的是标签文本而不是 XML（双重转义）。
+    final encoded = _isCdataWrapped(value) ? value : _xmlEscape(value);
+    buffer.write('<$name>$encoded</$name>');
   });
   buffer.write('</u:$action></s:Body></s:Envelope>');
   return buffer.toString();
 }
+
+bool _isCdataWrapped(String s) =>
+    s.startsWith('<![CDATA[') && s.endsWith(']]>');
 
 /// 解析 `<u:ActionResponse>` 返回值；多模式兜底：
 /// 1) 标准响应元素子元素；2) 任意命名空间前缀下的同 localName 元素；

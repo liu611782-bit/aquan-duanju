@@ -10,6 +10,7 @@ import '../store/stores.dart';
 import '../widgets/back_to_top.dart';
 import '../widgets/common.dart';
 import '../widgets/reading_rail.dart';
+import '../widgets/tv_scope.dart';
 import 'book_aggregation_screen.dart';
 import 'book_category_screen.dart';
 import 'book_detail_screen.dart';
@@ -39,11 +40,6 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     with AutomaticKeepAliveClientMixin {
   final _items = <SeriesSummary>[];
   final _badges = <String, String>{};
-
-  /// 榜单已加载的**原始**条目数（含不显示名次的「平台推荐」行）。
-  ///
-  /// 服务端的名次是页内序号，下一页必须加上这个偏移才能接续。
-  int _rawCount = 0;
 
   /// [channelKey] → (榜单内容 id, 榜单 id)。榜单目录由服务端下发，选定一次就
   /// 固定；翻页必须带同一组值，否则游标无法续接。
@@ -144,7 +140,6 @@ class _DiscoverScreenState extends State<DiscoverScreen>
           ..addAll(page.badges);
         _cursor = page.cursor;
         _hasMore = page.hasMore;
-        _rawCount = page.rawCount;
         _loading = false;
       });
       // 网格改成 sliver 后不再由 SeriesGrid 内部预取，这里补上首屏预热。
@@ -187,7 +182,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     final channel = _channel;
     _loadingMore = true;
     try {
-      final page = await _fetchPage(type, channel, _cursor, offset: _rawCount);
+      final page = await _fetchPage(type, channel, _cursor);
       if (!mounted || seq != _seq) return;
       final fresh = _dedupe(page.items);
       setState(() {
@@ -200,7 +195,6 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         }
         _badges.addAll(page.badges);
         _cursor = page.cursor;
-        _rawCount += page.rawCount;
       });
     } catch (_) {
       // 触底加载失败静默，下次触底再试。榜单目录可能已失效，丢掉缓存让
@@ -222,7 +216,8 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   void _warmCovers() {
     if (_items.isEmpty) return;
     final api = AppScope.read(context).api;
-    for (final item in _items.take(12)) {
+    final limit = TvScope.isTvOf(context) ? 8 : 12;
+    for (final item in _items.take(limit)) {
       if (item.coverUrl.isEmpty) continue;
       unawaited(
         AquaImageCache.instance.load(item.coverUrl, api).then(
@@ -248,14 +243,13 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
   /// 按频道来源取一页，两个数据源都归一化成 [_ChannelPage]。
   ///
-  /// [offset] 是「已经展示过的榜单原始条目数」，只对榜单频道有意义：服务端
-  /// 的名次是页内序号，翻页时必须由调用方补偏移，否则第二页又从「第1」开始。
+  /// 榜单名次由 Go 侧跨页全局化后直接下发（`Position += len(cur.Seen)`），
+  /// 这里只做展示转换，不能再叠加任何偏移。
   Future<_ChannelPage> _fetchPage(
     ContentType type,
     DiscoverChannel channel,
-    String cursor, {
-    int offset = 0,
-  }) async {
+    String cursor,
+  ) async {
     final api = AppScope.read(context).api;
     if (channel.source == DiscoverSource.feed) {
       final page = await api.discover(channel: channel.value, cursor: cursor);
@@ -263,7 +257,6 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         items: page.items,
         cursor: page.cursor,
         hasMore: page.hasMore,
-        rawCount: page.items.length,
       );
     }
 
@@ -288,10 +281,9 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         // 目录缺失时直接展示服务端默认榜，翻页仍可续接游标。
         return _ChannelPage(
           items: rankItemsToSummaries(ranking.items),
-          badges: rankBadges(ranking.items, offset: offset),
+          badges: rankBadges(ranking.items),
           cursor: ranking.cursor,
           hasMore: ranking.hasMore,
-          rawCount: ranking.items.length,
         );
       }
       _rankTargets[key] = (content: contentId, board: board.id);
@@ -305,11 +297,10 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     }
     return _ChannelPage(
       items: rankItemsToSummaries(ranking.items),
-      badges: rankBadges(ranking.items, offset: offset),
+      badges: rankBadges(ranking.items),
       notice: notice,
       cursor: ranking.cursor,
       hasMore: ranking.hasMore,
-      rawCount: ranking.items.length,
     );
   }
 
@@ -582,6 +573,14 @@ class _ContentTypeBar extends StatelessWidget {
   final ContentType selected;
   final ValueChanged<ContentType> onSelect;
 
+  /// 电视上隐藏小说（`ContentKind.book`）——书架/阅读器/听书在电视上没有意义。
+  List<ContentType> _visibleTypes(BuildContext context) {
+    if (!TvScope.isTvOf(context)) return kContentTypes;
+    return kContentTypes
+        .where((type) => type.kind != ContentKind.book)
+        .toList(growable: false);
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -601,7 +600,8 @@ class _ContentTypeBar extends StatelessWidget {
           scrollDirection: Axis.horizontal,
           padding: const EdgeInsets.symmetric(horizontal: 8),
           children: [
-            for (final type in kContentTypes)
+            // 电视不提供小说/漫画阅读（用户明确不需要），类型条直接不显示。
+            for (final type in _visibleTypes(context))
               _TypeTab(
                 type: type,
                 selected: type == selected,
@@ -753,15 +753,10 @@ class _ChannelPage {
     this.notice,
     this.cursor = '',
     this.hasMore = false,
-    this.rawCount = 0,
   });
 
   final List<SeriesSummary> items;
   final Map<String, String> badges;
-
-  /// 服务端这一页返回的**原始**条目数（含被跳过名次的「平台推荐」行）。
-  /// 下一页的「第 N」= 页内序号 + 已加载原始条目数。
-  final int rawCount;
 
   /// 这次结果的轻提示（如榜单降级），由调用方在结果落地时弹出。
   final String? notice;

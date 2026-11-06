@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../core/date_strip_scroll.dart';
 import '../models/models.dart';
 import '../widgets/common.dart';
 import 'detail_screen.dart';
@@ -14,6 +15,13 @@ class ReleasesScreen extends StatefulWidget {
 }
 
 class _ReleasesScreenState extends State<ReleasesScreen> {
+  /// 日期项固定宽度：程序化居中要能算出每个下标的滚动偏移。
+  /// 左右 padding 取 (视口宽 - 项宽)/2，首尾日期也能真正落到正中。
+  static const double _dateItemWidth = 92.0;
+
+  final ScrollController _dateScroll = ScrollController();
+  bool _centeredOnce = false;
+
   List<String> _dates = const [];
   String _selectedDate = '';
   List<NewRelease> _items = const [];
@@ -29,6 +37,58 @@ class _ReleasesScreenState extends State<ReleasesScreen> {
     _load();
   }
 
+  @override
+  void dispose() {
+    _dateScroll.dispose();
+    super.dispose();
+  }
+
+  double _sidePad(double viewport) =>
+      dateStripSidePad(viewport, _dateItemWidth);
+
+  /// 把当前选中日期滚到可视区域正中。
+  void _centerSelectedDate({bool animate = true}) {
+    if (!_dateScroll.hasClients || _dates.isEmpty) return;
+    final index = _dates.indexOf(_selectedDate);
+    if (index < 0) return;
+    final pos = _dateScroll.position;
+    final viewport = pos.viewportDimension;
+    if (viewport <= 0) return;
+    final target = dateStripCenterOffset(
+      viewport: viewport,
+      itemWidth: _dateItemWidth,
+      index: index,
+      maxScrollExtent: pos.maxScrollExtent,
+    );
+    if ((_dateScroll.offset - target).abs() < 1.0) return;
+    if (animate) {
+      _dateScroll.animateTo(target,
+          duration: const Duration(milliseconds: 260), curve: Curves.easeOut);
+    } else {
+      _dateScroll.jumpTo(target);
+    }
+  }
+
+  /// 首屏骨架阶段日期条可能还没挂载，等一两帧再居中。
+  void _scheduleCenter({required bool animate, int retry = 0}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_dateScroll.hasClients) {
+        if (retry < 3) _scheduleCenter(animate: animate, retry: retry + 1);
+        return;
+      }
+      _centerSelectedDate(animate: animate);
+    });
+  }
+
+  /// 点选日期：立即居中（不等网络），再拉取该日数据。
+  void _selectDate(String date) {
+    if (date == _selectedDate) return;
+    setState(() => _selectedDate = date);
+    _centerSelectedDate(animate: true);
+    _load(date: date);
+  }
+
   Future<void> _load({String? date}) async {
     setState(() {
       _loading = true;
@@ -40,14 +100,22 @@ class _ReleasesScreenState extends State<ReleasesScreen> {
       if (!mounted) return;
       setState(() {
         if (page.dates.isNotEmpty) _dates = page.dates;
-        _selectedDate = page.date.isNotEmpty
+        final resolved = page.date.isNotEmpty
             ? page.date
             : (date ?? _dates.firstOrNull ?? '');
+        // 服务端偶尔会给出不在 date_list 里的默认日期；兜底到列表内的值，
+        // 否则 indexOf == -1，进页时无法把当前日期滚到正中。
+        _selectedDate = _dates.contains(resolved)
+            ? resolved
+            : (_dates.firstOrNull ?? resolved);
         _items = page.items;
         _cursor = page.cursor;
         _hasMore = page.hasMore;
         _loading = false;
       });
+      // 进入页面时把当前日期放到正中；之后选中的日期也回到正中。
+      _scheduleCenter(animate: _centeredOnce);
+      _centeredOnce = true;
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -80,35 +148,18 @@ class _ReleasesScreenState extends State<ReleasesScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('上新')),
-      body: LoadView(
-        loading: _loading,
-        error: _error,
-        onRetry: () => _load(),
-        empty: _items.isEmpty,
-        emptyText: '这一天没有上新',
-        child: Column(
-          children: [
-            if (_dates.isNotEmpty)
-              SizedBox(
-                height: 52,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  children: [
-                    for (final d in _dates)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: ChoiceChip(
-                          label: Text(_dateLabel(d)),
-                          selected: d == _selectedDate,
-                          onSelected: (_) => _load(date: d),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            Expanded(
+      body: Column(
+        children: [
+          // 日期条必须独立于 LoadView：加载骨架 / 空态 / 错误态都会整个替换
+          // child，放进去会让日期条闪一下消失，且「无上新」时无法再切日期。
+          if (_dates.isNotEmpty) _buildDateStrip(),
+          Expanded(
+            child: LoadView(
+              loading: _loading,
+              error: _error,
+              onRetry: () => _load(),
+              empty: _items.isEmpty,
+              emptyText: '这一天没有上新',
               child: ListView.separated(
                 padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
                 itemCount: _items.length + (_hasMore ? 1 : 0),
@@ -128,14 +179,48 @@ class _ReleasesScreenState extends State<ReleasesScreen> {
                       ),
                     );
                   }
-                  final item = _items[i];
-                  return _ReleaseCard(item: item);
+                  return _ReleaseCard(item: _items[i]);
                 },
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
+    );
+  }
+
+  Widget _buildDateStrip() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth.isFinite
+            ? constraints.maxWidth
+            : MediaQuery.sizeOf(context).width;
+        return SizedBox(
+          height: 52,
+          child: ListView.builder(
+            controller: _dateScroll,
+            scrollDirection: Axis.horizontal,
+            padding: EdgeInsets.symmetric(
+              horizontal: _sidePad(width),
+              vertical: 8,
+            ),
+            itemExtent: _dateItemWidth,
+            itemCount: _dates.length,
+            itemBuilder: (_, i) {
+              final d = _dates[i];
+              return Center(
+                child: ChoiceChip(
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  label: Text(_dateLabel(d),
+                      style: const TextStyle(fontSize: 12)),
+                  selected: d == _selectedDate,
+                  onSelected: (_) => _selectDate(d),
+                ),
+              );
+            },
+          ),
+        );
+      },
     );
   }
 

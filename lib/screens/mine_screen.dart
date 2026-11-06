@@ -21,6 +21,8 @@ import '../core/download_service.dart';
 import '../core/cache_maintenance.dart';
 import '../core/error_log.dart';
 import '../core/reader/reader_listen_settings.dart';
+import '../core/tv/tv_mode.dart';
+import '../widgets/tv_scope.dart';
 import '../core/reader/reader_speech_settings.dart';
 import '../core/reader/speech/chapter_gap.dart';
 import '../core/reader/speech/listen_format.dart';
@@ -185,6 +187,8 @@ class _MineScreenState extends State<MineScreen>
                       ],
                     ),
             ),
+            // 电视不提供小说/漫画阅读，书架入口一并隐藏。
+            if (!TvScope.isTvOf(context))
             _Section(
               title: '书架',
               action: scope.reading.entries.isEmpty
@@ -620,6 +624,39 @@ class SettingsPanel extends StatelessWidget {
             onChanged: (v) => scope.settings.autoNext = v,
           ),
           ListTile(
+            leading: const Icon(Icons.tv),
+            title: const Text('电视模式'),
+            subtitle: Text(
+              '${tvOverrideLabel(parseTvOverride(scope.settings.tvMode))}；改动后重启应用生效',
+            ),
+            onTap: () async {
+              final current = parseTvOverride(scope.settings.tvMode);
+              final picked = await showDialog<TvOverride>(
+                context: context,
+                builder: (dialogContext) => SimpleDialog(
+                  title: const Text('电视模式'),
+                  children: [
+                    for (final value in TvOverride.values)
+                      SimpleDialogOption(
+                        onPressed: () => Navigator.pop(dialogContext, value),
+                        child: Text(
+                          current == value
+                              ? '✓ ${tvOverrideLabel(value)}'
+                              : tvOverrideLabel(value),
+                        ),
+                      ),
+                  ],
+                ),
+              );
+              if (picked == null) return;
+              scope.settings.tvMode = tvOverrideName(picked);
+              if (!context.mounted) return;
+              ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                const SnackBar(content: Text('已保存，重启应用后生效')),
+              );
+            },
+          ),
+          ListTile(
             leading: const Icon(Icons.mic_none),
             title: const Text('语音输入'),
             subtitle: Text(
@@ -796,7 +833,7 @@ class SettingsPanel extends StatelessWidget {
           SwitchListTile(
             secondary: const Icon(Icons.block_outlined),
             title: const Text('CMS 播放去广告'),
-            subtitle: const Text('本地代理重写 m3u8 剔除广告分片；失败自动回退直链'),
+            subtitle: const Text('本地代理重写 m3u8 剔除广告分片；默认关闭更稳，播放失败请保持关闭'),
             value: scope.settings.sourcesAdFilter,
             onChanged: (v) => scope.settings.sourcesAdFilter = v,
           ),

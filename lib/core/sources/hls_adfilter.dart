@@ -83,12 +83,16 @@ class HlsAdFilter {
         out.add('#EXT-X-DISCONTINUITY');
       }
       pendingDiscontinuity = false;
-      out.addAll(chunk.leadingComments);
+      for (final comment in chunk.leadingComments) {
+        out.add(_rewriteTagUris(comment, baseUri, rewriteUri));
+      }
       if (chunk.extInf != null) out.add(chunk.extInf!);
       out.add(rewriteUri(chunk.uri!));
     }
     // 末尾标签（#EXT-X-ENDLIST 等）不属于任何分片，丢掉会让 VOD 变成「未结束」。
-    out.addAll(parsed.trailing);
+    for (final comment in parsed.trailing) {
+      out.add(_rewriteTagUris(comment, baseUri, rewriteUri));
+    }
     return out.join('\n');
   }
 
@@ -206,8 +210,12 @@ class HlsAdFilter {
     final out = <String>[];
     for (final raw in text.split('\n')) {
       final trimmed = raw.trim();
-      if (trimmed.isEmpty || trimmed.startsWith('#')) {
+      if (trimmed.isEmpty) {
         out.add(raw);
+        continue;
+      }
+      if (trimmed.startsWith('#')) {
+        out.add(_rewriteTagUris(raw, baseUri, rewriteUri));
         continue;
       }
       out.add(rewriteUri(_absolute(trimmed, baseUri)));
@@ -215,12 +223,38 @@ class HlsAdFilter {
     return out.join('\n');
   }
 
+  /// `#EXT-X-KEY:URI="…"` / `#EXT-X-MAP:URI="…"` 里的密钥与初始化分片
+  /// 同样要经代理带走 Referer/UA；旧实现把整行当注释保留，AES-128 密钥
+  /// 请求直连源站被 403，表现为「有画面但解码失败 / 直接播不出来」。
+  static final RegExp _tagUri =
+      RegExp(r'URI="([^"]+)"', caseSensitive: false);
+
+  static String _rewriteTagUris(
+    String line,
+    Uri baseUri,
+    String Function(String absUri) rewriteUri,
+  ) {
+    if (!line.toUpperCase().contains('URI="')) return line;
+    return line.replaceAllMapped(_tagUri, (m) {
+      final matched = m.group(0)!;
+      final eq = matched.indexOf('=');
+      final prefix = matched.substring(0, eq + 2); // 保留原属性名大小写
+      final abs = _absolute(m.group(1)!, baseUri);
+      return '$prefix${rewriteUri(abs)}"';
+    });
+  }
+
   static String _absolute(String ref, Uri baseUri) {
     final uri = Uri.tryParse(ref);
     if (uri == null) return ref;
     if (uri.hasScheme && uri.host.isNotEmpty) return uri.toString();
     try {
-      return baseUri.resolve(ref).toString();
+      final resolved = baseUri.resolve(ref);
+      // 相对分片继承父清单的鉴权 query（时效 token 常见），否则分片 403。
+      if (resolved.query.isEmpty && baseUri.query.isNotEmpty) {
+        return resolved.replace(query: baseUri.query).toString();
+      }
+      return resolved.toString();
     } catch (_) {
       return ref;
     }

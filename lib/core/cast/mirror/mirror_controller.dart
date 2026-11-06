@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../../aqua_api.dart';
+import '../../error_log.dart';
 import '../cast_target.dart';
 
 /// 屏幕镜像状态机（Android 原生 MirrorService 的 Dart 桥）。
@@ -22,6 +23,11 @@ class MirrorController extends ChangeNotifier {
 
   static const _channel = MethodChannel('aquan/cast');
   static const _startTimeout = Duration(seconds: 15);
+
+  /// 启动等待预算。默认 15s；测试钩子可缩短以覆盖超时路径。
+  Duration _startTimeoutDuration = _startTimeout;
+  // ignore: avoid_setters_without_getters
+  set debugStartTimeout(Duration value) => _startTimeoutDuration = value;
 
   MirrorState _state = MirrorState.idle;
   String? _url;
@@ -49,17 +55,26 @@ class MirrorController extends ChangeNotifier {
     switch (call.method) {
       case 'mirrorStarted':
         final args = (call.arguments as Map?)?.cast<Object?, Object?>() ?? const {};
+        final pending = _startCompleter;
+        _startCompleter = null; // 先置空：重复/晚到事件不再 complete。
+        // 超时后迟到的启动回执：该次 start 已放弃，不复活状态机。
+        if (pending == null && _state != MirrorState.starting) break;
         _url = args['url'] as String?;
         _hasAudio = args['audio'] as bool? ?? false;
-        _startCompleter?.complete(args);
-        _startCompleter = null;
+        if (pending != null && !pending.isCompleted) pending.complete(args);
         _state = MirrorState.mirroring;
         notifyListeners();
       case 'mirrorStopped':
-        _startCompleter?.completeError(
-          CastException('镜像服务停止（${args(call)['reason']}）'),
-        );
+        final pending = _startCompleter;
         _startCompleter = null;
+        final reason = args(call)['reason'];
+        if (reason != 'stopped') {
+          // 原生侧失败原因（固定文案/简短 message，不含 URL 与凭据）落 ErrorLog。
+          ErrorLog.instance.record('镜像服务', '服务事件: ${reason ?? '未知原因'}');
+        }
+        if (pending != null && !pending.isCompleted) {
+          pending.completeError(CastException('镜像服务停止（$reason）'));
+        }
         _state = MirrorState.idle;
         _url = null;
         notifyListeners();
@@ -131,7 +146,7 @@ class MirrorController extends ChangeNotifier {
     final completer = _startCompleter = Completer<Map<Object?, Object?>>();
     try {
       await _channel.invokeMethod<bool>('startMirror', {'withAudio': withAudio});
-      final args = await completer.future.timeout(_startTimeout);
+      final args = await completer.future.timeout(_startTimeoutDuration);
       if ((args['url'] as String?)?.isNotEmpty != true) {
         throw CastException('镜像服务未返回地址');
       }
@@ -142,6 +157,11 @@ class MirrorController extends ChangeNotifier {
       _state = MirrorState.idle;
       notifyListeners();
       return null;
+    } finally {
+      // 15s 超时/通道失败：先丢弃挂起的 completer 再走失败文案。
+      // 晚到的 mirrorStarted/mirrorStopped 不会对已废弃的 future 二次 complete。
+      // 成功路径上事件处理里已置空，这里的 identical 判断不会误清新会话。
+      if (identical(_startCompleter, completer)) _startCompleter = null;
     }
   }
 

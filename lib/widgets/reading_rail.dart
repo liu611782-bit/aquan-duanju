@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../screens/book_detail_screen.dart';
 import '../store/stores.dart';
 import 'common.dart';
+import 'tv_focusable.dart';
+import 'tv_scope.dart';
 
 /// 「最近在读」横排：小说与漫画各看各的（[manga] 过滤域），
 /// 发现页小说 tab 只显示小说、漫画 tab 只显示漫画——不与影视的「继续观看」混排。
@@ -107,7 +109,9 @@ class _ReadingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return GestureDetector(
+    // 电视上必须可聚焦：GestureDetector 收不到遥控器确定键。
+    return TvFocusable(
+      enabled: TvScope.isTvOf(context),
       onTap: () => openBook(context, entry),
       child: SizedBox(
         width: 104,

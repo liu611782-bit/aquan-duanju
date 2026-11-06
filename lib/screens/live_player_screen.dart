@@ -9,6 +9,7 @@ import '../core/error_log.dart';
 import '../core/live/epg.dart';
 import '../core/live/live_parser.dart';
 import '../core/player/player_engine.dart';
+import '../core/player/mpv_headers.dart';
 import '../core/cast/cast_controller.dart';
 import '../core/sources/source_probe.dart';
 import '../store/stores.dart';
@@ -120,6 +121,9 @@ class _LivePlayerScreenState extends State<LivePlayerScreen> {
     });
     try {
       await _engine.initialize();
+      if (!mounted || epoch != _playEpoch) return;
+      // 直播频道同样常有 Referer/UA 防盗链：只靠 Media(httpHeaders:) 不够。
+      await MpvHeaders.install(_engine, url.headers);
       if (!mounted || epoch != _playEpoch) return;
       await _engine.open(
         Media(url.url, httpHeaders: url.headers),

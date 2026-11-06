@@ -2,8 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../error_log.dart';
 import 'cast_media_proxy.dart';
+import 'cast_recipe.dart';
 import 'cast_target.dart';
+import 'didl.dart';
 import 'gena_subscriber.dart';
 import 'mirror/mirror_controller.dart';
 import 'chromecast/chromecast_transport.dart';
@@ -76,6 +79,45 @@ class CastPoll {
   bool get isStopped => transportState == 'STOPPED' || transportState == 'NO_MEDIA_PRESENT';
 }
 
+/// DLNA 兼容加载所需的全部输入。
+///
+/// 它是「可选能力」[CastCompatTransport] 的入参：不感知配方的 transport
+/// （Chromecast / 测试假件）根本不会收到它，控制器仍走标准三件套。
+class CastLoadRequest {
+  const CastLoadRequest({
+    required this.url,
+    required this.didl,
+    this.recipes = const <CastRecipe>[],
+    this.title = '',
+    this.duration,
+    this.subtitleUrl,
+    this.position = Duration.zero,
+    this.protocolInfo = const <String>{},
+  });
+
+  final Uri url;
+  final DidlRequest didl;
+  final List<CastRecipe> recipes;
+  final String title;
+  final String? duration;
+  final Uri? subtitleUrl;
+  final Duration position;
+
+  /// GetProtocolInfo 预检拿到的 Sink 条目（控制器预检后回填）。
+  final Set<String> protocolInfo;
+}
+
+/// 可选能力接口：DLNA 兼容层专用。
+///
+/// 刻意不往 [CastTransport] 加方法——`implements` 会要求所有既有实现
+/// （Chromecast / 各测试假件）补实现；用 `is` 探测才能真正做到向后兼容。
+abstract class CastCompatTransport {
+  Future<Set<String>> preflight();
+
+  /// 返回实际成功的配方（供控制器记忆）。
+  Future<CastRecipe?> load(CastLoadRequest request);
+}
+
 /// 传输抽象：DLNA 是 SOAP 实现，Chromecast 是 CASTv2 实现；测试注入假实现驱动状态机。
 abstract class CastTransport {
   Future<void> setUri(
@@ -106,6 +148,25 @@ CastTransport defaultTransportFactory(CastTarget target) {
   }
 }
 
+/// 由 URL 扩展名猜 DIDL `protocolInfo` 的 mime 段；无法判定时按视频处理
+/// （预检会从设备 Sink 覆盖成设备真正声明的 mime）。
+String _mimeForCast(String url) {
+  final path = (Uri.tryParse(url)?.path ?? '').toLowerCase();
+  bool has(String ext) => path.endsWith(ext);
+  if (has('.m3u8') || has('.ts')) return 'video/mp2t';
+  if (has('.mp3')) return 'audio/mpeg';
+  if (has('.m4a') || has('.aac')) return 'audio/mp4';
+  if (has('.flac')) return 'audio/flac';
+  if (has('.wav')) return 'audio/wav';
+  if (has('.jpg') || has('.jpeg')) return 'image/jpeg';
+  if (has('.png')) return 'image/png';
+  if (has('.webp')) return 'image/webp';
+  if (has('.mkv')) return 'video/x-matroska';
+  if (has('.webm')) return 'video/webm';
+  if (has('.avi')) return 'video/x-msvideo';
+  return 'video/mp4';
+}
+
 /// 投屏会话控制器：状态机 + 1s 轮询 + 远端主动停止感知 + 多协议路由。
 ///
 /// 本地联动（暂停本地播放器/断开回本地续播）由 UI 层订阅完成——控制器只管远端。
@@ -114,9 +175,15 @@ class CastController extends ChangeNotifier {
     CastTransport Function(CastTarget)? transportFactory,
     this.mdnsDiscover,
     this.proxyResolver,
-  }) : _transportFactory = transportFactory ?? defaultTransportFactory;
+    CastRecipeStore? recipeStore,
+  })  : _transportFactory = transportFactory ?? defaultTransportFactory,
+        recipes = recipeStore ?? CastRecipeStore();
 
   final CastTransport Function(CastTarget) _transportFactory;
+
+  /// 设备型号 → 成功配方。默认是一张不落盘的内存表；集成时把
+  /// `CastStore.recipes`（v3 持久化）注入这里即可跨启动记住配方。
+  CastRecipeStore recipes;
 
   /// mDNS 发现挂点（Chromecast）注入点；null = 用默认 [MdnsDiscovery]。
   final Stream<CastDeviceInfo> Function()? mdnsDiscover;
@@ -192,6 +259,8 @@ class CastController extends ChangeNotifier {
     notifyListeners();
     final discovery = _discovery = SsdpDiscovery();
     _discoverySub?.cancel();
+    // P0 崩溃护栏：组播绑定失败等异常只写 ErrorLog，不中断扫描。
+    // cancelOnError: false 保证单次错误不会把发现流整个关掉。
     _discoverySub = discovery.start().listen((event) {
       switch (event) {
         case SsdpDeviceFound(:final device):
@@ -206,7 +275,9 @@ class CastController extends ChangeNotifier {
         case SsdpScanDone():
           break;
       }
-    });
+    }, onError: (Object error, StackTrace stack) {
+      ErrorLog.instance.record('投屏扫描', error, stack);
+    }, cancelOnError: false);
     _startMdnsScan();
   }
 
@@ -252,7 +323,9 @@ class CastController extends ChangeNotifier {
     final discovery = _discovery ??= SsdpDiscovery();
     _discoverySub ??= discovery.start().listen((event) {
       if (event is SsdpDeviceFound) _upsertDevice(CastTarget.dlna(event.device));
-    });
+    }, onError: (Object error, StackTrace stack) {
+      ErrorLog.instance.record('投屏扫描', error, stack);
+    }, cancelOnError: false);
     final device = await discovery.addByIp(host, port: port);
     return device == null ? null : CastTarget.dlna(device);
   }
@@ -341,36 +414,93 @@ class CastController extends ChangeNotifier {
     _currentMedia = media;
 
     final transport = _transport = _transportFactory(target);
+    // DLNA 走兼容层（预检 → 配方链 → setUri → Play 门控 → Seek 容错）；
+    // Chromecast 与所有不实现该能力的 transport 保持既有标准序列。
+    final compat =
+        transport is CastCompatTransport ? transport as CastCompatTransport : null;
+    final remembered = recipes.lookup(target);
     try {
-      await transport.setUri(
-        Uri.parse(playUrl),
-        title: media.title,
-        duration: null, // 时长未知时省略，避免设备较真
-        subtitleUrl: media.subtitleUrl.isEmpty
-            ? null
-            : Uri.tryParse(media.subtitleUrl),
-      );
-      if (media.position > const Duration(seconds: 3)) {
-        // 起播后可能被设备忽略：投完再 seek 一次（部分盒子只认这条顺序）。
-        await transport.play();
+      Set<String> sink = const <String>{};
+      if (compat != null) {
         try {
-          await transport.seekTo(media.position);
-        } on Exception {
-          // 设备不支持 Seek：从头播。
+          sink = await compat.preflight().timeout(const Duration(seconds: 2));
+        } on Exception catch (e) {
+          ErrorLog.instance.record('投屏能力预检', e, StackTrace.current);
         }
-      } else {
-        await transport.play();
       }
+      CastRecipe? succeeded;
+      if (compat != null) {
+        succeeded = await compat.load(CastLoadRequest(
+          url: Uri.parse(playUrl),
+          title: media.title,
+          duration: null, // 时长未知时省略，避免设备较真
+          subtitleUrl: media.subtitleUrl.isEmpty
+              ? null
+              : Uri.tryParse(media.subtitleUrl),
+          position: media.position,
+          didl: DidlRequest(
+            uri: Uri.parse(playUrl),
+            title: media.title,
+            mimeType: _mimeForCast(playUrl),
+            subtitleUri: media.subtitleUrl.isEmpty
+                ? null
+                : Uri.tryParse(media.subtitleUrl),
+            headers: media.headers,
+          ),
+          recipes: recipes.fallbackChain(target),
+          protocolInfo: sink,
+        ));
+      } else {
+        await transport.setUri(
+          Uri.parse(playUrl),
+          title: media.title,
+          duration: null,
+          subtitleUrl: media.subtitleUrl.isEmpty
+              ? null
+              : Uri.tryParse(media.subtitleUrl),
+        );
+        if (media.position > const Duration(seconds: 3)) {
+          // 起播后可能被设备忽略：投完再 seek 一次（部分盒子只认这条顺序）。
+          await transport.play();
+          try {
+            await transport.seekTo(media.position);
+          } on Exception {
+            // 设备不支持 Seek：从头播。
+          }
+        } else {
+          await transport.play();
+        }
+      }
+      if (succeeded != null) await _rememberRecipe(target, succeeded);
       _state = CastSessionState.casting;
       notifyListeners();
       _startPolling();
       unawaited(_startGena(target));
     } on Exception {
+      // 命中配方失败一次即清空，下次投屏重回梯度扫描。
+      if (remembered != null) await _forgetRecipe(target);
       _state = CastSessionState.idle;
       _transport = null;
       _currentDevice = null;
       notifyListeners();
       rethrow;
+    }
+  }
+
+  /// 配方记忆是尽力而为：写盘失败只进日志，绝不让已成功的投屏失败。
+  Future<void> _rememberRecipe(CastTarget target, CastRecipe recipe) async {
+    try {
+      await recipes.remember(target, recipe);
+    } on Exception catch (e) {
+      ErrorLog.instance.record('投屏配方记忆', e, StackTrace.current);
+    }
+  }
+
+  Future<void> _forgetRecipe(CastTarget target) async {
+    try {
+      await recipes.forget(target);
+    } on Exception catch (e) {
+      ErrorLog.instance.record('投屏配方重置', e, StackTrace.current);
     }
   }
 

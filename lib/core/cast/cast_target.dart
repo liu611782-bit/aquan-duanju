@@ -50,6 +50,7 @@ class CastTarget {
       : id = dlna.udn,
         name = dlna.friendlyName,
         modelName = dlna.modelName,
+        manufacturer = dlna.manufacturer,
         protocol = CastProtocol.dlna,
         host = Uri.tryParse(dlna.location.isNotEmpty ? dlna.location : dlna.controlUrl)
                 ?.host ??
@@ -61,6 +62,7 @@ class CastTarget {
       : id = 'cast:${cast.host}:${cast.port}',
         name = cast.name.isEmpty ? cast.host : cast.name,
         modelName = cast.modelName,
+        manufacturer = '',
         protocol = CastProtocol.chromecast,
         host = cast.host,
         dlna = null;
@@ -68,6 +70,10 @@ class CastTarget {
   final String id;
   final String name;
   final String modelName;
+
+  /// 设备配方指纹的一段；Chromecast 无 manufacturer 时为空串。
+  /// 注意 [id] 语义不变：DLNA = UDN，Chromecast = `cast:<host>:<port>`。
+  final String manufacturer;
   final CastProtocol protocol;
   final String host;
   bool online;

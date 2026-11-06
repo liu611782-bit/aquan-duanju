@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"sync"
 
@@ -59,6 +60,11 @@ func lookup(h int32) (*sdk.Client, bool) {
 // configJSON 是 Config 的 JSON，可以为空。
 // 返回 {"handle":N}；失败返回 {"error":{…}}，不 panic。
 func New(profilePath, configJSON string) string {
+	// 统一 FFI recover 护栏：panic 转成既有 error envelope，不跨边界 abort。
+	return Guard(func() string { return newClient(profilePath, configJSON) })
+}
+
+func newClient(profilePath, configJSON string) string {
 	cfg, err := parseConfig(configJSON)
 	if err != nil {
 		return envelopeJSON(nil, err)
@@ -78,6 +84,11 @@ func New(profilePath, configJSON string) string {
 // JSON（可以为空）。返回 {"result":…} 或 {"error":{…}}。调用方负责放到后台
 // 线程；取消不做：SDK 自带请求超时与重试，单次调用不悬置。
 func Call(handle int32, method, argsJSON string) string {
+	// 统一 FFI recover 护栏：SDK / 方法实现里的 panic 不跨边界 abort。
+	return Guard(func() string { return call(handle, method, argsJSON) })
+}
+
+func call(handle int32, method, argsJSON string) string {
 	c, ok := lookup(handle)
 	if !ok {
 		err := fmt.Errorf("%w: unknown handle %d", sdk.ErrInvalidOptions, handle)
@@ -99,6 +110,37 @@ func Call(handle int32, method, argsJSON string) string {
 	})
 	return envelopeJSON(v, err)
 }
+
+// Guard 用 defer recover() 包住一次 Dart 可调的导出调用：panic 一律转成
+// 既有 error envelope（已注册 code），绝不越过 c-shared 边界让进程 abort。
+// C 导出层（main.go 的 AquaNew/AquaCall/AquaVersion）与 New/Call 都经由它；
+// 方法表与 Dart 侧调用签名完全不变。
+func Guard(fn func() string) (out string) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = envelopeJSON(nil, panicError(r))
+		}
+	}()
+	return fn()
+}
+
+// panicError 用已注册哨兵 sdk.ErrTransport（code=TRANSPORT）包装 panic：
+// UI 只按 code 显示固定文案；message 仅留脱敏摘要，抹掉 URL 查询串与常见
+// 凭据字段并截断，避免完整 URL / token 跨 FFI 或落日志。
+func panicError(r any) error {
+	raw := fmt.Sprintf("%v", r)
+	raw = urlQueryRedactor.ReplaceAllString(raw, "$1?…")
+	raw = credentialRedactor.ReplaceAllString(raw, "$1…")
+	if len(raw) > 256 {
+		raw = raw[:256]
+	}
+	return fmt.Errorf("%w: core panic: %s", sdk.ErrTransport, raw)
+}
+
+var (
+	urlQueryRedactor   = regexp.MustCompile(`(https?://[^\s?#"]+)\?[^\s"]*`)
+	credentialRedactor = regexp.MustCompile(`(?i)(token|authorization|password|passwd|secret|decryption_key)\s*[=:]\s*[^\s,;&]+`)
+)
 
 // deviceResetter 是自愈需要的最小客户端能力；*sdk.Client 满足它。
 type deviceResetter interface {
@@ -125,9 +167,14 @@ func callWithDeviceHeal(ctx context.Context, c deviceResetter, run func(context.
 	return run(ctx)
 }
 
-// Methods 返回全部方法名，按字母排序。
-func Methods() []string {
-	names := make([]string, 0, len(methods))
+// Methods 返回全部方法名，按字母排序。导出函数统一带 recover 护栏。
+func Methods() (names []string) {
+	defer func() {
+		if recover() != nil {
+			names = nil
+		}
+	}()
+	names = make([]string, 0, len(methods))
 	for n := range methods {
 		names = append(names, n)
 	}

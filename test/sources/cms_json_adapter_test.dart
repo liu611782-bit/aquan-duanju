@@ -39,7 +39,7 @@ void main() {
       expect(lines.single.episodes[1].url, 'http://a/2.mp4');
     });
 
-    test('非 http 片段剔除；上限 240 集 / 4 线路', () {
+    test('上限 240 集；线路排序后最多保留 12 条', () {
       final many = List.generate(250, (i) => '第${i + 1}集\$http://a/$i.mp4');
       final lines = parsePlayLines(
           'a\$\$\$\$b\$\$\$\$c\$\$\$\$d\$\$\$\$e\$\$\$\$f',
@@ -54,7 +54,7 @@ void main() {
               'X\$http://e/1.mp4'
               r'$$$'
               'X\$http://f/1.mp4');
-      expect(lines.length, 4);
+      expect(lines.length, 6);
       expect(lines.first.episodes.length, 240);
     });
 

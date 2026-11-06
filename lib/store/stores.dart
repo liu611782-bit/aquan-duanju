@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/cast/cast_recipe.dart';
 import '../core/cast/cast_target.dart';
 import '../core/reader/reader_settings.dart';
 import '../core/reader/reader_theme.dart';
@@ -83,6 +84,15 @@ class SettingsStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 电视模式：`auto`（检测）/ `on`（强制）/ `off`（关闭）。
+  ///
+  /// 运行形态只在启动时解析一次，改完需要重启应用才生效（避免运行中布局跳变）。
+  String get tvMode => _prefs.getString('ui.tvMode') ?? 'auto';
+  set tvMode(String v) {
+    _prefs.setString('ui.tvMode', v);
+    notifyListeners();
+  }
+
   /// 听书：朗读推进时自动跟随高亮段（翻页跳转 / 滚动跟随）。
   bool get listenFollow => _prefs.getBool('listen.follow') ?? true;
   set listenFollow(bool v) {
@@ -145,8 +155,11 @@ class SettingsStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// CMS 源播放走本地去广告代理（默认开）。
-  bool get sourcesAdFilter => _prefs.getBool('sources.adFilter') ?? true;
+  /// CMS 源播放走本地去广告代理（默认关）。
+  ///
+  /// 默认直链最稳：部分源的加密 HLS 密钥分片、带时效 query 的分片经本地
+  /// 代理重写后会 403。需要剔除广告时由用户显式开启，播放失败会自动回退直链。
+  bool get sourcesAdFilter => _prefs.getBool('sources.adFilter') ?? false;
   set sourcesAdFilter(bool v) {
     _prefs.setBool('sources.adFilter', v);
     notifyListeners();
@@ -492,6 +505,7 @@ class SettingsStore extends ChangeNotifier {
         'player.speed': defaultSpeed,
         'player.volume': volume,
         'player.autoNext': autoNext,
+        'ui.tvMode': tvMode,
         'random.fromFirst': randomFromFirst,
         'player.autoFitWindow': autoFitWindow,
         'download.quality': cacheQuality,
@@ -548,6 +562,10 @@ class SettingsStore extends ChangeNotifier {
     apply('player.autoNext', () {
       final v = data['player.autoNext'];
       if (v is bool) autoNext = v;
+    });
+    apply('ui.tvMode', () {
+      final v = data['ui.tvMode'];
+      if (v is String && const {'auto', 'on', 'off'}.contains(v)) tvMode = v;
     });
     apply('random.fromFirst', () {
       final v = data['random.fromFirst'];
@@ -3420,6 +3438,17 @@ class MarketSitesStore extends _JsonFileStore {
     await _flush();
   }
 
+  /// 导入配置时追加 parses：按 url 去重，不覆盖「源市场扫描」已得到的结果。
+  Future<void> addParses(List<ParseApi> items) async {
+    var changed = false;
+    for (final p in items) {
+      if (_parses.any((x) => x.url == p.url)) continue;
+      _parses.add(p);
+      changed = true;
+    }
+    if (changed) await _flush();
+  }
+
   Future<void> _flush() async {
     await _writeJson({
       'version': 1,
@@ -3490,16 +3519,22 @@ class MarketSitesStore extends _JsonFileStore {
   }
 }
 
-/// 投屏设备记忆（`aquan_cast.json`）：最近设备 + 钉选设备。
+/// 投屏设备记忆（`aquan_cast.json`）：最近设备 + 钉选设备 + 设备成功配方（v3）。
 class CastStore extends _JsonFileStore {
-  CastStore({super.testDirectory}) : super('aquan_cast.json');
+  CastStore({super.testDirectory}) : super('aquan_cast.json') {
+    _recipes = CastRecipeStore(onChanged: _persistRecipes);
+  }
 
   CastTarget? _lastDevice;
   final List<CastTarget> _pinned = [];
+  late final CastRecipeStore _recipes;
 
   CastTarget? get lastDevice => _lastDevice;
   List<CastTarget> get pinned => List.of(_pinned);
   Set<String> get pinnedIds => _pinned.map((d) => d.id).toSet();
+
+  /// 设备型号 → 成功配方（供 `CastController.recipes` 注入，跨启动生效）。
+  CastRecipeStore get recipes => _recipes;
 
   /// 投到某设备时刷新「最近使用」。
   Future<void> touchLast(CastTarget device) async {
@@ -3524,12 +3559,31 @@ class CastStore extends _JsonFileStore {
     await _flush();
   }
 
-  Future<void> _flush() async {
-    await _writeJson({
-      'version': 2,
-      if (_lastDevice != null) 'lastDevice': _lastDevice!.toPersistJson(),
-      'pinned': [for (final d in _pinned) d.toPersistJson()],
+  /// 只更新 `recipes` 字段：保留文件里的其它键（含未知字段），
+  /// 不触碰设备记忆，也不要求先 `loadFromDisk()`。
+  Future<void> _persistRecipes() async {
+    final existing = await _readJson();
+    await _writeJson(<String, dynamic>{
+      ...existing,
+      'version': 3,
+      'recipes': _recipes.toJson(),
     });
+    notifyListeners();
+  }
+
+  /// v3 写入：`...existing` 保留未知字段与旧备份带回来的键；
+  /// 版本号升到 3，v1/v2 读侧完全兼容。
+  Future<void> _flush() async {
+    final existing = await _readJson();
+    final next = <String, dynamic>{...existing, 'version': 3};
+    if (_lastDevice != null) {
+      next['lastDevice'] = _lastDevice!.toPersistJson();
+    } else {
+      next.remove('lastDevice');
+    }
+    next['pinned'] = [for (final d in _pinned) d.toPersistJson()];
+    next['recipes'] = _recipes.toJson();
+    await _writeJson(next);
     notifyListeners();
   }
 
@@ -3549,6 +3603,13 @@ class CastStore extends _JsonFileStore {
         final t = CastTarget.fromPersistJson(item);
         if (t != null) _pinned.add(t);
       }
+    }
+    // v1/v2 没有 recipes 字段 → 空表；缺字段不是坏数据。
+    final recipes = json['recipes'];
+    if (recipes is Map) {
+      _recipes.replaceAll(recipes.cast<String, dynamic>());
+    } else {
+      _recipes.clear();
     }
     _loaded = true;
     notifyListeners();
@@ -3575,6 +3636,12 @@ class CastStore extends _JsonFileStore {
         _pinned.add(t);
         merged++;
       }
+    }
+    // 备份导入：只补本机没有的配方，不覆盖已验证的成功策略；
+    // 不并入 merged（它统计的是设备条目数，改变口径会破坏既有备份断言）。
+    final recipes = incoming['recipes'];
+    if (recipes is Map) {
+      _recipes.absorb(recipes.cast<String, dynamic>());
     }
     await _flush();
     return merged;

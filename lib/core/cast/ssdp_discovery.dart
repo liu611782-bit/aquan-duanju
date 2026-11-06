@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import '../error_log.dart';
 import 'dlna_device.dart';
 
 /// SSDP 设备发现（UPnP 1.0）：M-SEARCH 三目标 × 4 轮 + NOTIFY 监听。
@@ -33,12 +34,20 @@ class SsdpDeviceOffline extends SsdpEvent {
 }
 
 class SsdpScanDone extends SsdpEvent {
-  const SsdpScanDone();
+  /// [warning] 非空表示本轮发现出现过非致命警告（如组播绑定失败）。
+  /// 复用已有事件而非新增子类：上层 `switch` 的穷尽匹配保持不变。
+  const SsdpScanDone({this.warning = ''});
+
+  final String warning;
 }
 
 class SsdpDiscovery {
   SsdpDiscovery({DescriptionFetcherFactory? clientFactory})
       : _clientFactory = clientFactory ?? _defaultFactory;
+
+  /// 最近一次成功绑定的本地端口（0 = 尚未绑定）；供「投屏诊断」读取。
+  /// 纯诊断值，不参与发现逻辑，公开读取不改变任何既有签名。
+  static int lastBoundPort = 0;
 
   /// 描述文档拉取器抽象（测试可注入本地 HttpServer）。
   final DescriptionFetcherFactory _clientFactory;
@@ -90,8 +99,14 @@ class SsdpDiscovery {
           events.add(SsdpDeviceOffline(e.value.device.udn));
         }
       });
-    }).catchError((Object e) {
-      events.addError(e);
+    }).catchError((Object e, StackTrace stack) {
+      // 组播绑定失败是非致命的：不再 addError 终止发现流（R4）。原始异常只进
+      // ErrorLog，事件流发一条带 warning 的既有事件；流保持打开，手动 IP 直连
+      // 与后续 addByIp 仍可用，NOTIFY 监听降级为 TTL 清理兜底。
+      ErrorLog.instance.record('投屏扫描·组播绑定', e, stack);
+      if (!events.isClosed) {
+        events.add(const SsdpScanDone(warning: '组播绑定失败，可手动输入 IP 直连'));
+      }
     });
     return events.stream;
   }
@@ -131,7 +146,11 @@ class SsdpDiscovery {
       );
       _boundPort = socket.port;
     }
-    socket.joinMulticast(InternetAddress(multicastGroup));
+    try {
+      socket.joinMulticast(InternetAddress(multicastGroup));
+    } catch (_) {
+      // 个别无组播能力的网络仍能收 M-SEARCH 单播应答，不致命。
+    }
     socket.multicastLoopback = false;
     // TTL 固定走系统默认：Dart RawDatagramSocket 没有暴露 TTL 设置。
     socket.listen((event) {
@@ -141,6 +160,7 @@ class SsdpDiscovery {
       _handlePacket(utf8.decode(datagram.data, allowMalformed: true));
     });
     _socket = socket;
+    SsdpDiscovery.lastBoundPort = _boundPort;
   }
 
   void _sendAllTargets() {
@@ -207,25 +227,92 @@ class SsdpDiscovery {
     }
   }
 
-  /// 手动添加 IP：按常见描述路径逐个探测。
-  Future<DlnaDevice?> addByIp(String host, {int port = 49152}) async {
+  /// 常见 DLNA / 私有接收端描述端口（projection 路线）。
+  static const List<int> commonPorts = <int>[
+    80, 3000, 5000, 7000, 8000, 8008, 8060, 8080, 8888,
+  ];
+
+  /// VIDAA / HappyCast / 乐播等国产接收端常见的动态端口段（闭区间）。
+  static const int dynamicPortStart = 49152;
+  static const int dynamicPortEnd = 49200;
+
+  /// 手动添加 IP：常见端口 + 国产设备动态端口段，并发探测既有 4 个描述路径。
+  ///
+  /// [port] 保留旧签名（默认 49152）并作为首选端口，公开调用完全兼容；
+  /// [candidatePorts] / [perPortTimeout] / [totalBudget] / [concurrency]
+  /// 均带默认值，便于单测注入。每个端口最多 [perPortTimeout]、整体不超过
+  /// [totalBudget]，同时最多 [concurrency] 个端口在探测，命中即停。
+  Future<DlnaDevice?> addByIp(
+    String host, {
+    int port = 49152,
+    List<int>? candidatePorts,
+    Duration perPortTimeout = const Duration(milliseconds: 300),
+    Duration totalBudget = const Duration(seconds: 6),
+    int concurrency = 8,
+  }) async {
     const paths = ['/description.xml', '/DeviceDescription.xml', '/dd.xml', '/'];
-    for (final path in paths) {
-      final location = 'http://$host:$port$path';
-      try {
-        final body = await _clientFactory().fetchDescription(location);
-        final device = parseDeviceDescription(body, location);
-        if (device != null) {
-          _devices[device.udn] =
-              _DeviceEntry(device: device, seenAt: DateTime.now());
-          _events?.add(SsdpDeviceFound(device));
-          return device;
+    final extra = candidatePorts ??
+        <int>[
+          ...commonPorts,
+          for (var p = dynamicPortStart; p <= dynamicPortEnd; p++) p,
+        ];
+    final candidates = <int>[if (port > 0) port, ...extra];
+    final seen = <int>{};
+    final ports = <int>[for (final p in candidates) if (seen.add(p)) p];
+    if (ports.isEmpty) return null;
+
+    // 端口候选扩到 ~58 个后复用单个 fetcher：避免每个请求都新建 http.Client
+    // （原实现的短生命周期客户端会被放大成大量空闲 socket）。
+    final fetcher = _clientFactory();
+    final stopwatch = Stopwatch()..start();
+    var cursor = 0;
+    DlnaDevice? found;
+
+    Future<void> probeWorker() async {
+      while (found == null && stopwatch.elapsed < totalBudget) {
+        final i = cursor++;
+        if (i >= ports.length) return;
+        final p = ports[i];
+        final portStart = stopwatch.elapsed;
+        for (final path in paths) {
+          if (found != null || stopwatch.elapsed >= totalBudget) return;
+          final remaining = perPortTimeout - (stopwatch.elapsed - portStart);
+          if (remaining <= Duration.zero) break;
+          final location = 'http://$host:$p$path';
+          try {
+            final body = await fetcher
+                .fetchDescription(location)
+                .timeout(remaining);
+            final device = parseDeviceDescription(body, location);
+            // await 之后的同步区不会交错：只让第一个命中的 worker 写表/发事件。
+            if (device != null && found == null) {
+              found = device;
+              _devices[device.udn] =
+                  _DeviceEntry(device: device, seenAt: DateTime.now());
+              _events?.add(SsdpDeviceFound(device));
+              return;
+            }
+          } catch (_) {
+            // 超时 / 连接拒绝 / 非描述 XML：继续下一路径、下一端口。
+          }
         }
-      } catch (_) {
-        continue;
       }
     }
-    return null;
+
+    final workers = List<Future<void>>.generate(
+      concurrency < ports.length ? concurrency : ports.length,
+      (_) => probeWorker(),
+    );
+    try {
+      await Future.wait(workers).timeout(
+        totalBudget + perPortTimeout,
+        onTimeout: () => <void>[],
+      );
+    } finally {
+      // 超时的 in-flight 请求随 client 关闭一起中断；注入的测试 fetcher 不受影响。
+      if (fetcher is _HttpClientFetcher) fetcher.close();
+    }
+    return found;
   }
 
   List<DlnaDevice> get devices =>
@@ -246,6 +333,8 @@ abstract class DescriptionFetcher {
 
 class _HttpClientFetcher implements DescriptionFetcher {
   final http.Client _client = http.Client();
+
+  void close() => _client.close();
 
   @override
   Future<String> fetchDescription(String url) async {

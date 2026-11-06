@@ -75,25 +75,57 @@ class MirrorService : Service() {
             projectionData = data
         }
 
+        /** 服务内一次性消费 token（resultCode, Intent）：取出即清空，绝不复制给第二个 Intent。 */
+        @Synchronized
+        fun consumeProjection(): Pair<Int, Intent>? {
+            val data = projectionData ?: return null
+            val code = projectionResultCode
+            projectionData = null
+            projectionResultCode = 0
+            return Pair(code, data)
+        }
+
         fun start(context: Context, withAudio: Boolean) {
-            val data = projectionData ?: return
+            // 授权 Intent 只保存在服务进程内（saveProjection），不再经过
+            // startForegroundService 的 extra 二次传递：Android 14 起 token
+            // 只能消费一次，复制 Intent 会触发 SecurityException。
             val intent = Intent(context, MirrorService::class.java)
-                .putExtra("result_code", projectionResultCode)
                 .putExtra("with_audio", withAudio)
-            intent.putExtra("data", data)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "start foreground service failed", e)
+                emitStoppedStatic("start-failed")
             }
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, MirrorService::class.java))
+            try {
+                context.stopService(Intent(context, MirrorService::class.java))
+            } catch (e: Exception) {
+                Log.w(TAG, "stop service failed", e)
+            }
+        }
+
+        /** 服务还没起来时的失败通知（无实例可用），Dart 侧对重复事件幂等。 */
+        private fun emitStoppedStatic(reason: String) {
+            try {
+                dartChannel?.invokeMethod("mirrorStopped", mapOf("reason" to reason))
+            } catch (e: Exception) {
+                Log.w(TAG, "emit mirrorStopped failed", e)
+            }
         }
     }
 
     private val running = AtomicBoolean(false)
+
+    // mirrorStopped 只发一次：失败 / 正常结束 / 系统销毁共用去重闸门。
+    private val stopEventSent = AtomicBoolean(false)
+
     private var projection: MediaProjection? = null
     private var virtualDisplay: android.hardware.display.VirtualDisplay? = null
     private var videoCodec: MediaCodec? = null
@@ -118,35 +150,80 @@ class MirrorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        startAsForeground()
+        // Android 14 起 startForeground(mediaProjection) 要求调用前已持有
+        // MediaProjection，且授权 token 只能消费一次：在服务内先创建再起前台。
+        try {
+            createProjectionFromGrant()
+        } catch (e: Exception) {
+            Log.e(TAG, "projection unavailable", e)
+            failAndStop("no-projection")
+            return
+        }
+        try {
+            startAsForeground()
+        } catch (e: Exception) {
+            // 前台服务受限 / 通知渠道异常：不重抛，走 mirrorStopped 优雅退出。
+            Log.e(TAG, "startForeground failed", e)
+            failAndStop("foreground-failed")
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (running.get()) return START_NOT_STICKY
-        val resultCode = intent?.getIntExtra("result_code", 0) ?: 0
-        val data = intent?.getParcelableExtra<Intent>("data")
         val withAudio = intent?.getBooleanExtra("with_audio", true) ?: true
-        if (data == null) {
-            notifyDart("mirrorStopped", mapOf("reason" to "no-projection"))
+        if (projection == null || stopEventSent.get()) {
+            // onCreate 未拿到授权或已发过失败事件：只补一次事件后自毁。
+            if (!stopEventSent.get()) emitStopped("no-projection")
             stopSelf()
             return START_NOT_STICKY
         }
-        startAsForeground()
         running.set(true)
         instance = this
         Thread({
             try {
-                runMirror(resultCode, data, withAudio)
+                runMirror(withAudio)
             } catch (e: Exception) {
+                // 编码器 / VirtualDisplay / HTTP 服务初始化异常统一走事件，不杀进程。
                 Log.e(TAG, "mirror failed", e)
-                notifyDart("mirrorStopped", mapOf("reason" to "error", "message" to "${e.message}"))
+                emitStopped("error", "${e.message}")
             } finally {
                 cleanup()
-                notifyDart("mirrorStopped", mapOf("reason" to "stopped"))
+                emitStopped("stopped") // 失败路径已发过，去重后不会二次通知。
                 stopSelf()
             }
         }, "aquan-mirror").start()
         return START_NOT_STICKY
+    }
+
+    /** 服务内一次性消费授权 token 并创建/持有 MediaProjection。 */
+    private fun createProjectionFromGrant() {
+        val grant = consumeProjection()
+            ?: throw IllegalStateException("no projection grant")
+        val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+            ?: throw IllegalStateException("MediaProjectionManager unavailable")
+        val mp = pm.getMediaProjection(grant.first, grant.second)
+            ?: throw IllegalStateException("getMediaProjection returned null")
+        projection = mp
+        mp.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                // 用户从系统面板停止投屏 → 全链自毁（Dart 侧状态回 idle）。
+                running.set(false)
+            }
+        }, null)
+    }
+
+    /** mirrorStopped 只发一次；reason/message 是固定文案，不含 URL 或凭据。 */
+    private fun emitStopped(reason: String, message: String? = null) {
+        if (!stopEventSent.compareAndSet(false, true)) return
+        val args = HashMap<String, Any?>()
+        args["reason"] = reason
+        if (message != null) args["message"] = message
+        notifyDart("mirrorStopped", args)
+    }
+
+    private fun failAndStop(reason: String, message: String? = null) {
+        emitStopped(reason, message)
+        runCatching { stopSelf() }
     }
 
     private fun startAsForeground() {
@@ -182,16 +259,9 @@ class MirrorService : Service() {
         }
     }
 
-    private fun runMirror(resultCode: Int, data: Intent, withAudio: Boolean) {
-        val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projection = pm.getMediaProjection(resultCode, data)
-        projection?.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() {
-                // 用户从系统面板停止投屏 → 全链自毁（Dart 侧收 mirrorStopped 后状态回 idle）。
-                running.set(false)
-            }
-        }, null)
-
+    private fun runMirror(withAudio: Boolean) {
+        // MediaProjection 已在 onCreate 内一次性消费 token 创建并持有；
+        // 这里只负责编码器 / VirtualDisplay / HTTP / 音频链路。
         muxer = MirrorTsMuxer()
         val metrics = resources.displayMetrics
         serviceVideoWidth = metrics.widthPixels.coerceAtMost(1920)
@@ -208,7 +278,7 @@ class MirrorService : Service() {
         var audioStarted = false
         if (withAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             audioStarted = try {
-                startAudioCapture(resultCode, data)
+                startAudioCapture()
             } catch (e: Exception) {
                 Log.w(TAG, "audio capture unavailable, video only", e)
                 false
@@ -387,7 +457,7 @@ class MirrorService : Service() {
     }
 
     /** 系统音频回放采集 → AAC（API 29+；scrcpy 路线，无需麦克风权限） */
-    private fun startAudioCapture(resultCode: Int, data: Intent): Boolean {
+    private fun startAudioCapture(): Boolean {
         val projection = projection ?: return false
         val config = AudioPlaybackCaptureConfiguration.Builder(projection)
             .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
@@ -615,8 +685,12 @@ class MirrorService : Service() {
     }
 
     private fun notifyDart(method: String, args: Map<String, Any?>) {
-        val channel = dartChannel ?: return
-        channel.invokeMethod(method, args)
+        try {
+            dartChannel?.invokeMethod(method, args)
+        } catch (e: Exception) {
+            // 通道未挂 / 已销毁：日志兜底，绝不因通知失败杀服务。
+            Log.w(TAG, "notifyDart($method) failed", e)
+        }
     }
 
     private fun cleanup() {
@@ -649,6 +723,8 @@ class MirrorService : Service() {
 
     override fun onDestroy() {
         cleanup()
+        // 系统异常销毁时兜底发一次；正常/失败路径已发过，去重后不重复。
+        emitStopped("destroyed")
         super.onDestroy()
     }
 }

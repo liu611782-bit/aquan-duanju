@@ -376,6 +376,9 @@ class _SourceManageScreenState extends State<SourceManageScreen> {
     if (report.lives.isNotEmpty) {
       await scope.lives.addCandidates(report.lives);
     }
+    if (report.parses.isNotEmpty) {
+      await scope.marketSites.addParses(report.parses);
+    }
     if (!mounted) return;
     final problems = report.failed.length + report.skipped.length;
     ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
@@ -402,6 +405,9 @@ class _SourceManageScreenState extends State<SourceManageScreen> {
               final added = await scope.sources.addCandidates(report.added);
               if (report.lives.isNotEmpty) {
                 await scope.lives.addCandidates(report.lives);
+              }
+              if (report.parses.isNotEmpty) {
+                await scope.marketSites.addParses(report.parses);
               }
               if (!mounted) return;
               setState(() {});

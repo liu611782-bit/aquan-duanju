@@ -8,7 +8,7 @@ import 'package:meta/meta.dart';
 import 'config_decoder.dart';
 import 'source_adapter.dart';
 
-/// TVBox 配置里的 jx 解析接口（type=1 JSON 解析）。
+/// TVBox 配置里的 jx 解析接口（type=1/2 JSON 解析；0=嗅探不支持）。
 class ParseApi {
   const ParseApi({required this.name, required this.url, this.ext = ''});
   final String name;
@@ -227,7 +227,8 @@ class SourceImporter {
     return candidates;
   }
 
-  /// 解析 TVBox 顶层 `parses[]`（仅 type=1 JSON 解析接口可用）。
+  /// 解析 TVBox 顶层 `parses[]`（type=1 JSON / type=2 JSON 扩展可用，
+  /// type=0 需要 WebView 嗅探，本应用不支持）。
   static List<ParseApi> extractParses(Map cfg) {
     final out = <ParseApi>[];
     final parses = cfg['parses'];
@@ -235,7 +236,7 @@ class SourceImporter {
       for (final item in parses) {
         if (item is! Map) continue;
         final type = item['type'];
-        if (type is! num || type != 1) continue; // 0=嗅探 2=JSON扩展，均不用
+        if (type is! num || (type != 1 && type != 2)) continue; // 0=嗅探不用
         final url = item['url'];
         if (url is! String || !url.startsWith('http')) continue;
         out.add(ParseApi(
@@ -355,6 +356,9 @@ class SourceImporter {
     }
     // lives 直播：改入库到 LivesStore（调用方读 rep.lives），不再标注不支持。
     rep.addLives(extractLives(cfg, sourceUrl: sourceUrl));
+    // jx 解析接口：手贴 / 扫码 / 合并源导入也必须入库，否则 play 页地址
+    // 没有解析接口可用（旧实现只有「源市场扫描」路径会写 parses）。
+    rep.addParses(extractParses(cfg));
 
     // 多仓：递归拉取子配置（≤8 层 + 已访问防环）。
     final depots = <(String, String)>[];
@@ -464,10 +468,23 @@ class SourceImporter {
       } catch (_) {}
     }
     final out = <String, String>{};
-    for (final part in text.split(RegExp(r'[;&]'))) {
+    // `;` 是 TVBox header 的标准分隔符。旧实现同时按 `&` 切，会把 Referer
+    // 的 query（`https://x/?a=1&b=2`）拦腰截断，导致防盗链直接失效。
+    // 只有整串完全没有 `;` 时才退回 `&` 兼容老配置。
+    final parts = text.contains(';') ? text.split(';') : text.split('&');
+    for (final part in parts) {
       final eq = part.indexOf('=');
-      if (eq <= 0) continue;
-      out[part.substring(0, eq).trim()] = part.substring(eq + 1).trim();
+      final colon = part.indexOf(':');
+      // 同时支持 `k=v` 与 HTTP 头风格 `k: v`。不能只看 `=`：Referer 的值里
+      // 常有 query（`https://r/?a=1`），会把 query 的等号当成键值分隔符。
+      // 取更靠前的那个分隔符即可正确区分两种写法。
+      final sep = eq < 0
+          ? colon
+          : (colon < 0 ? eq : (eq <= colon ? eq : colon));
+      if (sep <= 0) continue;
+      final key = part.substring(0, sep).trim();
+      if (key.isEmpty) continue;
+      out[key] = part.substring(sep + 1).trim();
     }
     return out;
   }

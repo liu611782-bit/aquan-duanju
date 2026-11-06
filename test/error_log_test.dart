@@ -23,7 +23,9 @@ void main() {
       expect(redacted, isNot(contains('secret')));
       expect(redacted, isNot(contains('abc123')));
       expect(redacted, isNot(contains('0123456789abcdef0123456789abcdef')));
-      expect(redacted, contains('https://x/a?…'));
+      // 查询串保留参数名便于定位，但值必须抹掉。
+      expect(redacted, contains('https://x/a?[token,id]'));
+      expect(redacted, isNot(contains('id=1')));
     });
 
     test('clear 清空', () {
