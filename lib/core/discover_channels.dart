@@ -197,25 +197,38 @@ List<SeriesSummary> rankItemsToSummaries(List<RankItem> items) {
   return out;
 }
 
-/// 剧集 id → 名次角标文案。
+/// 剧集 id → 榜单角标文案（「第N」或「广告」）+ 本页占用的名次数。
 ///
-/// 只认 `position`，**不读 `recommend_info.rank`**：服务端对同一页的多行都会
-/// 下发 `rank: 1`（实测两个相邻卡片同时是「第1」），用它必然重复。
+/// 名次**按展示顺序在本地累计**，[start] 传上一页已展示的名次数：
+/// 服务端 `position` 把「平台推荐」行也算进序号（`Position: len(items)+1`），
+/// 直接拿来用会让推荐行之后的名次整体后移，表现为「第10」凭空消失
+/// （1~9、空、11）。所以这里只把 `position > 0` 当作「这行有效」的判据，
+/// 具体号段由 [start] 往后排。
 ///
-/// 关键：`position` 在 Go 侧 `sdk.ShortRank` 已做过跨页全局化
-/// （`Position += len(cur.Seen)`），第二页拿到的是 11、12…，而不是页内的
-/// 1、2…。调用方**不得再叠加已加载条目数**，否则首页 1~10、次页会变成
-/// 21~30，中间整段名次凭空消失。
+/// `promoted`（平台推荐）行显示「广告」角标，但**不占名次序号**：
+/// 名次继续往下一张卡排（1~9、广告、10、11…），与官方 App 一致。
 ///
-/// `promoted` 行（「平台推荐」）不显示名次，但仍占一个 position。
-Map<String, String> rankBadges(List<RankItem> items) {
+/// **不读 `recommend_info.rank`**：服务端对同一页的多行都会下发 `rank: 1`
+/// （实测两个相邻卡片同时是「第1」），用它必然重复。
+///
+/// 返回值 `places` 是本页占用的名次数，调用方累加后作为下一页的 [start]，
+/// 这样翻页后名次继续、不回 1 也不跳到 21。
+({Map<String, String> badges, int places}) rankBadges(
+  List<RankItem> items, {
+  int start = 0,
+}) {
   final out = <String, String>{};
+  var place = start;
   for (final item in items) {
     final id = item.seriesId.trim();
-    if (id.isEmpty || item.promoted) continue;
-    final place = item.position;
-    if (place <= 0) continue;
+    if (id.isEmpty || item.position <= 0) continue;
+    if (item.promoted) {
+      // 广告位：给角标但不占号，避免名次出现空洞。
+      out[id] = '广告';
+      continue;
+    }
+    place++;
     out[id] = '第$place';
   }
-  return out;
+  return (badges: out, places: place - start);
 }

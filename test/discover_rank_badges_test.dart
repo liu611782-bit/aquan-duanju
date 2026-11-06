@@ -18,87 +18,96 @@ RankItem row(
     );
 
 void main() {
-  group('rankBadges 使用 Go 侧已全局化的 position', () {
+  group('rankBadges 名次按展示顺序连续编号', () {
     test('首页显示第1、第2', () {
-      final badges = rankBadges([row('a', position: 1), row('b', position: 2)]);
+      final badges =
+          rankBadges([row('a', position: 1), row('b', position: 2)]).badges;
       expect(badges['a'], '第1');
       expect(badges['b'], '第2');
     });
 
-    test('第二页直接用全局 position，不再叠加已加载条数', () {
-      final badges = rankBadges([
-        row('x', position: 11),
-        row('y', position: 12),
-      ]);
-      expect(badges['x'], '第11');
-      expect(badges['y'], '第12');
-    });
-
-    test('回归：首页 1~10，第二页必须 11~20，不能跳到 21', () {
-      final first = rankBadges([
-        for (var i = 1; i <= 10; i++) row('a$i', position: i),
-      ]);
-      final second = rankBadges([
-        for (var i = 11; i <= 20; i++) row('b$i', position: i),
-      ]);
-      expect(first['a10'], '第10');
-      expect(second['b11'], '第11');
-      expect(second['b20'], '第20');
-      expect(second.values, isNot(contains('第21')));
-      expect(second.values, isNot(contains('第31')));
-    });
-
-    test('忽略不可靠的 rank：重复 rank 不再产生重复名次', () {
+    test('不读 rank：服务端重复 rank=1 也不产生重复名次', () {
       final badges = rankBadges([
         row('a', rank: 1, position: 1),
         row('b', rank: 1, position: 2),
-      ]);
+      ]).badges;
       expect(badges['a'], '第1');
       expect(badges['b'], '第2', reason: '服务端两行都给 rank=1，也不能重复');
     });
 
-    test('rank 有值也不参与计算', () {
-      final badges = rankBadges([row('a', rank: 5, position: 21)]);
-      expect(badges['a'], '第21');
+    test('平台推荐行显示「广告」，但不占号', () {
+      final result = rankBadges([
+        row('p', position: 10, promoted: true),
+        row('a', position: 11),
+        row('b', position: 12),
+      ], start: 9);
+      expect(result.badges['p'], '广告');
+      expect(result.badges['a'], '第10', reason: '推荐行不占号，下一张卡接第10');
+      expect(result.badges['b'], '第11');
+      expect(result.places, 2);
     });
 
-    test('平台推荐行不显示名次，但仍占一个位置', () {
-      final badges = rankBadges([
-        row('p', rank: 1, position: 1, promoted: true),
-        row('a', rank: 2, position: 2),
+    test('两个推荐行都出「广告」，名次仍连续', () {
+      final result = rankBadges([
+        row('p1', position: 1, promoted: true),
+        row('a', position: 2),
+        row('p2', position: 3, promoted: true),
+        row('b', position: 4),
       ]);
-      expect(badges.containsKey('p'), isFalse);
-      expect(badges['a'], '第2');
+      expect(result.badges['p1'], '广告');
+      expect(result.badges['p2'], '广告');
+      expect(result.badges['a'], '第1');
+      expect(result.badges['b'], '第2');
+      expect(result.places, 2);
     });
 
     test('position 为 0 的行被跳过', () {
-      expect(rankBadges([row('a')]), isEmpty);
+      final result = rankBadges([row('a')]);
+      expect(result.badges, isEmpty);
+      expect(result.places, 0);
     });
 
     test('演员行（无 series_id）被跳过', () {
-      final badges = rankBadges([
+      final result = rankBadges([
         const RankItem(actor: '张三', position: 1),
         row('a', position: 2),
       ]);
-      expect(badges.length, 1);
-      expect(badges['a'], '第2');
+      expect(result.badges.length, 1);
+      expect(result.badges['a'], '第1');
     });
 
-    test('多页名次连续且互不覆盖', () {
-      final seen = <String, String>{};
-      var place = 1;
-      for (var page = 0; page < 3; page++) {
-        final items = <RankItem>[];
-        for (var i = 0; i < 10; i++) {
-          items.add(row('p${page}_$i', position: place++));
-        }
-        seen.addAll(rankBadges(items));
-      }
-      expect(seen.length, 30);
-      expect(seen['p0_0'], '第1');
-      expect(seen['p1_0'], '第11');
-      expect(seen['p2_0'], '第21');
-      expect(seen['p2_9'], '第30');
+    test('翻页：名次接着上一页继续，不回到 1 也不跳到 21', () {
+      final first = rankBadges([
+        for (var i = 1; i <= 10; i++) row('a$i', position: i),
+      ]);
+      expect(first.badges['a10'], '第10');
+      expect(first.places, 10);
+
+      final second = rankBadges([
+        for (var i = 11; i <= 20; i++) row('b$i', position: i),
+      ], start: first.places);
+      expect(second.badges['b11'], '第11');
+      expect(second.badges['b20'], '第20');
+      expect(second.places, 10);
+
+      final all = {...first.badges, ...second.badges};
+      expect(all.values, isNot(contains('第21')));
+      expect(all.values, isNot(contains('第31')));
+    });
+
+    test('翻页：上一页有广告行时下一页名次不后移', () {
+      final first = rankBadges([
+        for (var i = 1; i <= 9; i++) row('a$i', position: i),
+        row('ad', position: 10, promoted: true),
+      ]);
+      expect(first.places, 9, reason: '广告行不占号');
+
+      final second = rankBadges(
+        [row('b1', position: 11), row('b2', position: 12)],
+        start: first.places,
+      );
+      expect(second.badges['b1'], '第10');
+      expect(second.badges['b2'], '第11');
     });
   });
 }

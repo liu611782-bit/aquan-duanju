@@ -218,25 +218,30 @@ void main() {
   });
 
   group('rankBadges', () {
-    test('rank 缺失时回落到 position', () {
+    test('名次按展示顺序编号，不看服务端 position', () {
       const items = [
         RankItem(position: 1, rank: 1, seriesId: '1001'),
         RankItem(position: 2, rank: 0, seriesId: '1002'),
         RankItem(position: 3, rank: 0, seriesId: ''),
       ];
-      expect(rankBadges(items), const {'1001': '第1', '1002': '第2'});
+      expect(rankBadges(items).badges, const {'1001': '第1', '1002': '第2'});
     });
 
-    test('推广行不出角标（它的名次复制了下一行）', () {
+    test('推广行出「广告」角标，名次继续给下一行', () {
       const items = [
         RankItem(position: 4, seriesId: '1004', promoted: true),
         RankItem(position: 5, rank: 5, seriesId: '1005'),
       ];
-      expect(rankBadges(items), const {'1005': '第5'});
+      expect(
+        rankBadges(items, start: 3).badges,
+        const {'1004': '广告', '1005': '第4'},
+      );
     });
 
-    test('名次和位置都没有的行不出角标', () {
-      expect(rankBadges(const [RankItem(seriesId: '1001')]), isEmpty);
+    test('position 缺失的行不出角标', () {
+      final result = rankBadges(const [RankItem(seriesId: '1001')]);
+      expect(result.badges, isEmpty);
+      expect(result.places, 0);
     });
   });
 }

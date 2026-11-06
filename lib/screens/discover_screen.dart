@@ -41,6 +41,10 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   final _items = <SeriesSummary>[];
   final _badges = <String, String>{};
 
+  /// 已展示的榜单名次数（「广告」角标不计）。翻页时作为下一页的起始号，
+  /// 让推荐行之后的卡片名次连续。
+  int _rankPlaces = 0;
+
   /// [channelKey] → (榜单内容 id, 榜单 id)。榜单目录由服务端下发，选定一次就
   /// 固定；翻页必须带同一组值，否则游标无法续接。
   final _rankTargets = <String, ({String content, String board})>{};
@@ -138,6 +142,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         _badges
           ..clear()
           ..addAll(page.badges);
+        _rankPlaces = page.places;
         _cursor = page.cursor;
         _hasMore = page.hasMore;
         _loading = false;
@@ -182,7 +187,8 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     final channel = _channel;
     _loadingMore = true;
     try {
-      final page = await _fetchPage(type, channel, _cursor);
+      final page =
+          await _fetchPage(type, channel, _cursor, badgeStart: _rankPlaces);
       if (!mounted || seq != _seq) return;
       final fresh = _dedupe(page.items);
       setState(() {
@@ -194,6 +200,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
           _hasMore = page.hasMore;
         }
         _badges.addAll(page.badges);
+        _rankPlaces += page.places;
         _cursor = page.cursor;
       });
     } catch (_) {
@@ -245,11 +252,14 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   ///
   /// 榜单名次由 Go 侧跨页全局化后直接下发（`Position += len(cur.Seen)`），
   /// 这里只做展示转换，不能再叠加任何偏移。
+  /// [badgeStart] 是上一页已展示的名次数：榜单名次在本地按顺序累计，
+  /// 「平台推荐」行只给「广告」角标、不占号。
   Future<_ChannelPage> _fetchPage(
     ContentType type,
     DiscoverChannel channel,
-    String cursor,
-  ) async {
+    String cursor, {
+    int badgeStart = 0,
+  }) async {
     final api = AppScope.read(context).api;
     if (channel.source == DiscoverSource.feed) {
       final page = await api.discover(channel: channel.value, cursor: cursor);
@@ -279,9 +289,11 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       final contentId = content?.id ?? kShortRankContentAll;
       if (board == null) {
         // 目录缺失时直接展示服务端默认榜，翻页仍可续接游标。
+        final badges = rankBadges(ranking.items, start: badgeStart);
         return _ChannelPage(
           items: rankItemsToSummaries(ranking.items),
-          badges: rankBadges(ranking.items),
+          badges: badges.badges,
+          places: badges.places,
           cursor: ranking.cursor,
           hasMore: ranking.hasMore,
         );
@@ -295,9 +307,11 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         ranking = await api.shortRank(content: contentId, board: board.id);
       }
     }
+    final badges = rankBadges(ranking.items, start: badgeStart);
     return _ChannelPage(
       items: rankItemsToSummaries(ranking.items),
-      badges: rankBadges(ranking.items),
+      badges: badges.badges,
+      places: badges.places,
       notice: notice,
       cursor: ranking.cursor,
       hasMore: ranking.hasMore,
@@ -750,6 +764,7 @@ class _ChannelPage {
   const _ChannelPage({
     required this.items,
     this.badges = const {},
+    this.places = 0,
     this.notice,
     this.cursor = '',
     this.hasMore = false,
@@ -757,6 +772,9 @@ class _ChannelPage {
 
   final List<SeriesSummary> items;
   final Map<String, String> badges;
+
+  /// 本页占用的榜单名次数（「广告」角标不计），下一页从它继续编号。
+  final int places;
 
   /// 这次结果的轻提示（如榜单降级），由调用方在结果落地时弹出。
   final String? notice;
