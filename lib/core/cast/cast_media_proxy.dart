@@ -5,6 +5,8 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'cast_diagnostics.dart';
+import 'cast_media_type.dart';
+import 'cast_recipe.dart';
 import 'local_media_server.dart';
 import 'subtitle_converter.dart';
 
@@ -18,7 +20,9 @@ import 'subtitle_converter.dart';
 /// HEAD 的 Content-Length 正确；响应**不附加任何安全头**——部分渲染器见到
 /// x-frame-options 会拒播）。
 ///
-/// - `/p/<token>`：token → 登记项（直链 / HLS 清单 / 静态字幕字节）；
+/// - `/p/<token>/<fileName>`：token → 登记项（直链 / HLS 清单 / 静态字幕字节）；
+///   fileName 来自 CastMediaType（index.m3u8 / stream.ts / video.mp4…），
+///   让接收端靠 URL 扩展名选播放器（M1-3；`bare` 配方回退旧裸 URL 形态）；
 /// - HLS 清单：改写全部 URI（变体/分片/EXT-X-KEY/EXT-X-MAP/EXT-X-MEDIA 的
 ///   `URI="..."` 属性与裸行）为新的代理 token，逐级穿透；
 /// - 直链/分片：Range 原样转上游，透传 206/Content-Range；
@@ -93,33 +97,68 @@ class CastMediaProxy {
 
   /// 登记一个媒体 URL，返回代理 URL。清单（.m3u8）会走改写分支。
   ///
+  /// URL 形态（M1-3）：`/p/<token>/<fileName>`，fileName 来自
+  /// [resolveCastMediaType]（HLS → index.m3u8、.ts → stream.ts、mp4 →
+  /// video.mp4…），让接收端靠 URL 扩展名选播放器；[urlSuffixMode] = bare
+  /// 时退回旧形态 `/p/<token>`。
+  ///
+  /// [hintMime] 传调用方已知的媒体 mime（如 `ResolvedPlayback.mimeType`）；
+  /// URL 无扩展名且 hint 不足以判定时对上游做一次 8KB 内容嗅探（只发生在
+  /// 顶层登记——清单改写产生的子 URL 一律不嗅探，避免逐分片放大）。
+  ///
   /// [targetHost] 是目标设备 controlURL 的 host（M0.5 per-device IP）：
   /// 提供时对外 URL 的 host 用「到该设备的路由源 IP」（电视拉得到流的
   /// 地址），探测失败回退全局本机地址。同一媒体投两台设备 = 两个 token
   /// （上游缓存可共享，不影响正确性）。
-  Future<String?> register(String url,
-      {Map<String, String> headers = const {}, String? targetHost}) async {
+  Future<String?> register(
+    String url, {
+    Map<String, String> headers = const {},
+    String? targetHost,
+    String? hintMime,
+    bool live = false,
+    CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension,
+  }) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme) return null;
     if (!await start()) return null;
     final authority = await _advertisedAuthority(targetHost);
     if (authority == null) return null;
+    // 类型判定（三级：hint → 扩展名 → 嗅探上游前 8KB）；嗅探到 HTML/JSON
+    // 会抛 CastException（把「错误页不喂电视」前移到登记阶段）。
+    final mediaType = await resolveCastMediaType(
+      url: uri,
+      hintMime: hintMime,
+      live: live,
+      sniffHead: (u) => _sniffUpstream(u, headers),
+    );
     final token = _addToken(_ProxyEntry(
-      kind: _isPlaylist(uri) ? _ProxyKind.playlist : _ProxyKind.stream,
+      kind: mediaType.isHls || _isPlaylist(uri)
+          ? _ProxyKind.playlist
+          : _ProxyKind.stream,
       url: uri,
       headers: Map.of(headers),
+      mediaType: mediaType,
       advertisedHost: _hostOfAuthority(authority),
+      urlSuffixMode: urlSuffixMode,
     ));
-    return 'http://$authority/p/$token';
+    return _entryUrl(authority, token, mediaType.fileName, urlSuffixMode);
   }
 
-  /// 登记字幕：SRT 拉取转 VTT 静态伺服；VTT/其他走直通。
+  /// 登记字幕：SRT 拉取转 VTT 静态伺服（URL 带 `subtitle.vtt` 文件名段）；
+  /// VTT/其他走 [register] 直通。
   Future<String?> registerSubtitle(String url,
-      {Map<String, String> headers = const {}, String? targetHost}) async {
+      {Map<String, String> headers = const {},
+      String? targetHost,
+      CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension}) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme) return null;
     final isSrt = uri.path.toLowerCase().endsWith('.srt');
-    if (!isSrt) return register(url, headers: headers, targetHost: targetHost);
+    if (!isSrt) {
+      return register(url,
+          headers: headers,
+          targetHost: targetHost,
+          urlSuffixMode: urlSuffixMode);
+    }
     if (!await start()) return null;
     final authority = await _advertisedAuthority(targetHost);
     if (authority == null) return null;
@@ -130,9 +169,41 @@ class CastMediaProxy {
         kind: _ProxyKind.static,
         bytes: vtt,
         contentType: 'text/vtt',
+        mediaType: const CastMediaType(
+          mime: 'text/vtt',
+          fileName: 'subtitle.vtt',
+          kind: CastMediaKind.unknown,
+        ),
         advertisedHost: _hostOfAuthority(authority),
+        urlSuffixMode: urlSuffixMode,
       ));
-      return 'http://$authority/p/$token';
+      return _entryUrl(authority, token, 'subtitle.vtt', urlSuffixMode);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 对外登记 URL：withExtension → `/p/<token>/<fileName>`，bare → `/p/<token>`。
+  static String _entryUrl(
+      String authority, String token, String fileName, CastUrlSuffixMode mode) {
+    final suffix = mode == CastUrlSuffixMode.bare ? '' : '/$fileName';
+    return 'http://$authority/p/$token$suffix';
+  }
+
+  /// 上游 8KB 嗅探（带登记时的源站请求头；只用于顶层登记的类型判定）。
+  Future<List<int>?> _sniffUpstream(Uri uri, Map<String, String> headers) async {
+    try {
+      final req = await _client.openUrl('GET', uri);
+      headers.forEach(req.headers.set);
+      req.headers.set('Range', 'bytes=0-8191');
+      final res = await req.close().timeout(const Duration(seconds: 4));
+      if (res.statusCode >= 400) return null;
+      final builder = BytesBuilder(copy: false);
+      await for (final chunk in res) {
+        builder.add(chunk);
+        if (builder.length >= 8192) break; // 上游不理 Range 时止步 8KB
+      }
+      return builder.takeBytes();
     } catch (_) {
       return null;
     }
@@ -201,6 +272,7 @@ class CastMediaProxy {
     String? range;
     String? userAgent;
     String? hostHeader;
+    bool contentFeaturesRequested = false;
     for (final line in lines.skip(1)) {
       final idx = line.indexOf(':');
       if (idx <= 0) continue;
@@ -211,13 +283,17 @@ class CastMediaProxy {
         userAgent = line.substring(idx + 1).trim();
       } else if (key == 'host') {
         hostHeader = line.substring(idx + 1).trim();
+      } else if (key == 'getcontentfeatures.dlna.org') {
+        // playbridge 条件化写法：设备显式索要才回 contentFeatures。
+        contentFeaturesRequested = line.substring(idx + 1).trim() == '1';
       }
     }
     final path = Uri.tryParse(rawTarget)?.path ?? '';
     final segments = path.split('/').where((s) => s.isNotEmpty).toList();
-    final token = segments.length == 2 && segments.first == 'p'
-        ? segments[1]
-        : null;
+    // M1-3：路由放宽到 `>= 2` 段——`/p/<token>/<fileName>` 的末段只是让
+    // URL 带扩展名，token 恒取 segments[1]；旧形态 `/p/<token>` 继续兼容。
+    final token =
+        segments.length >= 2 && segments.first == 'p' ? segments[1] : null;
     final entry = token != null ? _entries[token] : null;
     if (entry != null) {
       // LRU 续期：正在看的分片不被新注册的分片挤掉。
@@ -234,9 +310,11 @@ class CastMediaProxy {
       case _ProxyKind.static:
         served = _serveStatic(socket, method, entry);
       case _ProxyKind.playlist:
-        served = _servePlaylist(socket, method, entry, hostHeader);
+        served = _servePlaylist(
+            socket, method, entry, hostHeader, contentFeaturesRequested);
       case _ProxyKind.stream:
-        served = _serveStream(socket, method, entry, range);
+        served =
+            _serveStream(socket, method, entry, range, contentFeaturesRequested);
     }
     try {
       final (status, bytes) = await served;
@@ -249,13 +327,17 @@ class CastMediaProxy {
     }
   }
 
-  /// 静态字节（转换后的 VTT）；返回 (状态码, 发给电视的字节数) 供埋点。
+  /// 静态字节（转换后的 VTT 字幕）；返回 (状态码, 发给电视的字节数) 供埋点。
+  ///
+  /// 字幕是 text/*：transferMode 走 Interactive 且不给 contentFeatures
+  /// （M1-9 playbridge 条件化规则）。
   Future<(int, int)> _serveStatic(Socket socket, String method, _ProxyEntry entry) async {
     final bytes = entry.bytes!;
     final head = StringBuffer()
       ..write('HTTP/1.1 200 OK\r\n')
       ..write('Content-Type: ${entry.contentType}\r\n')
       ..write('Content-Length: ${bytes.length}\r\n')
+      ..write(dlnaResponseHeaders(media: false, acceptRanges: false))
       ..write('Connection: close\r\n\r\n');
     socket.add(utf8.encode(head.toString()));
     if (method != 'HEAD') socket.add(bytes);
@@ -265,20 +347,29 @@ class CastMediaProxy {
 
   /// HLS 清单：拉取文本 → 重写 URI 为代理 token → 伺服；返回供埋点。
   ///
+  /// Content-Type 用登记时 [CastMediaType].mime（与 DIDL 同源，M1-3）。
+  /// 清单路由不答 Range → **不声明** Accept-Ranges（诚实化，M1-9）。
+  ///
   /// 子 URL 的 host 按「两段机制」（review §8.3）选：优先本次请求的 Host
   /// 头——电视能取到父 URL 就必然可达同一 host:port；无 Host 头退回登记
   /// 时设备 IP；最后退回全局本机地址。服务端 bind 仍是 anyIPv4，只改
   /// 「广播出去的 URL host」。
-  Future<(int, int)> _servePlaylist(
-      Socket socket, String method, _ProxyEntry entry, String? hostHeader) async {
+  Future<(int, int)> _servePlaylist(Socket socket, String method,
+      _ProxyEntry entry, String? hostHeader, bool contentFeaturesRequested) async {
     final text = await _fetchText(entry.url!, entry.headers, null);
     final rewritten = await _rewritePlaylist(text, entry.url!, entry.headers,
-        _rewriteAuthority(hostHeader, entry.advertisedHost));
+        _rewriteAuthority(hostHeader, entry.advertisedHost),
+        urlSuffixMode: entry.urlSuffixMode);
     final bytes = utf8.encode(rewritten);
     final head = StringBuffer()
       ..write('HTTP/1.1 200 OK\r\n')
-      ..write('Content-Type: application/vnd.apple.mpegurl\r\n')
+      ..write('Content-Type: ${entry.mediaType.mime}\r\n')
       ..write('Content-Length: ${bytes.length}\r\n')
+      ..write(dlnaResponseHeaders(
+        media: true,
+        contentFeaturesRequested: contentFeaturesRequested,
+        acceptRanges: false,
+      ))
       ..write('Connection: close\r\n\r\n');
     socket.add(utf8.encode(head.toString()));
     if (method != 'HEAD') socket.add(bytes);
@@ -289,10 +380,15 @@ class CastMediaProxy {
   /// 直链/分片：Range 透传，状态码与 Content-Range 原样回给电视。
   /// 返回 (状态码, 转发给电视的字节数) 供埋点。
   ///
+  /// Content-Type 用登记时 [CastMediaType].mime（kind 已知时）——上游把
+  /// .ts 伪装成 image/png 也按 URL 证据改写（M1-3 伪装规则）；kind 未知
+  /// 时回退上游声明的类型。
+  /// `Accept-Ranges` 只在上游真的答 206 时声明（M1-9 诚实化）。
+  ///
   /// 加固：Range 格式校验（非法 416）、上游 ≥400 归一 502、GET 先嗅探
   /// 前 512B——防盗链错误页/失效页（HTML/XML/清单文本）不喂给电视（防黑屏）。
-  Future<(int, int)> _serveStream(
-      Socket socket, String method, _ProxyEntry entry, String? range) async {
+  Future<(int, int)> _serveStream(Socket socket, String method,
+      _ProxyEntry entry, String? range, bool contentFeaturesRequested) async {
     if (range != null && !validRangeHeader(range)) {
       await _writeStatus(socket, 416, 'Range Not Satisfiable');
       return (416, 0);
@@ -311,11 +407,19 @@ class CastMediaProxy {
       return (502, 0);
     }
 
+    final contentType = entry.mediaType.kind == CastMediaKind.unknown
+        ? (res.headers.contentType?.toString() ??
+            mimeTypeForPath(entry.url!.path))
+        : entry.mediaType.mime;
     final head = StringBuffer()
       ..write('HTTP/1.1 ${res.statusCode} ${res.reasonPhrase}\r\n')
-      ..write('Content-Type: '
-          '${res.headers.contentType?.toString() ?? mimeTypeForPath(entry.url!.path)}\r\n')
-      ..write('Accept-Ranges: bytes\r\n');
+      ..write('Content-Type: $contentType\r\n')
+      // 诚实化：上游没答 206（整流 200）就不声明 byte-seek（review §8.5）。
+      ..write(dlnaResponseHeaders(
+        media: true,
+        contentFeaturesRequested: contentFeaturesRequested,
+        acceptRanges: res.statusCode == 206,
+      ));
     final contentLength = res.headers.value(HttpHeaders.contentLengthHeader);
     if (contentLength != null) head.write('Content-Length: $contentLength\r\n');
     final contentRange = res.headers.value('content-range');
@@ -408,7 +512,8 @@ class CastMediaProxy {
   // ---------------------------------------------------------------------------
 
   Future<String> _rewritePlaylist(String text, Uri base,
-      Map<String, String> headers, String authority) async {
+      Map<String, String> headers, String authority,
+      {CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension}) async {
     final out = StringBuffer();
     for (final rawLine in const LineSplitter().convert(text)) {
       final line = rawLine.trim();
@@ -417,31 +522,37 @@ class CastMediaProxy {
         continue;
       }
       if (line.startsWith('#')) {
-        out.writeln(await _rewriteUriAttributes(line, base, headers, authority));
+        out.writeln(await _rewriteUriAttributes(line, base, headers, authority,
+            urlSuffixMode: urlSuffixMode));
         continue;
       }
-      out.writeln(await _childUrl(line, base, headers, authority) ?? line);
+      out.writeln(
+          await _childUrl(line, base, headers, authority, urlSuffixMode) ??
+              line);
     }
     return out.toString();
   }
 
   Future<String> _rewriteUriAttributes(
-      String line, Uri base, Map<String, String> headers, String authority) async {
+      String line, Uri base, Map<String, String> headers, String authority,
+      {CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension}) async {
     final uris =
         RegExp('URI="([^"]+)"').allMatches(line).map((m) => m.group(1)!).toList();
     var result = line;
     for (final uri in uris) {
-      final proxied = await _childUrl(uri, base, headers, authority);
+      final proxied =
+          await _childUrl(uri, base, headers, authority, urlSuffixMode);
       if (proxied != null) result = result.replaceFirst('URI="$uri"', 'URI="$proxied"');
     }
     return result;
   }
 
-  Future<String?> _childUrl(
-      String rawUri, Uri base, Map<String, String> headers, String authority) async {
+  Future<String?> _childUrl(String rawUri, Uri base, Map<String, String> headers,
+      String authority, CastUrlSuffixMode urlSuffixMode) async {
     final resolved = _resolveAgainst(rawUri, base);
     if (resolved == null) return null;
-    return _registerWithAuthority(resolved, headers, authority);
+    return _registerWithAuthority(resolved, headers, authority,
+        urlSuffixMode: urlSuffixMode);
   }
 
   /// 子 URL 改写用的 authority（`host:port`）：优先电视本次请求的 Host 头，
@@ -467,17 +578,28 @@ class CastMediaProxy {
   /// 登记一个上游 URL 并用给定 authority 生成对外 URL（清单子 URL 专用：
   /// host 已由父请求/登记时的设备决定，不再按目标探测）。
   /// [authority] 为空时退回 [register] 的默认解析。
+  /// 子 URL **不做内容嗅探**（逐分片放大不可接受）；类型只按 URL 扩展名与
+  /// 清单子串判定，URL 形态继承父条目的 [urlSuffixMode]（M1-3）。
   Future<String?> _registerWithAuthority(
-      Uri uri, Map<String, String> headers, String authority) async {
-    if (authority.isEmpty) return register(uri.toString(), headers: headers);
+      Uri uri, Map<String, String> headers, String authority,
+      {CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension}) async {
+    if (authority.isEmpty) {
+      return register(uri.toString(),
+          headers: headers, urlSuffixMode: urlSuffixMode);
+    }
     if (!await start()) return null;
+    final mediaType = castMediaTypeFromUrlPath(uri);
     final token = _addToken(_ProxyEntry(
-      kind: _isPlaylist(uri) ? _ProxyKind.playlist : _ProxyKind.stream,
+      kind: mediaType.isHls || _isPlaylist(uri)
+          ? _ProxyKind.playlist
+          : _ProxyKind.stream,
       url: uri,
       headers: Map.of(headers),
+      mediaType: mediaType,
       advertisedHost: _hostOfAuthority(authority),
+      urlSuffixMode: urlSuffixMode,
     ));
-    return 'http://$authority/p/$token';
+    return _entryUrl(authority, token, mediaType.fileName, urlSuffixMode);
   }
 
   // ---------------------------------------------------------------------------
@@ -582,7 +704,9 @@ class _ProxyEntry {
     this.headers = const {},
     this.bytes,
     this.contentType = 'application/octet-stream',
+    this.mediaType = CastMediaType.unknown,
     this.advertisedHost,
+    this.urlSuffixMode = CastUrlSuffixMode.withExtension,
   });
 
   final _ProxyKind kind;
@@ -591,7 +715,15 @@ class _ProxyEntry {
   final List<int>? bytes;
   final String contentType;
 
+  /// 登记时解析出的规范媒体类型（M1-3）：mime 用于响应 Content-Type
+  /// （与 DIDL 同源；kind 已知时覆盖上游伪装的类型），fileName 用于
+  /// 对外 URL 的扩展名段。
+  final CastMediaType mediaType;
+
   /// 登记时对外广播的设备 IP（M0.5）：清单子 URL 在电视请求时才改写，
   /// 无 Host 头时退回这里（review §8.3 两段机制的第二段）。
   final String? advertisedHost;
+
+  /// URL 形态（M1-3）：清单改写的子 URL 继承父条目（bare 父 → bare 子）。
+  final CastUrlSuffixMode urlSuffixMode;
 }

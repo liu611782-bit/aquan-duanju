@@ -70,11 +70,16 @@ bool looksLikeHls(String url) {
       lower.contains('type=hls');
 }
 
-/// 按扩展名推断 MIME，供投屏 DIDL 使用。
+/// 按扩展名推断 MIME，供投屏 hint 使用。
+///
+/// 2026-11-07（M1-1）起**不再以 `video/mp4` 兜底**：无扩展名且不像 HLS 的
+/// 地址返回空串（投屏侧三级判定的 hint 只在「有真实证据」时才可信，
+/// 无证据交给 URL 嗅探，绝不静默按 mp4 投）。
 String mimeTypeForMedia(String url, {bool? isHls}) {
   final hls = isHls ?? looksLikeHls(url);
   if (hls) return 'application/vnd.apple.mpegurl';
   final path = url.toLowerCase().split('?').first;
+  if (path.endsWith('.mp4') || path.endsWith('.m4v')) return 'video/mp4';
   if (path.endsWith('.mkv')) return 'video/x-matroska';
   if (path.endsWith('.avi')) return 'video/x-msvideo';
   if (path.endsWith('.ts')) return 'video/mp2t';
@@ -82,9 +87,8 @@ String mimeTypeForMedia(String url, {bool? isHls}) {
   if (path.endsWith('.mov')) return 'video/quicktime';
   if (path.endsWith('.webm')) return 'video/webm';
   if (path.endsWith('.mp3')) return 'audio/mpeg';
-  if (path.endsWith('.m4a')) return 'audio/mp4';
-  if (path.endsWith('.aac')) return 'audio/aac';
-  return 'video/mp4';
+  if (path.endsWith('.m4a') || path.endsWith('.aac')) return 'audio/mp4';
+  return '';
 }
 
 /// 把「分集原始 URL + 源级 headers + 用户设置」收敛成一份解析结果。

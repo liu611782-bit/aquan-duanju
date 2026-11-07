@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:aquan_duanju/core/cast/cast_recipe.dart';
 import 'package:aquan_duanju/core/cast/local_media_server.dart';
 
 void main() {
@@ -144,6 +145,99 @@ void main() {
     test('不带 targetHost：保持全局 hostOverride 形态（回归）', () async {
       final url = await server.urlFor(media.path);
       expect(Uri.parse(url!).host, '192.168.1.5');
+    });
+  });
+
+  group('URL 形态与 DLNA 响应头（M1-4 / M1-9）', () {
+    late Directory dir;
+    late File mp4;
+    late File m3u8;
+    late LocalMediaServer server;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('lms_m1');
+      mp4 = File('${dir.path}${Platform.pathSeparator}ep1.mp4');
+      await mp4.writeAsString('0123456789ABCDEF');
+      m3u8 = File('${dir.path}${Platform.pathSeparator}local.m3u8');
+      await m3u8.writeAsString('#EXTM3U\n#EXTINF:4.0,\nseg0.ts\n');
+      // 127.0.0.1：本机回环即可请求（192.168.x 假地址在本机不可达）。
+      server = LocalMediaServer(hostOverride: '127.0.0.1');
+    });
+
+    tearDown(() async {
+      await server.stop();
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    test('AC-10/URL 形态：/m/<token>/video.mp4（不暴露真实文件名）', () async {
+      final url = await server.urlFor(mp4.path);
+      final uri = Uri.parse(url!);
+      expect(uri.pathSegments, hasLength(3), reason: '/m/<token>/<fileName>');
+      expect(uri.pathSegments.last, 'video.mp4');
+      expect(uri.path.contains('ep1'), isFalse, reason: '不暴露真实文件名');
+      // 3 段路由正常伺服。
+      final res = await HttpClient().getUrl(Uri.parse(url)).then((r) => r.close());
+      expect(res.statusCode, 200);
+      expect(res.headers.contentType?.mimeType, 'video/mp4');
+      expect(await res.transform(utf8.decoder).join(), '0123456789ABCDEF');
+    });
+
+    test('HLS 本地文件 → /m/<token>/index.m3u8 + 清单 Content-Type', () async {
+      final url = await server.urlFor(m3u8.path);
+      expect(Uri.parse(url!).pathSegments.last, 'index.m3u8');
+      final res = await HttpClient().getUrl(Uri.parse(url)).then((r) => r.close());
+      expect(res.headers.contentType?.mimeType, 'application/vnd.apple.mpegurl');
+    });
+
+    test('路由兼容：旧裸 /m/<token> 继续伺服', () async {
+      final url = await server.urlFor(mp4.path);
+      final bare = url!.substring(0, url.lastIndexOf('/'));
+      final res =
+          await HttpClient().getUrl(Uri.parse(bare)).then((r) => r.close());
+      expect(res.statusCode, 200);
+      expect(await res.transform(utf8.decoder).join(), '0123456789ABCDEF');
+    });
+
+    test('bare 配方：URL 退回旧形态 /m/<token>', () async {
+      final url = await server.urlFor(mp4.path,
+          urlSuffixMode: CastUrlSuffixMode.bare);
+      expect(Uri.parse(url!).pathSegments, hasLength(2));
+      final res = await HttpClient().getUrl(Uri.parse(url)).then((r) => r.close());
+      expect(res.statusCode, 200);
+    });
+
+    test('DLNA 响应头：媒体路由 Streaming 恒带、contentFeatures 条件化、'
+        '本地文件恒声明 Accept-Ranges', () async {
+      final url = await server.urlFor(mp4.path);
+      final client = HttpClient();
+
+      final res = await client.getUrl(Uri.parse(url!)).then((r) => r.close());
+      expect(res.headers.value('transferMode.dlna.org'), 'Streaming');
+      expect(res.headers.value('realTimeInfo.dlna.org'), 'DLNA.ORG_TLAG=*');
+      expect(res.headers.value('contentFeatures.dlna.org'), isNull,
+          reason: '设备未索要不回');
+      expect(res.headers.value('accept-ranges'), 'bytes',
+          reason: '本地文件路由恒真支持 206');
+
+      final req = await client.getUrl(Uri.parse(url));
+      req.headers.set('getcontentFeatures.dlna.org', '1');
+      final withFeatures = await req.close();
+      expect(withFeatures.headers.value('contentFeatures.dlna.org'),
+          'DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000');
+      client.close();
+    });
+
+    test('Range 206 + DLNA 响应头并存', () async {
+      final url = await server.urlFor(mp4.path);
+      final req = await HttpClient().getUrl(Uri.parse(url!));
+      req.headers.set('Range', 'bytes=2-5');
+      final res = await req.close();
+      expect(res.statusCode, 206);
+      expect(res.headers.value('content-range'), 'bytes 2-5/16');
+      expect(res.headers.value('transferMode.dlna.org'), 'Streaming');
+      expect(res.headers.value('accept-ranges'), 'bytes');
     });
   });
 }

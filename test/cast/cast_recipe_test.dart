@@ -84,4 +84,25 @@ void main() {
     });
     expect(store.lookup(target())!.didl, DidlVariant.none);
   });
+
+  test('urlSuffixMode：默认带扩展名；bare 往返；旧 JSON 未知值回落默认（M1/R1）',
+      () {
+    // 默认值 = withExtension（URL 带扩展名是新默认形态）。
+    expect(const CastRecipe().urlSuffixMode, CastUrlSuffixMode.withExtension);
+    // bare 往返。
+    final bare = const CastRecipe(urlSuffixMode: CastUrlSuffixMode.bare);
+    expect(CastRecipe.fromJson(bare.toJson()).urlSuffixMode,
+        CastUrlSuffixMode.bare);
+    // 旧 JSON 无该字段 → 默认；非法值 → 回落默认。
+    expect(
+      CastRecipe.fromJson(<String, dynamic>{'didl': 'full'}).urlSuffixMode,
+      CastUrlSuffixMode.withExtension,
+    );
+    expect(
+      CastRecipe.fromJson(<String, dynamic>{
+        'urlSuffixMode': 'not-a-mode',
+      }).urlSuffixMode,
+      CastUrlSuffixMode.withExtension,
+    );
+  });
 }

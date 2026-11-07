@@ -58,6 +58,19 @@ void main() {
       expect(didl, contains('duration="1:02:03"'));
     });
 
+    test('AC-27：duration 未知/为零不写（真实值才写，写错比不写更糟）', () {
+      expect(buildDidl(_req(), DidlVariant.full), isNot(contains('duration=')));
+      expect(
+        buildDidl(_req(duration: Duration.zero), DidlVariant.full),
+        isNot(contains('duration=')),
+      );
+      expect(
+        buildDidl(_req(duration: const Duration(seconds: 2)), DidlVariant.full),
+        contains('duration="0:00:02"'),
+        reason: 'DIDL 生成侧只要求真实时长；≤2s 不采信规则针对设备上报值',
+      );
+    });
+
     test('按 mime 选细分 upnp:class', () {
       expect(buildDidl(_req(), DidlVariant.full),
           contains('object.item.videoItem.movie'));

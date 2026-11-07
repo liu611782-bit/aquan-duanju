@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../error_log.dart';
 import 'cast_diagnostics.dart';
 import 'cast_media_proxy.dart';
+import 'cast_media_type.dart';
 import 'cast_recipe.dart';
 import 'cast_target.dart';
 import 'didl.dart';
@@ -14,6 +15,7 @@ import 'chromecast/chromecast_transport.dart';
 import 'dlna_transport.dart';
 import 'local_media_server.dart';
 import 'mdns_discovery.dart';
+import 'soap_client.dart';
 import 'ssdp_discovery.dart';
 
 /// 投屏会话状态。
@@ -32,6 +34,8 @@ class CastMedia {
     this.headers = const {},
     this.subtitleUrl = '',
     this.isMirror = false,
+    this.mimeHint = '',
+    this.duration,
   });
 
   final String url;
@@ -55,6 +59,15 @@ class CastMedia {
   /// 屏幕镜像流（MirrorService 的 /stream.ts）。会话结束（断开/电视端停止）
   /// 时控制器自动停掉镜像服务。
   final bool isMirror;
+
+  /// 调用方已知的媒体 mime（如 `ResolvedPlayback.mimeType`）。作为
+  /// [resolveCastMediaType] 的第一级证据（显式 hint）；空 = 无提示，
+  /// 由 URL 扩展名/内容嗅探判定。
+  final String mimeHint;
+
+  /// 真实时长（播放器手里有时长就传）。null/≤0 = 未知或直播——
+  /// DIDL `<res duration>` 只在真实值时写（写错比不写更糟，AC-27）。
+  final Duration? duration;
 
   bool get isLocalFile => localPath.isNotEmpty;
 }
@@ -147,25 +160,6 @@ CastTransport defaultTransportFactory(CastTarget target) {
     case CastProtocol.chromecast:
       return ChromecastTransport(target.cast!);
   }
-}
-
-/// 由 URL 扩展名猜 DIDL `protocolInfo` 的 mime 段；无法判定时按视频处理
-/// （预检会从设备 Sink 覆盖成设备真正声明的 mime）。
-String _mimeForCast(String url) {
-  final path = (Uri.tryParse(url)?.path ?? '').toLowerCase();
-  bool has(String ext) => path.endsWith(ext);
-  if (has('.m3u8') || has('.ts')) return 'video/mp2t';
-  if (has('.mp3')) return 'audio/mpeg';
-  if (has('.m4a') || has('.aac')) return 'audio/mp4';
-  if (has('.flac')) return 'audio/flac';
-  if (has('.wav')) return 'audio/wav';
-  if (has('.jpg') || has('.jpeg')) return 'image/jpeg';
-  if (has('.png')) return 'image/png';
-  if (has('.webp')) return 'image/webp';
-  if (has('.mkv')) return 'video/x-matroska';
-  if (has('.webm')) return 'video/webm';
-  if (has('.avi')) return 'video/x-msvideo';
-  return 'video/mp4';
 }
 
 /// 投屏会话控制器：状态机 + 1s 轮询 + 远端主动停止感知 + 多协议路由。
@@ -345,14 +339,29 @@ class CastController extends ChangeNotifier {
   /// 受保护流代理登记：默认走 [CastMediaProxy.register] 并按目标设备取
   /// 路由源 IP（M0.5 per-device IP）；注入的 [proxyResolver] 不感知目标
   /// 设备（测试/替代实现），行为保持不变。
-  Future<String?> _proxyResolve(String url, Map<String, String> headers,
-          {String? targetHost}) =>
+  /// [urlSuffixMode] 是目标设备配方里的 URL 形态旋钮（M1，默认带扩展名）。
+  Future<String?> _proxyResolve(
+    String url,
+    Map<String, String> headers, {
+    String? targetHost,
+    String? hintMime,
+    bool live = false,
+    CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension,
+  }) =>
       proxyResolver != null
           ? proxyResolver!(url, headers)
-          : _castProxy.register(url, headers: headers, targetHost: targetHost);
+          : _castProxy.register(
+              url,
+              headers: headers,
+              targetHost: targetHost,
+              hintMime: hintMime,
+              live: live,
+              urlSuffixMode: urlSuffixMode,
+            );
 
   /// 字幕投送前的准备：带源站头的字幕必须经代理；Chromecast 的 SRT 转 VTT。
-  Future<Uri?> _prepareSubtitle(CastTarget target, CastMedia media) async {
+  Future<Uri?> _prepareSubtitle(CastTarget target, CastMedia media,
+      {CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension}) async {
     final raw = media.subtitleUrl;
     if (raw.isEmpty) return null;
     final uri = Uri.tryParse(raw);
@@ -362,7 +371,9 @@ class CastController extends ChangeNotifier {
             raw.toLowerCase().endsWith('.srt'));
     if (!needsProxy) return uri;
     final proxied = await _castProxy.registerSubtitle(raw,
-        headers: media.headers, targetHost: target.host);
+        headers: media.headers,
+        targetHost: target.host,
+        urlSuffixMode: urlSuffixMode);
     return proxied == null ? uri : Uri.tryParse(proxied);
   }
 
@@ -401,10 +412,15 @@ class CastController extends ChangeNotifier {
         .recordTimeline('connecting → ${target.name}（${target.host}）');
     notifyListeners();
 
+    // URL 形态旋钮（M1 / 回滚点 R1）：命中配方里的 urlSuffixMode。
+    final suffixMode =
+        recipes.lookup(target)?.urlSuffixMode ?? CastUrlSuffixMode.withExtension;
+
     var playUrl = media.url;
     if (media.isLocalFile) {
       // M0.5：按目标设备取路由源 IP 生成对外 URL（电视拉得到流的地址）。
-      final served = await _mediaServer.urlFor(media.localPath, targetHost: target.host);
+      final served = await _mediaServer.urlFor(media.localPath,
+          targetHost: target.host, urlSuffixMode: suffixMode);
       if (served == null) {
         _state = CastSessionState.idle;
         _currentDevice = null;
@@ -414,11 +430,17 @@ class CastController extends ChangeNotifier {
       playUrl = served;
     } else if (media.headers.isNotEmpty) {
       // 带源站头的直链：经本机代理中转（电视无法自带 Referer/UA）。
-      final proxied = await _proxyResolve(media.url, media.headers,
-          targetHost: target.host);
+      final proxied = await _proxyResolve(
+        media.url,
+        media.headers,
+        targetHost: target.host,
+        hintMime: media.mimeHint,
+        urlSuffixMode: suffixMode,
+      );
       if (proxied != null) playUrl = proxied;
     }
-    final subtitleUri = await _prepareSubtitle(target, media);
+    final subtitleUri =
+        await _prepareSubtitle(target, media, urlSuffixMode: suffixMode);
     media = CastMedia(
       url: playUrl,
       title: media.title,
@@ -430,6 +452,8 @@ class CastController extends ChangeNotifier {
       headers: media.headers,
       subtitleUrl: subtitleUri?.toString() ?? '',
       isMirror: media.isMirror,
+      mimeHint: media.mimeHint,
+      duration: media.duration,
     );
     _currentMedia = media;
     _traceTarget(media);
@@ -452,12 +476,26 @@ class CastController extends ChangeNotifier {
           ErrorLog.instance.record('投屏能力预检', e, StackTrace.current);
         }
       }
+      // M1-1：媒体类型三级判定（显式 hint → URL 扩展名 → 内容嗅探），
+      // 替代旧 `_mimeForCast`（.m3u8 判 video/mp2t、无扩展名兜底 video/mp4）。
+      // 设备 Sink 只参与「拼写选择」，绝不用它覆盖判定结果（AC-13）。
+      // 嗅探到 HTML/JSON 会抛 CastException：投屏前就报「这个地址不是视频」。
+      final mediaType = await resolveCastMediaType(
+        url: Uri.parse(playUrl),
+        hintMime: media.mimeHint,
+        sinkMimes: sink,
+        sniffHead: defaultSniffHead,
+      );
+      CastDiagnostics.instance
+          .recordTimeline('媒体类型：${mediaType.mime}（${mediaType.fileName}）');
+      final durationText =
+          media.duration == null ? null : formatUpnpTime(media.duration!);
       CastRecipe? succeeded;
       if (compat != null) {
         succeeded = await compat.load(CastLoadRequest(
           url: Uri.parse(playUrl),
           title: media.title,
-          duration: null, // 时长未知时省略，避免设备较真
+          duration: durationText, // 真实时长才有（AC-27）
           subtitleUrl: media.subtitleUrl.isEmpty
               ? null
               : Uri.tryParse(media.subtitleUrl),
@@ -465,7 +503,9 @@ class CastController extends ChangeNotifier {
           didl: DidlRequest(
             uri: Uri.parse(playUrl),
             title: media.title,
-            mimeType: _mimeForCast(playUrl),
+            mimeType: mediaType.mime,
+            duration: media.duration,
+            live: mediaType.live,
             subtitleUri: media.subtitleUrl.isEmpty
                 ? null
                 : Uri.tryParse(media.subtitleUrl),
@@ -478,7 +518,7 @@ class CastController extends ChangeNotifier {
         await transport.setUri(
           Uri.parse(playUrl),
           title: media.title,
-          duration: null,
+          duration: durationText,
           subtitleUrl: media.subtitleUrl.isEmpty
               ? null
               : Uri.tryParse(media.subtitleUrl),
@@ -585,6 +625,8 @@ class CastController extends ChangeNotifier {
       await transport.setUri(
         Uri.parse(playUrl),
         title: next.title,
+        duration:
+            next.duration == null ? null : formatUpnpTime(next.duration!),
         subtitleUrl: subtitleUri,
       );
       await transport.play();
@@ -598,6 +640,8 @@ class CastController extends ChangeNotifier {
         headers: next.headers,
         subtitleUrl: subtitleUri?.toString() ?? '',
         isMirror: next.isMirror,
+        mimeHint: next.mimeHint,
+        duration: next.duration,
       );
       _lastPosition = Duration.zero;
       _lastDuration = Duration.zero;

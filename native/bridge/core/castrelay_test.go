@@ -282,3 +282,128 @@ func TestRelayAccessLog(t *testing.T) {
 		t.Fatalf("环形淘汰后 seq 不连续: 首条 %d 末条 %d", recent[0].Seq, lastSeq)
 	}
 }
+
+// TestRelayDlnaHeaders：DLNA 响应头条件化附加（M1-9）——transferMode 恒带、
+// contentFeatures 仅在请求带 getcontentFeatures.dlna.org: 1 才回、
+// HLS 清单不声明 Accept-Ranges、TS 分片按 ServeFile 真实现状（206 路由保留）。
+// HTTP 客户端必须 Proxy:nil。
+func TestRelayDlnaHeaders(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.m3u8"),
+		[]byte("#EXTM3U\n#EXTINF:4.0,\nseg0.ts\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "seg0.ts"),
+		[]byte(strings.Repeat("\x47", 256)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &relaySession{
+		id: "s1", token: "tok1234567890abcdef", dir: dir,
+		startedAt: time.Now(), lastAccess: time.Now(),
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/cast/"+s.token+"/", s.serveCastFile)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	defer func() { _ = srv.Close() }()
+	base := fmt.Sprintf("http://127.0.0.1:%d/cast/%s", ln.Addr().(*net.TCPAddr).Port, s.token)
+	direct := &http.Client{Transport: &http.Transport{Proxy: nil}}
+
+	// 1) 清单（不索要 contentFeatures）：Streaming/realTimeInfo 恒带，
+	//    contentFeatures 缺席，Accept-Ranges 不声明。
+	resp, err := direct.Get(base + "/index.m3u8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(body), "#EXTM3U") {
+		t.Fatalf("清单应 200: %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("transferMode.dlna.org"); got != "Streaming" {
+		t.Fatalf("transferMode = %q", got)
+	}
+	if got := resp.Header.Get("realTimeInfo.dlna.org"); got != "DLNA.ORG_TLAG=*" {
+		t.Fatalf("realTimeInfo = %q", got)
+	}
+	if resp.Header.Get("contentFeatures.dlna.org") != "" {
+		t.Fatal("未索要不应回 contentFeatures")
+	}
+	if resp.Header.Get("Accept-Ranges") != "" {
+		t.Fatal("HLS 清单路由不应声明 Accept-Ranges（诚实化）")
+	}
+
+	// 2) 清单（索要 contentFeatures）：条件化回。
+	req, err := http.NewRequest("GET", base+"/index.m3u8", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("getcontentFeatures.dlna.org", "1")
+	resp2, err := direct.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	got := resp2.Header.Get("contentFeatures.dlna.org")
+	want := "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+	if got != want {
+		t.Fatalf("contentFeatures = %q, want %q", got, want)
+	}
+
+	// 3) TS 分片（带 Range）：ServeFile 真答 206 → Accept-Ranges 保留；
+	//    未索要 contentFeatures 仍不回。
+	req3, err := http.NewRequest("GET", base+"/seg0.ts", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req3.Header.Set("Range", "bytes=0-9")
+	resp3, err := direct.Do(req3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seg, _ := io.ReadAll(resp3.Body)
+	resp3.Body.Close()
+	if resp3.StatusCode != 206 || len(seg) != 10 {
+		t.Fatalf("分片 Range 应 206/10B: %d %dB", resp3.StatusCode, len(seg))
+	}
+	if resp3.Header.Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("206 路由应声明 Accept-Ranges: %q", resp3.Header.Get("Accept-Ranges"))
+	}
+	if resp3.Header.Get("contentFeatures.dlna.org") != "" {
+		t.Fatal("未索要不应回 contentFeatures")
+	}
+
+	// 4) 直写 header map 保留 DLNA 规范驼峰拼写（net/http 的 Set 会改写大小写）。
+	raw, err := rawHttpGet(t, base+"/index.m3u8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, "transferMode.dlna.org: Streaming") {
+		t.Fatalf("响应头应保留规范拼写: %s", raw)
+	}
+}
+
+// rawHttpGet 用裸 TCP 读原始响应头（验证线上字节的键名拼写）。
+func rawHttpGet(t *testing.T, rawURL string) (string, error) {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", u.Path, u.Host)
+	data, err := io.ReadAll(conn)
+	if err != nil && len(data) == 0 {
+		return "", err
+	}
+	return string(data), nil
+}

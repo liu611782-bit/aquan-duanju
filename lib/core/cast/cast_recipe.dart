@@ -1,6 +1,14 @@
 import 'cast_target.dart';
 import 'didl.dart';
 
+/// 投屏 URL 形态旋钮（M1，review §6「媒体 URL 形态」兜底）。
+///
+/// - `withExtension`（默认）：`/p/<token>/index.m3u8` —— 国产接收端靠 URL
+///   扩展名选播放器；
+/// - `bare`：`/p/<token>` —— 旧行为；诊断发现某设备只认裸 URL 时按设备
+///   记该配方（梯度接线在 M3）。
+enum CastUrlSuffixMode { withExtension, bare }
+
 /// 某型号设备一次成功的「发送配方」。
 ///
 /// 字段全部有默认值：缺省配方等价于「完整 DIDL + 标准 SOAP 头」，
@@ -12,6 +20,7 @@ class CastRecipe {
     this.quotedSoapAction = true,
     this.mPost = false,
     this.protocolMime = '',
+    this.urlSuffixMode = CastUrlSuffixMode.withExtension,
     this.successCount = 0,
   });
 
@@ -27,8 +36,12 @@ class CastRecipe {
   /// 该设备只吃 M-POST（POST 405 降级的结果被记住，省掉一次往返）。
   final bool mPost;
 
-  /// GetProtocolInfo 预检挑中的 mime 段；空 = 用媒体自身 mime。
+  /// 预检记录的 mime 段。**M1 起不再用于覆盖媒体 mime**（AC-13：Sink 只做
+  /// 大类校验；M3 起复用为 `sinkEntry` 模板的 Sink 条目记录）。
   final String protocolMime;
+
+  /// 投屏 URL 形态（默认带扩展名；`bare` 回退旧裸 URL 形态）。
+  final CastUrlSuffixMode urlSuffixMode;
 
   /// 累计成功次数（诊断用；配方失败一次即清空）。
   final int successCount;
@@ -39,6 +52,7 @@ class CastRecipe {
     bool? quotedSoapAction,
     bool? mPost,
     String? protocolMime,
+    CastUrlSuffixMode? urlSuffixMode,
     int? successCount,
   }) =>
       CastRecipe(
@@ -47,6 +61,7 @@ class CastRecipe {
         quotedSoapAction: quotedSoapAction ?? this.quotedSoapAction,
         mPost: mPost ?? this.mPost,
         protocolMime: protocolMime ?? this.protocolMime,
+        urlSuffixMode: urlSuffixMode ?? this.urlSuffixMode,
         successCount: successCount ?? this.successCount,
       );
 
@@ -56,6 +71,7 @@ class CastRecipe {
         'quotedSoapAction': quotedSoapAction,
         'mPost': mPost,
         'protocolMime': protocolMime,
+        'urlSuffixMode': urlSuffixMode.name,
         'successCount': successCount,
       };
 
@@ -68,6 +84,10 @@ class CastRecipe {
         quotedSoapAction: json['quotedSoapAction'] as bool? ?? true,
         mPost: json['mPost'] as bool? ?? false,
         protocolMime: json['protocolMime'] as String? ?? '',
+        urlSuffixMode: CastUrlSuffixMode.values.firstWhere(
+          (v) => v.name == json['urlSuffixMode'],
+          orElse: () => CastUrlSuffixMode.withExtension,
+        ),
         successCount: json['successCount'] as int? ?? 0,
       );
 
@@ -79,6 +99,7 @@ class CastRecipe {
       other.quotedSoapAction == quotedSoapAction &&
       other.mPost == mPost &&
       other.protocolMime == protocolMime &&
+      other.urlSuffixMode == urlSuffixMode &&
       other.successCount == successCount;
 
   @override
@@ -88,6 +109,7 @@ class CastRecipe {
         quotedSoapAction,
         mPost,
         protocolMime,
+        urlSuffixMode,
         successCount,
       );
 

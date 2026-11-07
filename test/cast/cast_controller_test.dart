@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:aquan_duanju/core/cast/cast_controller.dart';
+import 'package:aquan_duanju/core/cast/cast_recipe.dart';
 import 'package:aquan_duanju/core/cast/cast_target.dart';
+import 'package:aquan_duanju/core/cast/didl.dart';
 import 'package:aquan_duanju/core/cast/dlna_device.dart';
 import 'package:aquan_duanju/core/cast/soap_client.dart';
 
@@ -26,7 +28,8 @@ class FakeTransport implements CastTransport {
   @override
   Future<void> setUri(Uri url,
       {required String title, String? duration, Uri? subtitleUrl}) async {
-    calls.add('setUri:$url');
+    calls.add('setUri:$url'
+        '${duration == null ? '' : ' duration=$duration'}');
     if (setUriError != null) throw setUriError!;
   }
 
@@ -62,6 +65,49 @@ CastMedia _media() =>
     const CastMedia(url: 'http://192.168.1.10/1.m3u8', title: '测试 · 第1集');
 
 CastTarget _target(String udn) => CastTarget.dlna(_device(udn));
+
+/// 兼容层假 transport：捕获 CastLoadRequest（M1-2/M1-8 接线断言用）。
+class CapturingCompatTransport implements CastTransport, CastCompatTransport {
+  CapturingCompatTransport();
+
+  final List<String> calls = <String>[];
+  CastLoadRequest? lastRequest;
+  Set<String> sinkAnswer = <String>{'http-get:*:video/mp4:*'};
+
+  @override
+  Future<Set<String>> preflight() async => sinkAnswer;
+
+  @override
+  Future<CastRecipe?> load(CastLoadRequest request) async {
+    lastRequest = request;
+    calls.add('load');
+    return const CastRecipe(didl: DidlVariant.full);
+  }
+
+  @override
+  Future<void> setUri(Uri url,
+      {required String title, String? duration, Uri? subtitleUrl}) async {
+    calls.add('setUri:$url duration=$duration');
+  }
+
+  @override
+  Future<void> play() async => calls.add('play');
+  @override
+  Future<void> pause() async {}
+  @override
+  Future<void> stop() async {}
+  @override
+  Future<void> seekTo(Duration position) async {}
+  @override
+  Future<void> setVolume(int percent) async {}
+  @override
+  Future<void> setMute(bool muted) async {}
+  @override
+  Future<CastPoll> poll() async =>
+      const CastPoll(transportState: 'PLAYING', position: Duration.zero);
+  @override
+  void close() {}
+}
 
 void main() {
   test('castTo：connecting → casting，先 setUri 后 play', () async {
@@ -152,5 +198,97 @@ void main() {
     expect(transport.calls.contains('play'), isTrue);
     expect(transport.calls.contains('volume:40'), isTrue);
     controller.dispose();
+  });
+
+  group('M1 媒体类型与 duration 接线（compat 链）', () {
+    test('resolver 接入：.m3u8 → vnd.apple.mpegurl（旧 _mimeForCast 判 mp2t）',
+        () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      await controller.castTo(_target('d1'), _media());
+      expect(compat.lastRequest, isNotNull);
+      expect(compat.lastRequest!.didl.mimeType, 'application/vnd.apple.mpegurl');
+      controller.dispose();
+    });
+
+    test('AC-13：Sink 只有 video/mp4 时也不覆盖 mime', () async {
+      final compat = CapturingCompatTransport()
+        ..sinkAnswer = <String>{'http-get:*:video/mp4:*'};
+      final controller = CastController(transportFactory: (_) => compat);
+      await controller.castTo(_target('d1'), _media());
+      expect(compat.lastRequest!.didl.mimeType, 'application/vnd.apple.mpegurl');
+      controller.dispose();
+    });
+
+    test('Sink 拼写选择：Sink 用 x-mpegurl → 照抄设备写法', () async {
+      final compat = CapturingCompatTransport()
+        ..sinkAnswer = <String>{'http-get:*:application/x-mpegurl:*'};
+      final controller = CastController(transportFactory: (_) => compat);
+      await controller.castTo(_target('d1'), _media());
+      expect(compat.lastRequest!.didl.mimeType, 'application/x-mpegurl');
+      controller.dispose();
+    });
+
+    test('AC-27：真实时长接入 CastLoadRequest 与 DidlRequest', () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(
+          url: 'http://192.168.1.10/1.mp4',
+          title: '测试 · 第1集',
+          duration: Duration(minutes: 2, seconds: 3),
+        ),
+      );
+      expect(compat.lastRequest!.didl.duration, const Duration(minutes: 2, seconds: 3));
+      expect(compat.lastRequest!.duration, '0:02:03');
+      controller.dispose();
+    });
+
+    test('AC-27：时长未知（null）不写 duration', () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      await controller.castTo(_target('d1'), _media());
+      expect(compat.lastRequest!.didl.duration, isNull);
+      expect(compat.lastRequest!.duration, isNull);
+      controller.dispose();
+    });
+
+    test('标准路径 setUri 也带格式化时长', () async {
+      final transport = FakeTransport();
+      final controller = CastController(transportFactory: (_) => transport);
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(
+          url: 'http://192.168.1.10/1.mp4',
+          title: 't',
+          duration: Duration(hours: 1, minutes: 2, seconds: 3),
+        ),
+      );
+      expect(
+        transport.calls.where((c) => c.startsWith('setUri')),
+        isNotEmpty,
+      );
+      expect(
+        transport.calls.firstWhere((c) => c.startsWith('setUri')),
+        contains('duration=1:02:03'),
+      );
+      controller.dispose();
+    });
+
+    test('mimeHint 作为显式 hint 优先于扩展名判定', () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(
+          url: 'http://192.168.1.10/1.m3u8',
+          title: 't',
+          mimeHint: 'application/x-mpegurl',
+        ),
+      );
+      expect(compat.lastRequest!.didl.mimeType, 'application/x-mpegurl');
+      controller.dispose();
+    });
   });
 }

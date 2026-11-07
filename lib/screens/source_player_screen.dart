@@ -10,6 +10,7 @@ import '../core/player/player_engine.dart';
 import '../core/player/mpv_headers.dart';
 import '../core/player/playback_failure_gate.dart';
 import '../core/cast/cast_controller.dart';
+import '../core/cast/cast_media_fallback.dart';
 import '../core/cast/cast_relay_probe.dart';
 import '../core/aqua_api.dart';
 import '../core/bili/api.dart';
@@ -717,45 +718,62 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   AquaApi? _castRelayApi;
 
   /// 解析某一集的可投媒体：resolvePlay 源（B 站 DASH 双轨）→ castRelay 合流
-  /// （ffmpeg 带 Referer/UA）；普通源直链（防盗链信号头经手机代理）。
+  /// （ffmpeg 带 Referer/UA），中继失败回退直投原始 URL（M1-6 / AC-21，
+  /// 不再让「该集没有可投的流」终结投屏）；普通源直链（防盗链信号头经手机代理）。
   /// [scope] 由调用方捕获（闭包异步内不摸 context）。
   Future<CastMedia?> _resolveCastMedia(UnifiedEpisode ep, int index, AppScope scope) async {
     final title = '${widget.series.title} · ${ep.title}';
     if (widget.resolvePlay != null) {
+      final ResolvedPlay resolved;
       try {
-        final resolved = await widget.resolvePlay!(ep);
-        if (resolved.videoUrl.isEmpty) return null;
-        final h = _headers();
-        // 换集连投：停旧中继再起新中继。
-        final oldSession = _castRelaySession;
-        _castRelaySession = null;
-        if (oldSession != null) {
-          try {
-            await scope.api.castRelayStop(oldSession);
-          } catch (_) {}
-        }
-        final relay = await scope.api.castRelayStart(
-          url: resolved.videoUrl,
-          audioUrl: resolved.audioUrl ?? '',
-          userAgent: headerOf(h, 'user-agent') ?? '',
-          referer: headerOf(h, 'referer') ?? '',
-        );
-        _castRelayApi = scope.api;
-        _castRelaySession = relay['session'] as String?;
-        // M0-5：跟随中继取流日志进诊断（探针在会话回收时自停）。
-        final session = _castRelaySession;
-        if (session != null) {
-          CastRelayProbe.instance.watch(scope.api.castRelayStatus, session);
-        }
-        return CastMedia(
-          url: relay['url'] as String? ?? resolved.videoUrl,
-          title: title,
-          episodeIndex: ep.index,
-          episodeCount: _line.episodes.length,
-        );
+        resolved = await widget.resolvePlay!(ep);
       } on Exception {
-        return null; // 解析/中继失败：本轮连投终止（首次投屏则 UI 报错）。
+        return null; // 解析失败：没有可直投的地址（本轮连投终止）。
       }
+      if (resolved.videoUrl.isEmpty) return null;
+      final h = _headers();
+      // 换集连投：停旧中继再起新中继。
+      final oldSession = _castRelaySession;
+      _castRelaySession = null;
+      if (oldSession != null) {
+        try {
+          await scope.api.castRelayStop(oldSession);
+        } catch (_) {}
+      }
+      final result = await castMediaViaRelayOrDirect(
+        title: title,
+        directUrl: resolved.videoUrl,
+        startRelay: () async {
+          final relay = await scope.api.castRelayStart(
+            url: resolved.videoUrl,
+            audioUrl: resolved.audioUrl ?? '',
+            userAgent: headerOf(h, 'user-agent') ?? '',
+            referer: headerOf(h, 'referer') ?? '',
+          );
+          _castRelayApi = scope.api;
+          _castRelaySession = relay['session'] as String?;
+          // M0-5：跟随中继取流日志进诊断（探针在会话回收时自停）。
+          final session = _castRelaySession;
+          if (session != null) {
+            CastRelayProbe.instance.watch(scope.api.castRelayStatus, session);
+          }
+          return relay['url'] as String?;
+        },
+        episodeIndex: ep.index,
+        episodeCount: _line.episodes.length,
+        // 播放器手里有时长才传真实值（AC-27）；换集连投拿不到下一集时长。
+        duration: index == _index && _duration > Duration.zero
+            ? _duration
+            : null,
+        onRelayError: (e, st) =>
+            ErrorLog.instance.record('投屏中继回退直投', e, st),
+      );
+      if (result == null) return null;
+      final (media, viaRelay) = result;
+      if (!viaRelay && mounted) {
+        _osdMessage('已改为直投，部分格式电视可能不支持');
+      }
+      return media;
     }
     // 与 _open 共用同一份解析结果：URL 与 headers 口径完全一致。
     final playback =
@@ -767,6 +785,9 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
       episodeIndex: ep.index,
       episodeCount: _line.episodes.length,
       headers: _castHeaders(playback),
+      mimeHint: playback.mimeType,
+      duration:
+          index == _index && _duration > Duration.zero ? _duration : null,
     );
   }
 

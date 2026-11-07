@@ -214,46 +214,41 @@ class DlnaTransport implements CastTransport, CastCompatTransport {
   @override
   Future<CastRecipe?> load(CastLoadRequest request) async {
     final deadline = DateTime.now().add(retryBudget);
-    var chain = List<CastRecipe>.of(
+    final chain = List<CastRecipe>.of(
       request.recipes.isEmpty ? CastRecipeStore.gradient : request.recipes,
     );
 
-    // 预检：设备 Sink 里没有已知视频类型时不阻断，只把首配方降到 minimal
-    //（严格设备仍可能接受通配 protocolInfo）。
+    // 预检（M1-5 / AC-13）：Sink 只做大类校验，**不再用它覆盖 mime**。
+    // go2tv 明确注释禁止（设备 Sink 常缺条目、或拼写更差，覆盖只会把
+    // 本来判对的容器改错——旧实现 `_pickProtocolMime` 会把 HLS 盖成
+    // video/mp4/video/mpeg 等）。Sink 里连同大类 mime 都没有 → 记
+    // warning 不阻断，仍按媒体自身 mime 投送。
     final sink = request.protocolInfo.isNotEmpty
         ? request.protocolInfo
         : await _safeProtocolInfo();
-    final mime = _pickProtocolMime(sink, request.didl.mimeType);
-    if (mime == null &&
-        sink.isNotEmpty &&
-        request.didl.mimeType.startsWith('video/') &&
-        chain.isNotEmpty) {
-      chain = <CastRecipe>[
-        chain.first.copyWith(didl: DidlVariant.minimal),
-        ...chain.skip(1),
-      ];
+    if (sink.isNotEmpty && !_sinkHasCategory(sink, request.didl.mimeType)) {
+      _trace('警告：设备 Sink 未宣告 ${request.didl.mimeType.split('/').first}'
+          ' 类 mime（${sink.length} 条），仍按媒体自身 mime 投送');
     }
 
     SoapException? lastFailure;
-    for (final base in chain) {
+    for (final recipe in chain) {
       if (!DateTime.now().isBefore(deadline)) break;
-      final recipe =
-          base.copyWith(protocolMime: mime ?? base.protocolMime);
       _activeRecipe = recipe;
       try {
         await _attempt(request, recipe, deadline);
-        _trace('配方命中：didl=${recipe.didl.name} mime=${recipe.protocolMime}');
+        _trace('配方命中：didl=${recipe.didl.name}');
         return recipe;
       } on TimeoutException {
-        _trace('配方未命中（超时）：didl=${base.didl.name}');
+        _trace('配方未命中（超时）：didl=${recipe.didl.name}');
         _activeRecipe = null;
         rethrow;
       } on SocketException {
-        _trace('配方未命中（连接失败）：didl=${base.didl.name}');
+        _trace('配方未命中（连接失败）：didl=${recipe.didl.name}');
         _activeRecipe = null;
         rethrow;
       } on SoapException catch (e) {
-        _trace('配方未命中：didl=${base.didl.name} → '
+        _trace('配方未命中：didl=${recipe.didl.name} → '
             '${e.faultCode == null ? e.message : 'fault ${e.faultCode}'}');
         _activeRecipe = null;
         if (_isTimeoutLike(e)) rethrow;
@@ -314,15 +309,12 @@ class DlnaTransport implements CastTransport, CastCompatTransport {
     CastLoadRequest req,
     CastRecipe recipe,
   ) async {
-    final didlReq = req.didl.copyWith(
-      mimeType: recipe.protocolMime.isNotEmpty
-          ? recipe.protocolMime
-          : req.didl.mimeType,
-    );
+    // M1-5（AC-13）：不再用 recipe.protocolMime 覆盖媒体 mime——旧 JSON
+    // 里持久化的覆盖值同样失效（「Sink 不覆盖 mime」是不变式）。
     await _send(device.controlUrl, _avt, 'SetAVTransportURI', <String, String>{
       'InstanceID': '0',
       'CurrentURI': req.url.toString(),
-      'CurrentURIMetaData': buildDidlMetadata(didlReq, recipe.didl),
+      'CurrentURIMetaData': buildDidlMetadata(req.didl, recipe.didl),
     });
   }
 
@@ -365,18 +357,17 @@ Set<String> _splitProtocolInfo(String raw) => raw
     .where((e) => e.isNotEmpty)
     .toSet();
 
-/// 从 Sink 里挑一个与请求同大类（video/audio/image）的 protocolInfo mime 段。
-String? _pickProtocolMime(Set<String> sink, String wanted) {
-  if (sink.isEmpty) return null;
+/// Sink 条目里是否存在同大类（video/audio/image）mime（M1-5 大类校验）。
+bool _sinkHasCategory(Set<String> sink, String wanted) {
   final category = wanted.split('/').first.toLowerCase();
   for (final entry in sink) {
     final parts = entry.split(':');
     if (parts.length < 3) continue;
-    final mime = parts[2].trim();
+    final mime = parts[2].trim().toLowerCase();
     if (mime.isEmpty || mime == '*/*') continue;
-    if (mime.toLowerCase().startsWith('$category/')) return mime;
+    if (mime.startsWith('$category/')) return true;
   }
-  return null;
+  return false;
 }
 
 DateTime _earlier(DateTime a, DateTime b) => a.isBefore(b) ? a : b;

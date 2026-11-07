@@ -75,6 +75,13 @@ void main() {
       expect(mimeTypeForMedia('https://x/a.mkv'), 'video/x-matroska');
       expect(mimeTypeForMedia('https://x/a.ts'), 'video/mp2t');
       expect(mimeTypeForMedia('https://x/a.mp3'), 'audio/mpeg');
+      // M1-1：不再以 video/mp4 兜底——无扩展名且不像 HLS 的地址返回空串
+      // （投屏 hint 只在有真实证据时才可信，无证据交给 URL 嗅探）。
+      expect(mimeTypeForMedia('https://x/a.mp4'), 'video/mp4');
+      expect(mimeTypeForMedia('https://x/api/play?type=hls'),
+          'application/vnd.apple.mpegurl');
+      expect(mimeTypeForMedia('https://x/media'), isEmpty,
+          reason: '无扩展名不像 HLS → 空（绝不静默按 mp4 投）');
     });
 
     test('诊断标签不含完整 URL / 凭据', () {

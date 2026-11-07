@@ -2319,7 +2319,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     var castUrl = stream.url;
     // 中继起不来（典型：系统没有可执行的 ffmpeg）时不再把整条投屏路堵死，
-    // 改为弹面板并默认勾选「镜像屏幕」——镜像走 MediaProjection，不依赖 ffmpeg。
+    // 用户可在「直投原 URL」（M1-6 / AC-21）与「镜像屏幕」之间选择——
+    // 镜像走 MediaProjection，不依赖 ffmpeg。
     var needsMirror = false;
     if (playback.contentKey != null) {
       // M3：加密分集走本机中继（ffmpeg 解密转 HLS）。
@@ -2341,12 +2342,20 @@ class _PlayerScreenState extends State<PlayerScreen>
         castUrl = relay['url'] as String? ?? castUrl;
         _showToast('已启动本机解密中继');
       } on AquaException catch (e) {
-        needsMirror = true;
-        _showToast('${e.friendlyText}；已切换为镜像屏幕投屏');
+        ErrorLog.instance.record('投屏', '中继启动失败：${e.friendlyText}',
+            StackTrace.current);
+        if (mounted) {
+          await _chooseRelayFallback(e.friendlyText, (mirror) {
+            needsMirror = mirror;
+          });
+        }
       } catch (e) {
-        needsMirror = true;
-        _showToast('加密中继启动失败，已切换为镜像屏幕投屏');
         ErrorLog.instance.record('投屏', '中继启动失败：$e', StackTrace.current);
+        if (mounted) {
+          await _chooseRelayFallback('加密中继启动失败', (mirror) {
+            needsMirror = mirror;
+          });
+        }
       }
     }
     if (!mounted) {
@@ -2361,6 +2370,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       position: _position,
       episodeIndex: _index + 1,
       episodeCount: widget.episodes.length,
+      // 播放器手里有真实时长才传（AC-27）；未知/直播不写 DIDL duration。
+      duration: _duration > Duration.zero ? _duration : null,
     );
     // 连播：电视端播完自动解析并投下一集（本地缓存集投本地文件；加密分集
     // 停旧中继、起新中继）。scope 在发起时捕获，避免异步后摸 context。
@@ -2458,6 +2469,39 @@ class _PlayerScreenState extends State<PlayerScreen>
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(text), duration: const Duration(milliseconds: 800)));
+  }
+
+  /// 中继失败后的选择（M1-6 / AC-21）：直投原 URL 或切换镜像屏幕。
+  /// [onChoose] 收到 true = 切换镜像；false = 直投原 URL（默认项）。
+  /// 原始异常已由调用方记入 ErrorLog，这里只展示固定文案。
+  Future<void> _chooseRelayFallback(
+      String reason, void Function(bool mirror) onChoose) async {
+    final mirror = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('本机中继不可用'),
+        content: Text('$reason。\n\n可选择直接投送原始地址'
+            '（部分格式电视可能不支持），或改用镜像屏幕投屏。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('切换镜像'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('直投原 URL'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (mirror == true) {
+      onChoose(true);
+      _showToast('已切换为镜像屏幕投屏');
+    } else {
+      onChoose(false);
+      _showToast('已改为直投，部分格式电视可能不支持');
+    }
   }
 
   @override

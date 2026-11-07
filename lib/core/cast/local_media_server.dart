@@ -8,6 +8,8 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import 'cast_diagnostics.dart';
+import 'cast_media_type.dart';
+import 'cast_recipe.dart';
 
 /// 本地 HTTP 媒体服务：把本机文件以「token URL」的形式喂给电视。
 ///
@@ -24,20 +26,45 @@ import 'cast_diagnostics.dart';
 /// `Content-Length` 强制归零，而电视探测长度恰恰依赖这个头。改用
 /// [ServerSocket] 手写响应，`Connection: close` 一请求一连接，简单可控。
 
-/// DLNA 响应头 + 宽松 CORS（本地媒体服务 / 投屏代理 / 网页投屏共用）。
+/// `contentFeatures.dlna.org` 的值（与本地路由真实能力一致：支持字节 Range
+/// 206 → OP=01；不转码 → CI=0）。
+const String kDlnaContentFeatures =
+    'DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000';
+
+/// DLNA 条件化响应头（M1-9，review §8.1/§8.5；playbridge 条件化写法）。
 ///
-/// 严格校验 DIDL/响应头的接收端（WMP、QQLiveTV、Hisilicon 等）依赖
-/// `transferMode` / `contentFeatures` / `realTimeInfo`；CORS 允许局域网网页
-/// 投屏页里的 `<video>` 跨域拉流。
+/// - `transferMode.dlna.org`：媒体路由恒 `Streaming`；字幕等 text/* 路由
+///   （[media] = false）走 `Interactive` 且不给 contentFeatures/realTimeInfo；
+/// - `contentFeatures.dlna.org`：仅当请求带 `getcontentFeatures.dlna.org: 1`
+///   才回（[contentFeaturesRequested]）；
+/// - `realTimeInfo.dlna.org: DLNA.ORG_TLAG=*`：流式媒体路由恒带；
+/// - `Accept-Ranges`：仅本路由真的会答 206 才声明（[acceptRanges]）——
+///   本地文件恒真；代理直链按上游；HLS 清单路由不声明（谎报 byte-seek
+///   有 TCL 一 seek 就停播的实证回归，review §8.5）；
+/// - 附带宽松 CORS（网页投屏页跨域拉流）。
 ///
 /// 注意：这里只加 DLNA 与**放宽型** CORS 头，**不加** `x-frame-options`、
 /// `x-content-type-options` 之类的限制性安全头——部分渲染器见到会拒播
 /// （见 cast-contract.md P0「零安全头」语义，既有测试断言这些头必须缺席）。
-const String kDlnaResponseHeaders = 'transferMode.dlna.org: Streaming\r\n'
-    'contentFeatures.dlna.org: DLNA.ORG_OP=01;DLNA.ORG_CI=0;'
-    'DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n'
-    'realTimeInfo.dlna.org: DLNA.ORG_TLAG=*\r\n'
-    'Access-Control-Allow-Origin: *\r\n';
+String dlnaResponseHeaders({
+  bool media = true,
+  bool contentFeaturesRequested = false,
+  bool acceptRanges = true,
+}) {
+  final b = StringBuffer()
+    ..write('transferMode.dlna.org: ${media ? 'Streaming' : 'Interactive'}\r\n');
+  if (media && contentFeaturesRequested) {
+    b.write('contentFeatures.dlna.org: $kDlnaContentFeatures\r\n');
+  }
+  if (media) {
+    b.write('realTimeInfo.dlna.org: DLNA.ORG_TLAG=*\r\n');
+  }
+  if (acceptRanges) {
+    b.write('Accept-Ranges: bytes\r\n');
+  }
+  b.write('Access-Control-Allow-Origin: *\r\n');
+  return b.toString();
+}
 
 class LocalMediaServer {
   LocalMediaServer({
@@ -110,7 +137,15 @@ class LocalMediaServer {
   /// 提供时对外 URL 的 host 用「到该设备的路由源 IP」（电视拉得到流的
   /// 地址），探测失败回退登记时的全局本机地址。同一媒体投两台设备 =
   /// 两个 token，互不影响。
-  Future<String?> urlFor(String filePath, {String? targetHost}) async {
+  ///
+  /// URL 形态（M1-4）：`/m/<token>/<fileName>`，fileName 来自
+  /// [resolveCastMediaType]（按文件扩展名映射，如 ep1.mp4 → video.mp4，
+  /// 不暴露真实文件名）；[urlSuffixMode] = bare 时退回旧形态 `/m/<token>`。
+  Future<String?> urlFor(
+    String filePath, {
+    String? targetHost,
+    CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension,
+  }) async {
     if (!await start()) return null;
     final token = _register(filePath);
     final server = _socket;
@@ -121,8 +156,14 @@ class LocalMediaServer {
     }
     host ??= _localAddress;
     if (host == null) return null;
-    return 'http://$host:${server.port}/m/$token';
+    final suffix =
+        urlSuffixMode == CastUrlSuffixMode.bare ? '' : '/${_fileNameFor(filePath)}';
+    return 'http://$host:${server.port}/m/$token$suffix';
   }
+
+  /// 登记文件的对外文件名（按扩展名映射的通用名，不暴露真实文件名）。
+  static String _fileNameFor(String filePath) =>
+      castMediaTypeFromUrlPath(Uri.file(filePath)).fileName;
 
   String _register(String filePath) {
     _order.remove(filePath);
@@ -198,6 +239,7 @@ class LocalMediaServer {
     final rawPath = requestLine[1];
     String? rangeHeader;
     String? userAgent;
+    bool contentFeaturesRequested = false;
     for (final line in lines.skip(1)) {
       final idx = line.indexOf(':');
       if (idx <= 0) continue;
@@ -206,6 +248,9 @@ class LocalMediaServer {
         rangeHeader = line.substring(idx + 1).trim();
       } else if (key == 'user-agent') {
         userAgent = line.substring(idx + 1).trim();
+      } else if (key == 'getcontentfeatures.dlna.org') {
+        // playbridge 条件化写法：设备显式索要才回 contentFeatures。
+        contentFeaturesRequested = line.substring(idx + 1).trim() == '1';
       }
     }
     // 取流埋点（M0 纯采集；recordMediaRequest 自身吞异常）。
@@ -214,7 +259,10 @@ class LocalMediaServer {
 
     final path = Uri.tryParse(rawPath)?.path ?? '';
     final segments = path.split('/').where((s) => s.isNotEmpty).toList();
-    if (segments.length != 2 || segments.first != 'm') {
+    // M1-4：路由放宽到 `>= 2` 段——`/m/<token>/<fileName>` 的末段只是让
+    // URL 带扩展名（接收端靠它选播放器），token 恒取 segments[1]；
+    // 旧形态 `/m/<token>` 继续兼容。
+    if (segments.length < 2 || segments.first != 'm') {
       trace(404, 0);
       await _writeStatus(socket, 404, 'Not Found');
       return;
@@ -252,7 +300,12 @@ class LocalMediaServer {
       ..write(range.partial ? 'HTTP/1.1 206 Partial Content\r\n' : 'HTTP/1.1 200 OK\r\n')
       ..write('Content-Type: $mime\r\n')
       ..write('Content-Length: ${range.length}\r\n')
-      ..write('Accept-Ranges: bytes\r\n');
+      // 本地文件路由恒真支持 Range 206 → Accept-Ranges 诚实声明（M1-9）。
+      ..write(dlnaResponseHeaders(
+        media: true,
+        contentFeaturesRequested: contentFeaturesRequested,
+        acceptRanges: true,
+      ));
     if (range.partial) {
       head.write('Content-Range: bytes ${range.start}-${range.end - 1}/$total\r\n');
     }
@@ -595,8 +648,7 @@ String mimeTypeForPath(String path) {
     'avi' => 'video/x-msvideo',
     'flv' => 'video/x-flv',
     'mp3' => 'audio/mpeg',
-    'm4a' => 'audio/mp4',
-    'aac' => 'audio/aac',
+    'm4a' || 'aac' => 'audio/mp4',
     'flac' => 'audio/flac',
     'wav' => 'audio/wav',
     'ogg' => 'audio/ogg',

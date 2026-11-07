@@ -590,27 +590,64 @@ func serveCastFiles(s *relaySession, ln net.Listener) {
 }
 
 // serveCastFile 伺服单个清单/分片并记录电视取流日志（M0-5）。
-// http.ServeFile 自己处理 Range/206/416：用 accessRecorder 包一层拿状态码与字节数。
+// http.ServeFile 自己处理 Range/206/416：用 accessRecorder 包一层拿状态码
+// 与字节数，并按 M1-9 条件化规则附加 DLNA 响应头。
 func (s *relaySession) serveCastFile(w http.ResponseWriter, r *http.Request) {
 	s.touch()
-	rec := &accessRecorder{ResponseWriter: w, status: http.StatusOK}
 	name := strings.TrimPrefix(r.URL.Path, "/cast/"+s.token+"/")
 	name = filepath.Base(name) // 防 ../ 穿越
+	rec := &accessRecorder{
+		ResponseWriter: w,
+		status:         http.StatusOK,
+		// playbridge 条件化写法：设备显式索要才回 contentFeatures。
+		wantContentFeatures: r.Header.Get("Getcontentfeatures.dlna.org") == "1",
+		// 清单路由不声明 byte-seek（review §8.5 诚实化）：只删 Accept-Ranges
+		// 声明，Range 请求仍按 ServeFile 真实行为应答。
+		suppressAcceptRanges: strings.HasSuffix(strings.ToLower(name), ".m3u8"),
+	}
 	http.ServeFile(rec, r, filepath.Join(s.dir, name))
 	s.recordAccess(r, rec.status, rec.bytes)
 }
 
-// accessRecorder 包装 ResponseWriter，捕获状态码与写给电视的字节数（取流日志）。
+// relayContentFeatures 是 contentFeatures.dlna.org 的值：中继产物是静态
+// HLS 文件，支持字节 Range 206 → OP=01；不转码（产物即最终形态）→ CI=0。
+const relayContentFeatures = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;" +
+	"DLNA.ORG_FLAGS=01700000000000000000000000000000"
+
+// setDlnaHeader 直写 header map：net/http 的 Set 会把键名改写成它的规范
+// 形式（首字母大写 + 其余小写，"transferMode.dlna.org" 会变成
+// "Transfermode.dlna.org"）。DLNA 规范拼写是驼峰式，部分固件按名字面
+// 匹配，必须原样输出。
+func setDlnaHeader(h http.Header, name, value string) {
+	h[name] = []string{value}
+}
+
+// accessRecorder 包装 ResponseWriter，捕获状态码与写给电视的字节数（取流日志），
+// 并在首写头时附加 DLNA 响应头（M1-9，与 LocalMediaServer/CastMediaProxy 同规）：
+// transferMode.dlna.org: Streaming 恒带；contentFeatures.dlna.org 仅当请求带
+// getcontentFeatures.dlna.org: 1 才回；realTimeInfo.dlna.org 恒带；
+// HLS 清单响应删除 Accept-Ranges 声明（TS 分片按 ServeFile 真实现状保留）。
 type accessRecorder struct {
 	http.ResponseWriter
-	status      int
-	wroteHeader bool
-	bytes       int64
+	status               int
+	wroteHeader          bool
+	bytes                int64
+	wantContentFeatures  bool
+	suppressAcceptRanges bool
 }
 
 func (w *accessRecorder) WriteHeader(code int) {
 	if !w.wroteHeader {
 		w.wroteHeader = true
+		h := w.Header()
+		setDlnaHeader(h, "transferMode.dlna.org", "Streaming")
+		if w.wantContentFeatures {
+			setDlnaHeader(h, "contentFeatures.dlna.org", relayContentFeatures)
+		}
+		setDlnaHeader(h, "realTimeInfo.dlna.org", "DLNA.ORG_TLAG=*")
+		if w.suppressAcceptRanges {
+			h.Del("Accept-Ranges")
+		}
 		w.status = code
 	}
 	w.ResponseWriter.WriteHeader(code)

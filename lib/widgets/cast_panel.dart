@@ -421,6 +421,12 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
       // 用户看到的是固定文案；stage 与原始异常/堆栈只进 ErrorLog。
       ErrorLog.instance.record('投屏连接·$_stage', e, stack);
       _recordSoapDiagnostic(e);
+      if (e is CastException) {
+        // 本地校验失败（如媒体类型判定：「该地址不是可投屏的视频」）——
+        // 文案本身已说明原因，直接展示，不误导为「设备未响应」。
+        _abort(e.message);
+        return;
+      }
       // 标准 DLNA 无响应：明确引导到网页投屏，不留死路。
       _abort('设备未响应，可重试、换一台设备，或试试下方「网页投屏」',
           suggestWebCast: true);
