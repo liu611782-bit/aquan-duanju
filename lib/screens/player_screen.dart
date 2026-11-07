@@ -17,6 +17,7 @@ import 'package:window_manager/window_manager.dart';
 
 import '../cli/launch_command.dart';
 import '../cli/player_bus.dart';
+import '../core/aqua_api.dart';
 import '../core/error_log.dart';
 import '../core/aqua_error.dart';
 import '../core/cast/cast_controller.dart';
@@ -184,6 +185,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// 投屏解密中继会话（castrelay.go）：投屏结束/退出时回收。
   String? _relaySession;
 
+  /// 中继会话对应的 API 引用（M4-1）：回收路径（[_stopRelayIfAny]）可能发生在
+  /// await 之后甚至页面已卸载时，不能再摸 context 取 api，随会话存引用。
+  AquaApi? _relayApi;
+
   /// 连播预解析：集下标 → 已解析的播放结果（本会话内复用）。
   final Map<int, PlaybackResult> _prefetched = {};
 
@@ -272,7 +277,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     castController.onRemoteStopped = (device, position) {
       if (!mounted) return;
       unawaited(_stopRelayIfAny());
-      _resumeLocalAfterCast(position);
+      _resumeLocalAfterCast(
+        position,
+        // mounted 已确认且中间无 await，此处读 context 安全（M4-1 审计口径）。
+        resumeLocal: AppScope.read(context)
+                .settings
+                .castDisconnectBehavior ==
+            'resumeLocal',
+      );
     };
     unawaited(_installMpvOptions());
     _playSkip = AppScope.read(context).playSkip.entryFor(widget.series.id);
@@ -2297,9 +2309,10 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   // ---------- 投屏（DLNA 发送端） ----------
 
-  void _resumeLocalAfterCast(Duration position) {
-    final behavior = AppScope.read(context).settings.castDisconnectBehavior;
-    if (behavior != 'resumeLocal') return;
+  /// 断开投屏回本地。[resumeLocal] 由调用方在 await 之前捕获（M4-1：
+  /// 本方法在 `disconnect()` 等多个 await 之后执行，不再摸 context）。
+  void _resumeLocalAfterCast(Duration position, {required bool resumeLocal}) {
+    if (!resumeLocal) return;
     if (position > Duration.zero) {
       _engine.seek(position);
     }
@@ -2319,6 +2332,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       return;
     }
     var castUrl = stream.url;
+    // M4-1（安卓低风险确定项）：发起投屏前先暂停本地解码——中继（ffmpeg）
+    // 起解时 libmpv 不再同时解码同一路流，避免双解码叠加内存峰值。原实现是
+    // 投屏成功（面板 'started'）后才 pause，双解码窗口横跨整个中继启动期。
+    // 用户取消投屏时在 sheet 返回后恢复播放。
+    _engine.pause();
     // 中继起不来（典型：系统没有可执行的 ffmpeg）时不再把整条投屏路堵死，
     // 用户可在「直投原 URL」（M1-6 / AC-21）与「镜像屏幕」之间选择——
     // 镜像走 MediaProjection，不依赖 ffmpeg。
@@ -2338,6 +2356,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           audioUrl: playback.playback.audioUrl,
         );
         _relaySession = relay['session'] as String?;
+        _relayApi = api;
         // M0-5：跟随中继取流日志进诊断（探针在会话回收时自停）。
         final relaySession = _relaySession;
         if (relaySession != null) {
@@ -2408,6 +2427,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         referer: headerOf(m.headers, 'referer') ?? '',
       );
       _relaySession = relay['session'] as String?;
+      _relayApi = castScope.api;
       // M0-5：跟随中继取流日志进诊断（探针在会话回收时自停）。
       final relaySession = _relaySession;
       if (relaySession != null) {
@@ -2454,6 +2474,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             audioUrl: pb.playback.audioUrl,
           );
           _relaySession = relay['session'] as String?;
+          _relayApi = castScope.api;
           // M0-5：连播换集中继也跟随取流日志。
           final relaySession = _relaySession;
           if (relaySession != null) {
@@ -2475,6 +2496,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         viaRelay: nextViaRelay,
       );
     };
+    // 断开回本地时的行为设置：在 sheet 之前捕获（M4-1：await 之后不摸 context）。
+    final resumeLocal =
+        AppScope.read(context).settings.castDisconnectBehavior == 'resumeLocal';
     final result = await showCastSheet(
       context,
       media: media,
@@ -2484,6 +2508,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!mounted || result == null) {
       // 用户取消：中继会话留着会被空闲回收，但立即回收更干净。
       unawaited(_stopRelayIfAny());
+      // 发起前暂停了本地解码（M4-1）：取消投屏即恢复本地播放。
+      if (mounted) _engine.play();
       return;
     }
     if (result == 'started') {
@@ -2491,18 +2517,21 @@ class _PlayerScreenState extends State<PlayerScreen>
     } else if (result == 'disconnect') {
       final position = await castController.disconnect();
       await _stopRelayIfAny();
-      _resumeLocalAfterCast(position);
+      _resumeLocalAfterCast(position, resumeLocal: resumeLocal);
     }
   }
 
-  /// 回收中继会话（断开/远端停止/退出三条路径）。
+  /// 回收中继会话（断开/远端停止/取消/退出各路径）。
+  /// 不摸 context：调用点可能发生在 await 之后甚至页面已卸载（M4-1）。
   Future<void> _stopRelayIfAny() async {
     final session = _relaySession;
     _relaySession = null;
     CastRelayProbe.instance.unwatch();
-    if (session == null) return;
+    final api = _relayApi;
+    _relayApi = null;
+    if (session == null || api == null) return;
     try {
-      await AppScope.read(context).api.castRelayStop(session);
+      await api.castRelayStop(session);
     } catch (_) {}
   }
 

@@ -799,41 +799,72 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
             },
             child: const Text('导出到文件'),
           ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(dialogContext).pop();
+              _exportErrorLog();
+            },
+            child: const Text('导出运行日志'),
+          ),
         ],
       ),
     );
   }
 
   /// 导出诊断报告到应用支持目录（导出级脱敏，见 [CastDiagnostics.toRedactedReport]）。
-  Future<void> _exportDiagnosticsReport(String report) async {
+  Future<void> _exportDiagnosticsReport(String report) => _exportTextFile(
+        filePrefix: 'cast_diagnostics_',
+        content: report,
+        logSource: '投屏诊断导出',
+        successTitle: '已导出诊断报告',
+        failText: '诊断报告导出失败，请改用「复制诊断报告」',
+      );
+
+  /// 一键导出 Dart ErrorLog 全文（M4-2）：安卓闪退取证的配套入口——
+  /// 崩溃复现后先「导出运行日志」，再配合「导出到文件」的诊断报告一起回传，
+  /// 同时拿到 Dart 层异常记录与投屏协议轨迹。
+  Future<void> _exportErrorLog() => _exportTextFile(
+        filePrefix: 'app_log_',
+        content: ErrorLog.instance.text,
+        logSource: '运行日志导出',
+        successTitle: '已导出运行日志',
+        failText: '运行日志导出失败，请到「我的 → 关于」复制错误日志',
+      );
+
+  /// 把 [content] 写成应用支持目录里 `<filePrefix><日期时间>.txt` 并弹窗展示路径。
+  /// 导出失败不打断面板：原始异常只进 ErrorLog。
+  Future<void> _exportTextFile({
+    required String filePrefix,
+    required String content,
+    required String logSource,
+    required String successTitle,
+    required String failText,
+  }) async {
     String? path;
     try {
       final dir = await getApplicationSupportDirectory();
       final now = DateTime.now();
       String two(int v) => v.toString().padLeft(2, '0');
-      final name = 'cast_diagnostics_'
+      final name = '$filePrefix'
           '${now.year}${two(now.month)}${two(now.day)}'
           '-${two(now.hour)}${two(now.minute)}${two(now.second)}.txt';
       final file = File('${dir.path}${Platform.pathSeparator}$name');
-      await file.writeAsString(report, flush: true);
+      await file.writeAsString(content, flush: true);
       path = file.path;
     } catch (e, stack) {
-      // 导出失败不打断面板：原始异常只进 ErrorLog。
-      ErrorLog.instance.record('投屏诊断导出', e, stack);
+      ErrorLog.instance.record(logSource, e, stack);
     }
     if (!mounted) return;
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: Text(path == null ? '导出失败' : '已导出诊断报告'),
+        title: Text(path == null ? '导出失败' : successTitle),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              path == null
-                  ? '诊断报告导出失败，请改用「复制诊断报告」'
-                  : '文件位置：',
+              path == null ? failText : '文件位置：',
               style: Theme.of(dialogContext).textTheme.bodySmall,
             ),
             if (path != null) ...[

@@ -4,15 +4,24 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
+import 'package:meta/meta.dart';
 
 import '../error_log.dart';
 import 'cast_diagnostics.dart';
 import 'dlna_device.dart';
+import 'local_media_server.dart';
 
-/// SSDP 设备发现（UPnP 1.0）：M-SEARCH 三目标 × 4 轮 + NOTIFY 监听。
+/// SSDP 设备发现（UPnP 1.0）：M-SEARCH 多目标 × 4 轮 + NOTIFY 监听。
 ///
-/// 参数对齐 CineFlow cast.cjs（实测有效）：ST 三目标各一轮、1.5s 一轮共 4 轮、
+/// 参数对齐 CineFlow cast.cjs（实测有效）：1.5s 一轮共 4 轮、
 /// TTL 4、设备表 TTL 26s；`ssdp:byebye` 置离线；同一 LOCATION 只拉一次描述。
+///
+/// M8 加固（11-06/11-07）：M-SEARCH 带 USER-AGENT 三连 + ST 扩 AVTransport:1；
+/// 多网卡逐接口绑定发 M-SEARCH（Dart 无 IP_MULTICAST_IF，只能多 socket）；
+/// 描述拉取失败不永久拉黑（发现期预算：每 URL ≤2 次、全局 24 次，轮询结束
+/// 复位）；设备被移出（byebye/TTL/复检失败）时同步清理其 LOCATION 去重表——
+/// 复线设备的 alive NOTIFY 才能重新拉到描述；TTL 到期的设备先做描述 URL
+/// 轻量复检，连不上立即标记离线，连得上续期（File2TV forget_if_gone 思路）。
 const String multicastGroup = '239.255.255.250';
 const int multicastPort = 1900;
 const Duration deviceTtl = Duration(seconds: 26);
@@ -20,6 +29,12 @@ const int discoveryRounds = 4;
 const Duration roundInterval = Duration(milliseconds: 1500);
 const Duration descriptionTimeout = Duration(milliseconds: 1800);
 const int maxDescriptionBytes = 256 * 1024;
+
+/// 发现期描述拉取预算（hongguo 夹具口径）：同一 LOCATION 最多 2 次 GET、
+/// 单轮发现窗口全局最多 24 次；503/IO/坏 XML 换下一条 advertisement，
+/// 轮询结束（SsdpScanDone）后复位——NOTIFY 驱动的迟到设备不受影响。
+const int maxFetchAttemptsPerUrl = 2;
+const int maxFetchAttemptsTotal = 24;
 sealed class SsdpEvent {
   const SsdpEvent();
 }
@@ -55,6 +70,10 @@ class SsdpDiscovery {
 
   RawDatagramSocket? _socket;
 
+  /// 多网卡逐接口绑定的发送 socket（M8：Dart 无 IP_MULTICAST_IF，
+  /// 每个 IPv4 接口单独 bind + joinMulticast + 发 M-SEARCH）。
+  final List<RawDatagramSocket> _interfaceSockets = [];
+
   /// 实际绑定的本地端口（1900 或回退后的临时端口），诊断用。
   int _boundPort = 0;
   int get boundPort => _boundPort;
@@ -67,6 +86,14 @@ class SsdpDiscovery {
   /// LOCATION → 描述已请求（去重：同一 location 只拉一次）。
   final Set<String> _pendingLocations = {};
 
+  /// USN → LOCATION 映射（M8 复活路径）：设备被移出时按它清理
+  /// [_pendingLocations]，复线设备的 alive NOTIFY 才能重新拉描述。
+  final Map<String, String> _usnLocations = {};
+
+  /// 发现期描述拉取预算（M8）：LOCATION → 已发 GET 次数 + 全局计数。
+  final Map<String, int> _urlFetchAttempts = {};
+  int _totalFetchAttempts = 0;
+
   /// USN → 设备（含 TTL 时间戳）。
   final Map<String, _DeviceEntry> _devices = {};
 
@@ -75,14 +102,31 @@ class SsdpDiscovery {
     if (_scanning) return _events!.stream;
     _scanning = true;
     _pendingLocations.clear();
+    _usnLocations.clear();
+    _urlFetchAttempts.clear();
+    _totalFetchAttempts = 0;
     final events = _events = StreamController<SsdpEvent>.broadcast();
-    _bind().then((_) {
+    _bind().then((_) async {
+      // 多网卡逐接口绑定：失败不影响主 socket（默认路由接口已可用）。
+      await _bindInterfaces();
+      if (!_scanning) {
+        // 绑定期间 stop() 已执行：关掉刚绑定的接口 socket，不再创建定时器。
+        for (final socket in _interfaceSockets) {
+          socket.close();
+        }
+        _interfaceSockets.clear();
+        return;
+      }
       _sendAllTargets();
       _roundsLeft = discoveryRounds - 1;
       _roundTimer = Timer.periodic(roundInterval, (_) {
         if (_roundsLeft <= 0) {
           _roundTimer?.cancel();
           _roundTimer = null;
+          // 发现窗口结束：复位描述拉取预算——此后 NOTIFY 驱动的迟到设备
+          // 仍可拉描述；窗口内的预算防止 503/坏 XML 设备被反复打。
+          _urlFetchAttempts.clear();
+          _totalFetchAttempts = 0;
           // 轮询结束不代表发现结束（NOTIFY 仍监听）；只发一次扫描完成信号。
           events.add(const SsdpScanDone());
           return;
@@ -91,14 +135,7 @@ class SsdpDiscovery {
         _sendAllTargets();
       });
       _pruneTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-        final now = DateTime.now();
-        final expired = _devices.entries
-            .where((e) => now.difference(e.value.seenAt) > deviceTtl)
-            .toList();
-        for (final e in expired) {
-          _devices.remove(e.key);
-          events.add(SsdpDeviceOffline(e.value.device.udn));
-        }
+        _sweepExpired(events);
       });
     }).catchError((Object e, StackTrace stack) {
       // 组播绑定失败是非致命的：不再 addError 终止发现流（R4）。原始异常只进
@@ -120,8 +157,13 @@ class SsdpDiscovery {
     _pruneTimer = null;
     _socket?.close();
     _socket = null;
+    for (final socket in _interfaceSockets) {
+      socket.close();
+    }
+    _interfaceSockets.clear();
     _devices.clear();
     _pendingLocations.clear();
+    _usnLocations.clear();
     await _events?.close();
     _events = null;
   }
@@ -158,33 +200,118 @@ class SsdpDiscovery {
       if (event != RawSocketEvent.read) return;
       final datagram = socket.receive();
       if (datagram == null) return;
-      _handlePacket(utf8.decode(datagram.data, allowMalformed: true));
+      _handleDatagram(datagram);
     });
     _socket = socket;
     SsdpDiscovery.lastBoundPort = _boundPort;
   }
 
+  /// 多网卡逐接口绑定（M8）：File2TV/dlna-dart 实证——只绑 anyIPv4 时
+  /// M-SEARCH 只从默认路由接口出去，WSL/Hyper-V/多网卡场景必漏。
+  /// Dart `RawDatagramSocket` 没有 IP_MULTICAST_IF，只能对每个非回环、
+  /// 非虚拟的 IPv4 接口单独 bind + joinMulticast + 发送（多 socket）。
+  /// 绑定失败的接口静默跳过：主 socket 已覆盖默认路由。
+  Future<void> _bindInterfaces() async {
+    List<NetworkInterface> interfaces;
+    try {
+      interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLoopback: false,
+      );
+    } catch (_) {
+      return;
+    }
+    final candidates = multicastBindCandidates([
+      for (final interface in interfaces)
+        (interface.name, interface.addresses),
+    ]);
+    for (final (name, address) in candidates) {
+      RawDatagramSocket socket;
+      try {
+        socket = await RawDatagramSocket.bind(address, 0);
+      } catch (_) {
+        continue;
+      }
+      try {
+        NetworkInterface? iface;
+        for (final i in interfaces) {
+          if (i.name == name) iface = i;
+        }
+        if (iface != null) {
+          socket.joinMulticast(InternetAddress(multicastGroup), iface);
+        }
+      } catch (_) {
+        // 发送不依赖组成员资格；收不到该接口的 NOTIFY 靠主 socket 兜底。
+      }
+      socket.multicastLoopback = false;
+      socket.listen((event) {
+        if (event != RawSocketEvent.read) return;
+        final datagram = socket.receive();
+        if (datagram == null) return;
+        _handleDatagram(datagram);
+      });
+      _interfaceSockets.add(socket);
+    }
+  }
+
+  /// 多网卡绑定候选（M8 纯函数，表驱动单测）：非回环、非虚拟网卡
+  /// （`LocalMediaServer.isVirtualAdapterName`，M0.5 同款清单）的 IPv4 地址。
+  static List<(String, InternetAddress)> multicastBindCandidates(
+    List<(String name, List<InternetAddress> addresses)> interfaces,
+  ) {
+    final out = <(String, InternetAddress)>[];
+    for (final (name, addresses) in interfaces) {
+      if (LocalMediaServer.isVirtualAdapterName(name)) continue;
+      for (final address in addresses) {
+        if (address.type != InternetAddressType.IPv4) continue;
+        if (address.isLoopback) continue;
+        out.add((name, address));
+      }
+    }
+    return out;
+  }
+
   void _sendAllTargets() {
-    const targets = [
-      'urn:schemas-upnp-org:device:MediaRenderer:1',
-      'upnp:rootdevice',
-      'ssdp:all',
-    ];
-    for (final st in targets) {
+    for (final st in ssdpSearchTargets) {
       _sendPacket(buildSearchPacket(st));
     }
   }
 
   void _sendPacket(String packet) {
     final socket = _socket;
-    if (socket == null) return;
     final data = Uint8List.fromList(utf8.encode(packet));
-    try {
-      socket.send(data, InternetAddress(multicastGroup), multicastPort);
-    } catch (_) {
-      // 发送失败留给下一轮。
+    if (socket != null) {
+      try {
+        socket.send(data, InternetAddress(multicastGroup), multicastPort);
+      } catch (_) {
+        // 发送失败留给下一轮。
+      }
+    }
+    // 每个接口 socket 各发一份：非默认路由接口上的设备才收得到
+    // （主 socket 只从默认路由出）。默认路由接口会收到两份——设备重复
+    // 应答由 LOCATION/USN 去重吸收。
+    for (final ifaceSocket in _interfaceSockets) {
+      try {
+        ifaceSocket.send(data, InternetAddress(multicastGroup), multicastPort);
+      } catch (_) {
+        // 发送失败留给下一轮。
+      }
     }
   }
+
+  /// 收包入口：回环源不计入设备列表（见 [isIgnoredSource]）。
+  void _handleDatagram(Datagram datagram) {
+    if (isIgnoredSource(datagram.address)) return;
+    _handlePacket(utf8.decode(datagram.data, allowMalformed: true));
+  }
+
+  /// 源地址过滤（M8 纯函数）：只过滤回环（127.0.0.0/8）。
+  ///
+  /// 刻意**不过滤**非回环的本机地址：同机接收端（AirPin / WMP 系接收软件、
+  /// 本机 windows-dlna-receiver 集成测试 DMR）的 NOTIFY 源地址就是本机地址，
+  /// 按本机地址过滤会把它们从设备列表里抹掉——这是可用设备，不是自环噪声。
+  /// 我们自己发出的 M-SEARCH（multicastLoopback=false）本来就不会回环。
+  static bool isIgnoredSource(InternetAddress address) => address.isLoopback;
 
   void _handlePacket(String text) {
     final headers = parseSsdpHeaders(text);
@@ -197,6 +324,9 @@ class SsdpDiscovery {
 
     if (nts != null && nts.toLowerCase() == 'ssdp:byebye') {
       final entry = _devices.remove(usn);
+      // M8 复活路径：同步清理该 USN 的 LOCATION 去重，复线的 alive NOTIFY
+      // 才能重新拉描述（否则 location 永留 pending，设备再也回不来）。
+      _forgetUsn(usn);
       if (entry != null) {
         _events?.add(SsdpDeviceOffline(entry.device.udn));
       }
@@ -209,16 +339,38 @@ class SsdpDiscovery {
       if (!existing.device.online) existing.device.online = true;
       return;
     }
+    // M8 发现期预算：503/IO/坏 XML 的设备换下一条 advertisement，
+    // 不在同一个 URL 上反复烧 GET（轮询结束后预算复位）。
+    if ((_urlFetchAttempts[location] ?? 0) >= maxFetchAttemptsPerUrl ||
+        _totalFetchAttempts >= maxFetchAttemptsTotal) {
+      return;
+    }
     if (!_pendingLocations.add(location)) return;
     _fetchDescription(location, usn);
   }
 
+  /// 设备移出（byebye/TTL/复检失败）：清理 USN→LOCATION 与该 URL 的
+  /// 拉取计数，让设备复线时能走完整的「拉描述 → 入表」流程。
+  void _forgetUsn(String usn) {
+    final location = _usnLocations.remove(usn);
+    if (location != null) {
+      _pendingLocations.remove(location);
+      _urlFetchAttempts.remove(location);
+    }
+  }
+
   Future<void> _fetchDescription(String location, String usn) async {
+    _urlFetchAttempts[location] = (_urlFetchAttempts[location] ?? 0) + 1;
+    _totalFetchAttempts += 1;
+    // 单次使用的 fetcher 用完即关：http.Client 的 keep-alive 连接若不关闭
+    // 会以空闲 socket 形式积压（addByIp 的共享 fetcher 仍由其 finally 关闭）。
+    final fetcher = _clientFactory();
     try {
-      final body = await _clientFactory().fetchDescription(location);
+      final body = await fetcher.fetchDescription(location);
       final device = parseDeviceDescription(body, location);
       if (device == null) return; // 无 AVTransport：不是投屏目标。
       _traceDeviceSummary(device);
+      _usnLocations[usn] = location;
       _devices[usn] = _DeviceEntry(device: device, seenAt: DateTime.now());
       _events?.add(SsdpDeviceFound(device));
     } catch (_) {
@@ -228,7 +380,51 @@ class SsdpDiscovery {
       if (!_devices.containsKey(usn)) {
         _pendingLocations.remove(location);
       }
+      if (fetcher is _HttpClientFetcher) fetcher.close();
     }
+  }
+
+  /// TTL 清理（5s 周期）。M8 设备保鲜：到期的设备不再立即判离线，而是先
+  /// 对其描述 URL 做一次轻量复检（File2TV forget_if_gone 思路）——
+  /// 连得上说明设备还活着（只是不发 NOTIFY），刷新在席时间保留；
+  /// 连不上立即移除并标记离线，同时走复活路径清理，复线即刻可再入表。
+  void _sweepExpired(StreamController<SsdpEvent> events) {
+    final now = DateTime.now();
+    final expired = _devices.entries
+        .where((e) =>
+            now.difference(e.value.seenAt) > deviceTtl && !e.value.rechecking)
+        .toList();
+    for (final e in expired) {
+      e.value.rechecking = true;
+      unawaited(_recheckDevice(e.key, e.value, events));
+    }
+  }
+
+  Future<void> _recheckDevice(
+    String usn,
+    _DeviceEntry entry,
+    StreamController<SsdpEvent> events,
+  ) async {
+    final location = _usnLocations[usn] ?? entry.device.location;
+    var alive = false;
+    final fetcher = _clientFactory();
+    try {
+      await fetcher.fetchDescription(location);
+      alive = true;
+    } catch (_) {
+      alive = false;
+    } finally {
+      if (fetcher is _HttpClientFetcher) fetcher.close();
+    }
+    entry.rechecking = false;
+    if (_devices[usn] != entry) return; // 复检期间已被 byebye/stop 移除。
+    if (alive) {
+      entry.seenAt = DateTime.now(); // 设备仍在：续期，不产生离线事件。
+      return;
+    }
+    _devices.remove(usn);
+    _forgetUsn(usn);
+    events.add(SsdpDeviceOffline(entry.device.udn));
   }
 
   /// 常见 DLNA / 私有接收端描述端口（projection 路线）。
@@ -292,6 +488,7 @@ class SsdpDiscovery {
             if (device != null && found == null) {
               _traceDeviceSummary(device);
               found = device;
+              _usnLocations[device.udn] = location;
               _devices[device.udn] =
                   _DeviceEntry(device: device, seenAt: DateTime.now());
               _events?.add(SsdpDeviceFound(device));
@@ -323,6 +520,37 @@ class SsdpDiscovery {
   List<DlnaDevice> get devices =>
       _devices.values.map((e) => e.device).toList();
 
+  // ---------------------------------------------------------------------------
+  // 单测钩子（@visibleForTesting）：SSDP 状态机由 UDP 收包与定时器驱动，
+  // 直接打真实组播无法断言；用钩子注入报文/推进时间。
+  // ---------------------------------------------------------------------------
+
+  /// 注入一条 SSDP 报文（M-SEARCH 应答 / NOTIFY），[source] 模拟来源地址
+  /// （回环过滤断言用，与 [_handleDatagram] 同一判定），缺省视为普通局域网地址。
+  @visibleForTesting
+  void handlePacketForTest(String text, {InternetAddress? source}) {
+    if (source != null && isIgnoredSource(source)) return;
+    _handlePacket(text);
+  }
+
+  /// 立即执行一次 TTL 清理/复检 sweep（不等 5s 定时器）。
+  @visibleForTesting
+  void sweepForTest() {
+    final events = _events;
+    if (events == null) return;
+    _sweepExpired(events);
+  }
+
+  /// 把指定 UDN 的最后在席时间回拨到 TTL 之外（配合 [sweepForTest]）。
+  @visibleForTesting
+  void expireDeviceForTest(String udn) {
+    for (final e in _devices.values) {
+      if (e.device.udn == udn) {
+        e.seenAt = DateTime.now().subtract(deviceTtl * 2);
+      }
+    }
+  }
+
   /// 设备描述摘要埋点（M0 纯采集；关键字段一行一条，不含完整 XML）。
   static void _traceDeviceSummary(DlnaDevice d) {
     CastDiagnostics.instance.recordDeviceSummary(
@@ -336,6 +564,9 @@ class _DeviceEntry {
   _DeviceEntry({required this.device, required this.seenAt});
   final DlnaDevice device;
   DateTime seenAt;
+
+  /// TTL 到期后的描述 URL 复检进行中（防止 5s sweep 堆积重复请求）。
+  bool rechecking = false;
 }
 
 typedef DescriptionFetcherFactory = DescriptionFetcher Function();
@@ -366,15 +597,34 @@ class _HttpClientFetcher implements DescriptionFetcher {
 
 DescriptionFetcher _defaultFactory() => _HttpClientFetcher();
 
-/// 构造 M-SEARCH 报文（CineFlow 同款格式）。
+/// 构造 M-SEARCH 报文（CineFlow 同款格式 + UA 头）。
+///
+/// USER-AGENT / HX-USER-AGENT / X-USER-AGENT（MRDLNA 实证）：部分接收端
+/// （尤其国产电视/盒子）对不带 UA 的控制点直接不应答，带 UA 更稳；
+/// 版本号仅作产品标识，不要求与 pubspec 严格同步。
 String buildSearchPacket(String st) {
   return 'M-SEARCH * HTTP/1.1\r\n'
       'HOST: $multicastGroup:$multicastPort\r\n'
       'MAN: "ssdp:discover"\r\n'
       'MX: 2\r\n'
       'ST: $st\r\n'
+      'USER-AGENT: $ssdpUserAgent\r\n'
+      'HX-USER-AGENT: $ssdpUserAgent\r\n'
+      'X-USER-AGENT: $ssdpUserAgent\r\n'
       '\r\n';
 }
+
+/// M-SEARCH 的 USER-AGENT 值（三处 UA 头共用）。
+const String ssdpUserAgent = 'aquan-duanju/1.6 UPnP/1.1';
+
+/// M-SEARCH 的 ST 目标集合（M8 加固：在 MediaRenderer/rootdevice/ssdp:all
+/// 基础上追加 AVTransport:1——部分设备只应答服务类型检索，不删既有项）。
+const List<String> ssdpSearchTargets = <String>[
+  'urn:schemas-upnp-org:device:MediaRenderer:1',
+  'upnp:rootdevice',
+  'ssdp:all',
+  'urn:schemas-upnp-org:service:AVTransport:1',
+];
 
 /// 解析 SSDP 响应/NOTIFY 头（键大小写不敏感，保留原样大写键）；
 /// 非 SSDP 报文（无 HTTP 头）返回 null。

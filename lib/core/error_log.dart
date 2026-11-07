@@ -124,6 +124,27 @@ class ErrorLog extends ChangeNotifier {
     }
   }
 
+  /// 一键导出（M4-2）：把本次运行的 ErrorLog 全文写到应用支持目录的
+  /// `app_log_<日期时间>.txt`，返回绝对路径；失败返回空串。
+  ///
+  /// 与逐条追加的 `error_log.txt` 不同，导出文件是带时间戳的快照，
+  /// 便于多次复现/反馈时一一对应；内容与 [text] 一致（入库前已脱敏）。
+  Future<String> exportToFile() async {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final now = DateTime.now();
+      String two(int v) => v.toString().padLeft(2, '0');
+      final name = 'app_log_'
+          '${now.year}${two(now.month)}${two(now.day)}'
+          '-${two(now.hour)}${two(now.minute)}${two(now.second)}.txt';
+      final file = File('${dir.path}${Platform.pathSeparator}$name');
+      await file.writeAsString(text, flush: true);
+      return file.path;
+    } catch (_) {
+      return '';
+    }
+  }
+
   void clear() {
     if (_entries.isEmpty) return;
     _entries.clear();

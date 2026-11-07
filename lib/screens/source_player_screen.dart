@@ -807,8 +807,18 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   Future<void> _openCastSheet() async {
     final ep = _episode;
     final scope = AppScope.read(context);
+    // M4-1（安卓低风险确定项）：发起投屏前先暂停本地解码——resolvePlay 源
+    // 在下方就会 castRelayStart（ffmpeg 起解），libmpv 不再同时解码同一路流，
+    // 避免双解码叠加内存峰值。原实现是投屏成功（面板 'started'）后才 pause。
+    // 解析失败或用户取消投屏时在下方恢复播放。
+    _engine.pause();
     final media = await _resolveCastMedia(ep, _index, scope);
     if (media == null || !mounted) {
+      if (mounted && media == null) {
+        // 没有进入投屏面板：恢复发起前暂停的本地播放（M4-1）。
+        await _engine.play();
+        if (mounted) setState(() {});
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text('该集没有可投屏的流（解析或中继失败）'),
@@ -853,7 +863,14 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
       media: media,
       onLocalPause: () => _engine.pause(),
     );
-    if (!mounted || result == null) return;
+    if (!mounted || result == null) {
+      // 发起前暂停了本地解码（M4-1）：取消投屏即恢复本地播放。
+      if (mounted && result == null) {
+        await _engine.play();
+        if (mounted) setState(() {});
+      }
+      return;
+    }
     if (result == 'disconnect') {
       final position = await castController.disconnect();
       _stopCastRelay();

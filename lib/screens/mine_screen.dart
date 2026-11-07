@@ -2196,6 +2196,19 @@ class _AboutPanelState extends State<AboutPanel> {
               },
             ),
             IconButton(
+              tooltip: '导出运行日志',
+              icon: const Icon(Icons.save_alt, size: 20),
+              onPressed: () async {
+                // M4-2：一键导出 ErrorLog 全文快照（app_log_<时间戳>.txt）。
+                final path = await ErrorLog.instance.exportToFile();
+                if (!dialogContext.mounted) return;
+                ScaffoldMessenger.of(dialogContext).showSnackBar(SnackBar(
+                  content: Text(path.isEmpty ? '导出失败' : '已导出运行日志：$path'),
+                  duration: const Duration(seconds: 4),
+                ));
+              },
+            ),
+            IconButton(
               tooltip: '清空',
               icon: const Icon(Icons.delete_outline, size: 20),
               onPressed: ErrorLog.instance.clear,
