@@ -246,6 +246,17 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
             content: Text('已自动恢复投屏'),
             duration: Duration(milliseconds: 800)));
     };
+    // 投屏连接断开（11-07-cast-reliability R1）：电视不可达（复检失败/恢复
+    // 失败）时会话静默结束，这里给用户一个明确提示（与 onAutoReconnected
+    // 同一注入模式；固定文案，原始异常只进诊断日志）。
+    castController.onSessionLost = (device) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+            content: Text('投屏连接已断开'),
+            duration: Duration(milliseconds: 800)));
+    };
     _open();
     _historyTimer = Timer.periodic(
         const Duration(seconds: 5), (_) => _recordHistory(finished: false));
@@ -255,6 +266,7 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   void dispose() {
     castController.onRemoteStopped = null;
     castController.onAutoReconnected = null;
+    castController.onSessionLost = null;
     _recordHistory(finished: false);
     _stopCastRelay();
     unawaited(_releaseProxy());

@@ -1010,6 +1010,30 @@ abstract class _JsonFileStore extends ChangeNotifier {
     return task;
   }
 
+  /// 读改写一体串行（R3，11-07-cast-reliability）：把「读现有键 → [update]
+  /// 合并 → 原子写」整体放进 [_writeQueue] 执行。此前只有写入本身入队，
+  /// 读在队列外——并发混合写（轮询进度落盘 × 面板改配方/画像/接收端 UDN
+  /// 等）时各写者的 `existing` 都是旧磁盘快照，后落盘者会把中间写入的键
+  /// 抹掉（真实丢键，cast_store_concurrency_test 复现）。读入队后，顺序
+  /// 行为与旧版逐字节一致，并发不再丢键。[update] 在任务执行时调用，
+  /// 读到的内存状态也是最新值；返回 null = 无变化不写盘（保持旧语义）。
+  Future<void> _updateJson(
+    Map<String, dynamic>? Function(Map<String, dynamic> existing) update,
+  ) {
+    final task = _writeQueue.then((_) async {
+      final existing = await _readJson();
+      final next = update(existing);
+      if (next == null) return;
+      final encoded = jsonEncode(next);
+      final f = await _fileFuture;
+      final tmp = File('${f.path}.tmp');
+      await tmp.writeAsString(encoded, flush: true);
+      await tmp.rename(f.path);
+    });
+    _writeQueue = task.catchError((_) {});
+    return task;
+  }
+
   Future<void>? _loadingFuture;
 
   Future<void> ensureLoaded() {
@@ -3758,23 +3782,27 @@ class CastStore extends _JsonFileStore implements CastSessionRecorder {
   Future<void> clearLastSession() async {
     _lastSession = null;
     _lastPositionWriteAt = null;
-    final existing = await _readJson();
-    if (!existing.containsKey('lastSession')) return;
-    final next = <String, dynamic>{...existing, 'version': formatVersion};
-    next.remove('lastSession');
-    await _writeJson(next);
+    var removed = false;
+    await _updateJson((existing) {
+      if (!existing.containsKey('lastSession')) return null;
+      removed = true;
+      final next = <String, dynamic>{...existing, 'version': formatVersion};
+      next.remove('lastSession');
+      return next;
+    });
+    if (!removed) return;
     notifyListeners();
   }
 
   /// 只更新 `lastSession` 字段：保留文件里的其它键（含未知字段），
-  /// 不触碰设备记忆，也不要求先 `loadFromDisk()`。
+  /// 不触碰设备记忆，也不要求先 `loadFromDisk()`。读改写整体入队
+  ///（[_updateJson]，R3 并发回归锁）。
   Future<void> _persistLastSession() async {
-    final existing = await _readJson();
-    await _writeJson(<String, dynamic>{
-      ...existing,
-      'version': formatVersion,
-      'lastSession': _lastSession?.toJson(),
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          ...existing,
+          'version': formatVersion,
+          'lastSession': _lastSession?.toJson(),
+        });
     notifyListeners();
   }
 
@@ -3811,13 +3839,13 @@ class CastStore extends _JsonFileStore implements CastSessionRecorder {
   }
 
   /// 只更新 `receiverUdn` 字段：保留文件里的其它键，不触碰设备记忆。
+  /// 读改写整体入队（[_updateJson]，R3 并发回归锁）。
   Future<void> _persistReceiverUdn() async {
-    final existing = await _readJson();
-    await _writeJson(<String, dynamic>{
-      ...existing,
-      'version': formatVersion,
-      'receiverUdn': _receiverUdn,
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          ...existing,
+          'version': formatVersion,
+          'receiverUdn': _receiverUdn,
+        });
     notifyListeners();
   }
 
@@ -3846,41 +3874,43 @@ class CastStore extends _JsonFileStore implements CastSessionRecorder {
 
   /// 只更新 `recipes` 字段：保留文件里的其它键（含未知字段），
   /// 不触碰设备记忆，也不要求先 `loadFromDisk()`。
+  /// 读改写整体入队（[_updateJson]，R3 并发回归锁）。
   Future<void> _persistRecipes() async {
-    final existing = await _readJson();
-    await _writeJson(<String, dynamic>{
-      ...existing,
-      'version': formatVersion,
-      'recipes': _recipes.toJson(),
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          ...existing,
+          'version': formatVersion,
+          'recipes': _recipes.toJson(),
+        });
     notifyListeners();
   }
 
   /// 只更新 `profiles` 字段（投屏成功后画像同步落盘，与配方写入互不覆盖）。
+  /// 读改写整体入队（[_updateJson]，R3 并发回归锁）。
   Future<void> _persistProfiles() async {
-    final existing = await _readJson();
-    await _writeJson(<String, dynamic>{
-      ...existing,
-      'version': formatVersion,
-      'profiles': _profiles.toJson(),
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          ...existing,
+          'version': formatVersion,
+          'profiles': _profiles.toJson(),
+        });
     notifyListeners();
   }
 
   /// v4 写入：`...existing` 保留未知字段与旧备份带回来的键；
   /// 版本号升到 4，v1/v2/v3 读侧完全兼容。
+  /// 读改写整体入队（[_updateJson]，R3 并发回归锁）。
   Future<void> _flush() async {
-    final existing = await _readJson();
-    final next = <String, dynamic>{...existing, 'version': formatVersion};
-    if (_lastDevice != null) {
-      next['lastDevice'] = _lastDevice!.toPersistJson();
-    } else {
-      next.remove('lastDevice');
-    }
-    next['pinned'] = [for (final d in _pinned) d.toPersistJson()];
-    next['recipes'] = _recipes.toJson();
-    next['profiles'] = _profiles.toJson();
-    await _writeJson(next);
+    await _updateJson((existing) {
+      final next = <String, dynamic>{...existing, 'version': formatVersion};
+      if (_lastDevice != null) {
+        next['lastDevice'] = _lastDevice!.toPersistJson();
+      } else {
+        next.remove('lastDevice');
+      }
+      next['pinned'] = [for (final d in _pinned) d.toPersistJson()];
+      next['recipes'] = _recipes.toJson();
+      next['profiles'] = _profiles.toJson();
+      return next;
+    });
     notifyListeners();
   }
 

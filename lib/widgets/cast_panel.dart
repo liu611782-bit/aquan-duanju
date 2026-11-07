@@ -291,6 +291,14 @@ Future<String?> showCastSheet(
   return result;
 }
 
+/// 测试注入点（R2，11-07-cast-reliability）：`_CastSessionSheet` 是库私有
+/// 类，widget 测试经此构造并注入 [controller]（真 CastController + 假
+/// transport 工厂）。生产路径 [showCastSheet] 不经过这里（scope 必传、
+/// controller 用全局单例），行为不变。
+@visibleForTesting
+Widget castSessionSheetForTest({CastController? controller}) =>
+    _CastSessionSheet(controller: controller);
+
 /// 设备选择抽屉。
 class _CastDeviceSheet extends StatefulWidget {
   const _CastDeviceSheet({
@@ -1318,15 +1326,24 @@ CastRecipe? _lookupRecipe(AppScope scope, CastTarget? target) {
 /// 投屏会话抽屉：设备名 + 取流指示 + 状态徽标 + 进度条 + 上下集 +
 /// 播放/暂停/静音/断开。
 class _CastSessionSheet extends StatefulWidget {
-  const _CastSessionSheet({required this.scope});
+  const _CastSessionSheet({this.scope, this.controller});
 
-  final AppScope scope;
+  /// 测试注入点（R2）：注入 [CastController] 时抽屉读写该实例；null（生产
+  /// 路径 [showCastSheet]）用全局 [castController]，行为不变。
+  final CastController? controller;
+
+  /// 会话抽屉内仅「取流指示 → 诊断弹窗」一处使用；测试构造（见
+  /// [castSessionSheetForTest]）不给 scope，该行点击置灰即可。
+  final AppScope? scope;
 
   @override
   State<_CastSessionSheet> createState() => _CastSessionSheetState();
 }
 
 class _CastSessionSheetState extends State<_CastSessionSheet> {
+  /// 控制器取用：测试注入优先，回退全局单例（生产路径不变）。
+  CastController get _cast => widget.controller ?? castController;
+
   bool _muted = false;
   // 远端音量乐观维护（各厂商 GetVolume 差异大，不做轮询对齐）。
   double _volume = 0.5;
@@ -1366,21 +1383,21 @@ class _CastSessionSheetState extends State<_CastSessionSheet> {
   Future<void> _seekTo(double seconds) async {
     final target = Duration(milliseconds: (seconds * 1000).round());
     try {
-      await castController.seekTo(target);
+      await _cast.seekTo(target);
     } catch (e, stack) {
       ErrorLog.instance.record('投屏拖动进度', e, stack);
-      unawaited(castController.forceRefresh());
+      unawaited(_cast.forceRefresh());
       _toast('该设备不支持拖动进度');
     }
   }
 
   Future<void> _nextEpisode() async {
-    final ok = await castController.advanceNextEpisode();
+    final ok = await _cast.advanceNextEpisode();
     if (!ok && mounted) _toast('下一集不可用');
   }
 
   Future<void> _prevEpisode() async {
-    final ok = await castController.jumpEpisode(-1);
+    final ok = await _cast.jumpEpisode(-1);
     if (!ok && mounted) _toast('上一集不可用');
   }
 
@@ -1389,20 +1406,20 @@ class _CastSessionSheetState extends State<_CastSessionSheet> {
     final theme = Theme.of(context);
     return SafeArea(
       child: ListenableBuilder(
-        listenable: castController,
+        listenable: _cast,
         builder: (context, _) {
-          final device = castController.currentDevice;
-          final media = castController.currentMedia;
-          final duration = castController.remoteDuration;
+          final device = _cast.currentDevice;
+          final media = _cast.currentMedia;
+          final duration = _cast.remoteDuration;
           final hasDuration = duration > Duration.zero;
           final maxSeconds = duration.inMilliseconds / 1000.0;
           final double? dragSeconds = _scrubbing ? _dragValue : null;
-          final remotePosition = castController.remotePosition;
+          final remotePosition = _cast.remotePosition;
           final shownPosition = dragSeconds != null
               ? Duration(milliseconds: (dragSeconds * 1000).round())
               : remotePosition;
           // 状态徽标（TRANSITIONING 消抖：窗口内维持上一状态显示）。
-          final rawState = castController.remoteTransportState;
+          final rawState = _cast.remoteTransportState;
           final hold = _transitionDebounce.shouldHold(rawState);
           final status =
               hold ? _displayedStatus : castTransportStateLabel(rawState);
@@ -1448,12 +1465,14 @@ class _CastSessionSheetState extends State<_CastSessionSheet> {
                       title: Text(fetchLine, style: theme.textTheme.bodySmall),
                       trailing: Icon(Icons.chevron_right,
                           size: 16, color: theme.colorScheme.outline),
-                      onTap: () => showCastDiagnostics(
-                        context,
-                        scope: widget.scope,
-                        device: device,
-                        stage: '投屏中',
-                      ),
+                      onTap: widget.scope == null
+                          ? null
+                          : () => showCastDiagnostics(
+                                context,
+                                scope: widget.scope!,
+                                device: device,
+                                stage: '投屏中',
+                              ),
                     ),
                   // 进度条：仅当远端回报真实时长时显示（直播/未知时长只留文本）。
                   if (hasDuration)
@@ -1486,13 +1505,13 @@ class _CastSessionSheetState extends State<_CastSessionSheet> {
                   Row(
                     children: [
                       OutlinedButton.icon(
-                        onPressed: () => castController.resume(),
+                        onPressed: () => _cast.resume(),
                         icon: const Icon(Icons.play_arrow),
                         label: const Text('播放'),
                       ),
                       const SizedBox(width: 8),
                       OutlinedButton.icon(
-                        onPressed: () => castController.pause(),
+                        onPressed: () => _cast.pause(),
                         icon: const Icon(Icons.pause),
                         label: const Text('暂停'),
                       ),
@@ -1501,7 +1520,7 @@ class _CastSessionSheetState extends State<_CastSessionSheet> {
                         onPressed: () {
                           // 静音状态本地乐观维护（RCS GetMute 各厂商差异大，不做轮询对齐）。
                           final next = !_muted;
-                          castController.setMute(next).then((_) {
+                          _cast.setMute(next).then((_) {
                             if (mounted) setState(() => _muted = next);
                           }).catchError((_) {});
                         },
@@ -1522,7 +1541,7 @@ class _CastSessionSheetState extends State<_CastSessionSheet> {
                   Row(
                     children: [
                       OutlinedButton.icon(
-                        onPressed: castController.onEpisodeJump == null
+                        onPressed: _cast.onEpisodeJump == null
                             ? null
                             : _prevEpisode,
                         icon: const Icon(Icons.skip_previous),
@@ -1530,7 +1549,7 @@ class _CastSessionSheetState extends State<_CastSessionSheet> {
                       ),
                       const SizedBox(width: 8),
                       OutlinedButton.icon(
-                        onPressed: castController.onNextEpisode == null
+                        onPressed: _cast.onNextEpisode == null
                             ? null
                             : _nextEpisode,
                         icon: const Icon(Icons.skip_next),
@@ -1548,7 +1567,7 @@ class _CastSessionSheetState extends State<_CastSessionSheet> {
                           value: _volume,
                           onChanged: (v) {
                             setState(() => _volume = v);
-                            castController
+                            _cast
                                 .setVolume((v * 100).round())
                                 .catchError((_) {});
                           },

@@ -292,6 +292,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (!mounted) return;
       _showToast('已自动恢复投屏');
     };
+    // 投屏连接断开（11-07-cast-reliability R1）：电视不可达（复检失败/恢复
+    // 失败）时会话静默结束，这里给用户一个明确提示（与 onAutoReconnected
+    // 同一注入模式；固定文案，原始异常只进诊断日志）。
+    castController.onSessionLost = (device) {
+      if (!mounted) return;
+      _showToast('投屏连接已断开');
+    };
     unawaited(_installMpvOptions());
     _playSkip = AppScope.read(context).playSkip.entryFor(widget.series.id);
     // 恢复上次音量；滑块状态由 stream.volume 双向同步（滚轮/快捷键改也跟得上）。
@@ -472,6 +479,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       castController.onRemoteStopped = null;
     }
     castController.onAutoReconnected = null;
+    castController.onSessionLost = null;
     unawaited(_stopRelayIfAny());
     PlayerBus.instance.detach(this);
     // 记住本次音量，下次启动恢复。
