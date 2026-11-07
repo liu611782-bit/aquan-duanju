@@ -74,21 +74,22 @@ void main() {
     });
   });
 
-  group('sec:SubtitleUri（DIDL 字幕投送）', () {
+  group('字幕标签（DIDL 字幕投送；M2 v2 三件套）', () {
     test('subtitleUrl 非空时 DIDL 含 sec 扩展与地址', () {
       final didl = buildDidlLite(
         title: '第1集',
         subtitleUrl: Uri.parse('http://192.168.1.5:18280/p/sub1'),
       );
       expect(didl.contains('xmlns:sec="http://www.sec.co.kr/"'), isTrue);
-      expect(didl.contains('<sec:SubtitleUri>http://192.168.1.5:18280/p/sub1</sec:SubtitleUri>'),
+      expect(didl.contains(
+          '<sec:CaptionInfoEx sec:type="srt">http://192.168.1.5:18280/p/sub1</sec:CaptionInfoEx>'),
           isTrue);
       expect(didl.contains('<dc:title>第1集</dc:title>'), isTrue);
     });
 
     test('subtitleUrl 为空时不带 sec 节点', () {
       final didl = buildDidlLite(title: '第1集');
-      expect(didl.contains('sec:SubtitleUri'), isFalse);
+      expect(didl.contains('sec:'), isFalse);
     });
   });
 }

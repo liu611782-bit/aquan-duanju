@@ -179,9 +179,9 @@ void main() {
       if (body.contains('SetAVTransportURI')) setUriCount++;
       req.response.headers.contentType =
           ContentType('text', 'xml', charset: 'utf-8');
-      // SoapClient 对 fault 自带一次重试：前两次都回 fault，
-      // 才会穿透到 DlnaTransport 的「去 metadata 重试」层。
-      if (setUriCount <= 2) {
+      // AC-26 重试收窄后 SoapClient 对确定性 fault 不再重试：第一次 fault
+      // 即穿透到 DlnaTransport 的「去 metadata 重试」层。
+      if (setUriCount == 1) {
         req.response.statusCode = 500;
         req.response.write(
             '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
@@ -204,10 +204,9 @@ void main() {
       ),
       client: SoapClient(timeout: const Duration(seconds: 2)),
     );
-    // SoapClient 对 fault 会重试一次 → 总共 4 次 SetAVTransportURI（2 故障 + 2 成功）。
+    // SoapClient 不重试 fault（AC-26）→ 共 2 次 SetAVTransportURI（1 故障 + 1 空 metadata 重试）。
     await transport.setUri(Uri.parse('http://x/1.mp4'), title: 't');
-    expect(setUriCount, greaterThanOrEqualTo(3),
-        reason: 'fault 后应触发无 metadata 重试');
+    expect(setUriCount, 2, reason: 'fault 后应触发无 metadata 重试（恰一次）');
     final last = bodies.last;
     expect(last.contains('<CurrentURIMetaData></CurrentURIMetaData>'), isTrue,
         reason: '重试时 metadata 为空串');

@@ -39,6 +39,8 @@ void main() {
       expect(device!.friendlyName, '客厅电视');
       expect(device.modelName, 'MI TV 3');
       expect(device.udn, 'uuid:abcd-1234');
+      expect(device.serviceType, 'urn:schemas-upnp-org:service:AVTransport:1',
+          reason: 'M2-1：AVTransport 真实 serviceType 保留原始串');
       expect(device.controlUrl, 'http://192.168.1.23:49152/dev/abcd-1234/ctrl/AVT');
       expect(device.renderingControlUrl,
           'http://192.168.1.23:49152/dev/abcd-1234/ctrl/RCS');
@@ -64,8 +66,99 @@ void main() {
     });
   });
 
+  group('M2-1 真实 serviceType', () {
+    const multiVersion = '''
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <device>
+    <friendlyName>多版本</friendlyName>
+    <UDN>uuid:multi-ver</UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+        <controlURL>/avt1/control</controlURL>
+      </service>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:3</serviceType>
+        <controlURL>/avt3/control</controlURL>
+      </service>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:2</serviceType>
+        <controlURL>/avt2/control</controlURL>
+      </service>
+    </serviceList>
+  </device>
+</root>''';
+
+    test('设备宣告多版本 AVTransport（:1/:2/:3）→ 取最高（castor family.go）',
+        () {
+      final device =
+          parseDeviceDescription(multiVersion, 'http://192.168.1.9/desc.xml');
+      expect(device!.serviceType, 'urn:schemas-upnp-org:service:AVTransport:3',
+          reason: 'many implement :3, not just :1');
+      expect(device.controlUrl, 'http://192.168.1.9/avt1/control',
+          reason: 'controlURL 仍取第一个宣告（行为不变）');
+    });
+
+    test('单一高版本原样保留', () {
+      const v2 = '''
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <device>
+    <friendlyName>v2</friendlyName>
+    <UDN>uuid:v2</UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:2</serviceType>
+        <controlURL>/avt/control</controlURL>
+      </service>
+    </serviceList>
+  </device>
+</root>''';
+      final device = parseDeviceDescription(v2, 'http://192.168.1.9/desc.xml');
+      expect(device!.serviceType, 'urn:schemas-upnp-org:service:AVTransport:2');
+    });
+
+    test('bestAvtServiceType：空集回落默认；非标形状原样保留；标准形状优先',
+        () {
+      expect(bestAvtServiceType(const <String>[]), kDefaultAvtServiceType);
+      expect(
+        bestAvtServiceType(['urn:schemas-upnp-org:service:AVTransport:2']),
+        'urn:schemas-upnp-org:service:AVTransport:2',
+      );
+      expect(bestAvtServiceType(['urn:vendor:AVTransport:custom']),
+          'urn:vendor:AVTransport:custom');
+      expect(
+        bestAvtServiceType([
+          'urn:vendor:AVTransport:custom',
+          'urn:schemas-upnp-org:service:AVTransport:1',
+        ]),
+        'urn:schemas-upnp-org:service:AVTransport:1',
+      );
+    });
+
+    test('持久化：service_type 往返；旧 JSON 缺字段回落默认 URN', () {
+      final device = DlnaDevice(
+        udn: 'uuid:st',
+        friendlyName: 'x',
+        serviceType: 'urn:schemas-upnp-org:service:AVTransport:2',
+        controlUrl: 'http://192.168.1.9/ctrl',
+      );
+      final json = device.toPersistJson();
+      expect(json['service_type'], 'urn:schemas-upnp-org:service:AVTransport:2');
+      expect(DlnaDevice.fromPersistJson(json).serviceType,
+          'urn:schemas-upnp-org:service:AVTransport:2');
+
+      final old = DlnaDevice.fromPersistJson(<String, dynamic>{
+        'udn': 'uuid:old',
+        'name': '旧电视',
+        'control_url': 'http://192.168.1.9/ctrl',
+      });
+      expect(old.serviceType, kDefaultAvtServiceType,
+          reason: 'v1/v2 持久化无 service_type → 缺省 AVTransport:1');
+    });
+  });
+
   group('buildDidlLite', () {
-    test('标题转义 + 可选时长', () {
+    test('标题转义 + 两段式 class（compact 转发，不写 duration）', () {
       final didl = buildDidlLite(title: '剧名 · <第3集> "特别版"');
       expect(didl, contains('&lt;第3集&gt;'));
       expect(didl, contains('&quot;特别版&quot;'));
@@ -73,7 +166,8 @@ void main() {
 
       final withDuration =
           buildDidlLite(title: 'x', duration: '0:02:15.000');
-      expect(withDuration, contains('duration="0:02:15.000"'));
+      expect(withDuration, isNot(contains('duration=')),
+          reason: 'M2 v2：compact 变体不带 duration（真实时长走 compat 链 full）');
       expect(withDuration, contains('object.item.videoItem'));
     });
   });

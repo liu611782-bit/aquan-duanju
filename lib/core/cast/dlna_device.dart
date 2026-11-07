@@ -2,6 +2,10 @@ import 'package:xml/xml.dart';
 
 import 'didl.dart';
 
+/// 缺省 AVTransport serviceType（设备描述缺失/旧持久化时的回落值）。
+const String kDefaultAvtServiceType =
+    'urn:schemas-upnp-org:service:AVTransport:1';
+
 /// DLNA 设备模型与描述 XML 解析。
 ///
 /// 描述文档语义（UPnP Device Architecture 1.0）：
@@ -14,6 +18,7 @@ class DlnaDevice {
     required this.friendlyName,
     this.modelName = '',
     this.manufacturer = '',
+    this.serviceType = kDefaultAvtServiceType,
     required this.controlUrl,
     this.renderingControlUrl = '',
     this.connectionManagerUrl = '',
@@ -29,6 +34,14 @@ class DlnaDevice {
 
   /// 厂商名（设备配方指纹的一段）；旧描述/旧持久化缺省空串。
   final String manufacturer;
+
+  /// AVTransport **真实 serviceType**（原始串含版本，如 `…:AVTransport:2`）。
+  ///
+  /// SOAP 信封的 `xmlns:u` 与 SOAPACTION 头都必须精确等于它——严格接收端
+  /// （puppy-store-cast HttpServer）校验两者 == 设备宣告值，硬编码 `:1` 的
+  /// 设备会报 401。设备宣告多个版本时取最高（castor family.go：many
+  /// implement :3, not just :1）。缺省回落 [kDefaultAvtServiceType]。
+  final String serviceType;
 
   /// AVTransport controlURL（绝对地址）。
   final String controlUrl;
@@ -48,6 +61,7 @@ class DlnaDevice {
         'name': friendlyName,
         'model': modelName,
         'manufacturer': manufacturer,
+        'service_type': serviceType,
         'control_url': controlUrl,
         'rendering_control_url': renderingControlUrl,
         'connection_manager_url': connectionManagerUrl,
@@ -55,18 +69,24 @@ class DlnaDevice {
         'location': location,
       };
 
-  /// v1/v2 没有 `manufacturer` / `connection_manager_url`：缺省空串即可读。
-  factory DlnaDevice.fromPersistJson(Map<String, dynamic> json) => DlnaDevice(
-        udn: json['udn'] as String? ?? '',
-        friendlyName: json['name'] as String? ?? '',
-        modelName: json['model'] as String? ?? '',
-        manufacturer: json['manufacturer'] as String? ?? '',
-        controlUrl: json['control_url'] as String? ?? '',
-        renderingControlUrl: json['rendering_control_url'] as String? ?? '',
-        connectionManagerUrl: json['connection_manager_url'] as String? ?? '',
-        eventSubUrl: json['event_sub_url'] as String? ?? '',
-        location: json['location'] as String? ?? '',
-      );
+  /// v1/v2 没有 `manufacturer` / `connection_manager_url` / `service_type`：
+  /// 缺省空串/缺省 URN 即可读。
+  factory DlnaDevice.fromPersistJson(Map<String, dynamic> json) {
+    final serviceType = json['service_type'] as String? ?? '';
+    return DlnaDevice(
+      udn: json['udn'] as String? ?? '',
+      friendlyName: json['name'] as String? ?? '',
+      modelName: json['model'] as String? ?? '',
+      manufacturer: json['manufacturer'] as String? ?? '',
+      serviceType:
+          serviceType.isEmpty ? kDefaultAvtServiceType : serviceType,
+      controlUrl: json['control_url'] as String? ?? '',
+      renderingControlUrl: json['rendering_control_url'] as String? ?? '',
+      connectionManagerUrl: json['connection_manager_url'] as String? ?? '',
+      eventSubUrl: json['event_sub_url'] as String? ?? '',
+      location: json['location'] as String? ?? '',
+    );
+  }
 
   @override
   bool operator ==(Object other) =>
@@ -215,6 +235,8 @@ DlnaDevice? parseDeviceDescription(String xmlText, String location) {
   String? cmControl;
   String? avtEventSub;
   XmlElement? avtDevice;
+  // 设备可能宣告多个 AVTransport 版本（:1/:2/:3 并存）——全部收集后取最高。
+  final avtServiceTypes = <String>[];
   for (final device in devices) {
     for (final service in servicesOf(device)) {
       final serviceType = textOf(service, 'serviceType') ?? '';
@@ -222,6 +244,7 @@ DlnaDevice? parseDeviceDescription(String xmlText, String location) {
       final isRcs = serviceType.contains('RenderingControl');
       final isCm = serviceType.contains('ConnectionManager');
       if (!isAvt && !isRcs && !isCm) continue;
+      if (isAvt) avtServiceTypes.add(serviceType);
       final rawControl = textOf(service, 'controlURL') ?? '';
       // ConnectionManager 是可选能力；没有 controlURL 时不猜路径，
       // 免得把 AVTransport 的惯例路径当预检地址多发一次请求。
@@ -262,6 +285,7 @@ DlnaDevice? parseDeviceDescription(String xmlText, String location) {
     friendlyName: textOf(picked, 'friendlyName') ?? '未命名设备',
     modelName: textOf(picked, 'modelName') ?? '',
     manufacturer: textOf(picked, 'manufacturer') ?? '',
+    serviceType: bestAvtServiceType(avtServiceTypes),
     controlUrl: avtControl,
     renderingControlUrl: rcsControl ?? '',
     connectionManagerUrl: cmControl ?? '',
@@ -270,11 +294,37 @@ DlnaDevice? parseDeviceDescription(String xmlText, String location) {
   );
 }
 
+/// 从设备宣告的 AVTransport serviceType 原始串里挑「最高版本」的那条。
+///
+/// castor family.go 先例（serviceVersions = [3,2,1]）：很多设备实现的是 :3
+/// 而不只是 :1，goupnp 硬编码 :1 是反面教材。规则：
+/// - 标准形状 `urn:schemas-upnp-org:service:AVTransport:<n>` → 取 n 最大者；
+/// - 只有非标形状（仍含 AVTransport 字样）→ 原样保留第一条；
+/// - 全部缺失 → [kDefaultAvtServiceType]。
+String bestAvtServiceType(Iterable<String> rawTypes) {
+  String? best;
+  var bestVersion = -1;
+  String? anyAvt;
+  for (final raw in rawTypes) {
+    final t = raw.trim();
+    if (t.isEmpty || !t.contains('AVTransport')) continue;
+    anyAvt ??= t;
+    final m = RegExp(r'AVTransport:(\d+)\s*$').firstMatch(t);
+    final version = m == null ? -1 : int.tryParse(m.group(1)!) ?? -1;
+    if (version > bestVersion) {
+      bestVersion = version;
+      best = t;
+    }
+  }
+  return best ?? anyAvt ?? kDefaultAvtServiceType;
+}
+
 /// DIDL-Lite 元数据（SetAVTransportURI 的 CurrentURIMetaData）。
 ///
-/// 保留旧签名与旧语义（部分盒子校验非空才收，统一带最小 DIDL；
-/// [subtitleUrl] 非空时带 `sec:SubtitleUri`），实现转发到
-/// `didl.dart` 的 [DidlVariant.minimal] 变体，避免两套生成逻辑漂移。
+/// 保留旧签名（部分盒子校验非空才收，统一带最小 DIDL；[subtitleUrl]
+/// 非空时带字幕标签），实现转发到 `didl.dart` 的 [DidlVariant.compact]
+/// 变体 + wildcard 模板（旧调用点没有 mime 信息，protocolInfo 保持
+/// 容器无关），避免两套生成逻辑漂移。
 String buildDidlLite({
   required String title,
   String? duration,
@@ -288,7 +338,8 @@ String buildDidlLite({
         title: title,
         subtitleUri: subtitleUrl,
       ),
-      DidlVariant.minimal,
+      DidlVariant.compact,
       durationText: duration,
       itemClass: itemClass,
+      template: DidlProtocolInfoTemplate.wildcard,
     );
