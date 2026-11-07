@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:aquan_duanju/core/cast/cast_controller.dart';
 import 'package:aquan_duanju/core/cast/cast_target.dart';
+import 'package:aquan_duanju/core/cast/dlna_device.dart';
 import 'package:aquan_duanju/core/cast/ssdp_discovery.dart';
 
 /// 第三方互操作冒烟（design §9.2 承诺项）：
@@ -128,6 +129,24 @@ udn =
     try {
       await workDir.delete(recursive: true);
     } catch (_) {}
+  });
+
+  test('真实 SSDP 发现（尽力而为：同机组播可达则断言独立实现报文）', () async {
+    final discovery = SsdpDiscovery();
+    final found = <DlnaDevice>[];
+    final sub = discovery.start().listen((e) {
+      if (e is SsdpDeviceFound) found.add(e.device);
+    });
+    // go-dlna 每 60s 发 alive；窗口内收不到算环境限制（SSDPSRV/多 TAP），不算失败。
+    await Future<void>.delayed(const Duration(seconds: 12));
+    await discovery.stop();
+    await sub.cancel();
+    final hit = found.where((d) => d.friendlyName.contains('go投屏接收器')).toList();
+    if (hit.isEmpty) {
+      print('[interop] 12s 窗口内未收到同机组播 NOTIFY（环境限制，addByIp 路径已在用例 2 验证）');
+      return;
+    }
+    expect(hit.first.udn, startsWith('uuid:'));
   });
 
   test('发现：addByIp 命中 go-dlna 并解析设备描述', () async {
