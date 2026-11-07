@@ -887,15 +887,21 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
       }
       return relay['url'] as String?;
     };
+    // 连播/跳集基准 = 会话当前集（episodeIndex = ep.index 为 0-based，
+    // 下一集 = 该值 + 1）；捕获的 castIndex 仅作会话无媒体时的回退——
+    // 恢复投送后本地行索引与会话集数错位会跳集（player_screen 同病）。
+    int nextEpisodeBase() => castController.currentMedia == null
+        ? castIndex + 1
+        : castController.currentMedia!.episodeIndex + 1;
     castController.onNextEpisode = () async {
-      final n = castIndex + 1;
+      final n = nextEpisodeBase();
       if (n >= _line.episodes.length) return null;
       return _resolveCastMedia(_line.episodes[n], n, scope);
     };
     // 遥控器上一集/手动跳集（delta 语义；0 与越界返回 null）。
     castController.onEpisodeJump = (delta) async {
       if (delta == 0) return null;
-      final n = castIndex + delta;
+      final n = nextEpisodeBase() - 1 + delta;
       if (n < 0 || n >= _line.episodes.length) return null;
       return _resolveCastMedia(_line.episodes[n], n, scope);
     };

@@ -2524,13 +2524,22 @@ class _PlayerScreenState extends State<PlayerScreen>
         episodeCount: widget.episodes.length,
         // M5-0：连播加密分集的产物已是本机中继 HLS，选路恒直投。
         viaRelay: nextViaRelay,
+        // 编码提示与首投同口径：缺了它 HEVC/AV1 分集连播时 auto 选路无证据
+        // → 直投 → 接收端解不动（UI 冒烟实证的连播风暴根因之一）。
+        codecHint: stream.codec,
       );
     }
-    castController.onNextEpisode = () => resolveCastEpisode(castIndex + 1);
+    // 连播/跳集基准 = 会话当前集（currentMedia.episodeIndex 为 1-based，
+    // 下一集的 0-based 下标恰等于该值）；捕获的 castIndex 仅作会话无媒体时
+    // 的回退——恢复投送后本地索引与会话集数错位，用捕获值会跳集（UI 冒烟
+    // 实证：恢复第134集播完后 next 跳到第142集并重复投同一集）。
+    int nextEpisodeBase() =>
+        castController.currentMedia?.episodeIndex ?? castIndex + 1;
+    castController.onNextEpisode = () => resolveCastEpisode(nextEpisodeBase());
     // 遥控器上一集/手动跳集（delta 语义；0 与越界返回 null）。
     castController.onEpisodeJump = (delta) async {
       if (delta == 0) return null;
-      return resolveCastEpisode(castIndex + delta);
+      return resolveCastEpisode(nextEpisodeBase() - 1 + delta);
     };
     // 断开回本地时的行为设置：在 sheet 之前捕获（M4-1：await 之后不摸 context）。
     final resumeLocal =
