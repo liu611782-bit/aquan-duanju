@@ -23,9 +23,19 @@ import 'ssdp_discovery.dart';
 /// 投屏会话状态。
 enum CastSessionState { idle, discovering, connecting, casting, stopping }
 
-/// 本机转码（Go castrelay，ffmpeg 管道）产物的 mime 提示：输出恒为 HLS
-/// （cast_media_fallback.relayMimeHint 同值，产物 URL 已是 .m3u8）。
+/// 本机转码（Go castrelay，ffmpeg 管道）产物的 mime 提示：hls 档输出恒为
+/// HLS（cast_media_fallback.relayMimeHint 同值，产物 URL 已是 .m3u8）。
 const String kRelayProductMimeHint = 'application/vnd.apple.mpegurl';
+
+/// 本机转码 ts 档（R2）产物的 mime 提示：产物 URL 为 `…/stream.ts`，
+/// 按 URL 扩展名语义判 TS 容器。
+const String kRelayProductTsMimeHint = 'video/mp2t';
+
+/// 本机转码产物的 mime 提示按产物 URL 扩展名分流（R2）：`.ts` → TS 档。
+String _relayProductMimeHint(String url) =>
+    url.toLowerCase().endsWith('.ts')
+        ? kRelayProductTsMimeHint
+        : kRelayProductMimeHint;
 
 /// 兼容模式选路结果（M5-0）：最终投屏 URL + 已判定的源媒体类型
 /// （复用避免二次嗅探）+ 是否经本机转码（产物恒 HLS）。
@@ -33,6 +43,13 @@ typedef _PreparedPlayUrl = ({
   String url,
   CastMediaType? sourceType,
   bool viaRelay,
+});
+
+/// 本机转码挂点形状：媒体 + 选路决定的输出档位（R2）+ 会话字幕（R3）。
+typedef CastTranscodeResolver = Future<String?> Function(
+  CastMedia media, {
+  String? relayFormat,
+  Uri? relaySubtitleUrl,
 });
 
 /// 要投出去的媒体（URL 必须是电视可达的局域网/公网直链，绝不能是 127.0.0.1）。
@@ -225,7 +242,11 @@ class CastController extends ChangeNotifier {
   /// 取流探针，与 [onNextEpisode] 同一注入模式；断开/收尾由 [_finishSession]
   /// 清引用）。返回中继产物 URL；null = 中继不可用（选路回退直投/代理）。
   /// 未注入 = 本机转码路由不可用，auto/always 一律回退。
-  Future<String?> Function(CastMedia media)? transcodeResolver;
+  ///
+  /// [relayFormat] 是选路决定的输出档位（R2：Sink 含 HLS → hls；无 HLS 有
+  /// TS → ts；证据缺失 → hls）。[relaySubtitleUrl] 是已按目标设备登记的
+  /// 会话字幕（R3：Go 侧借此给媒体响应补 `CaptionInfo.sec` 第三通道）。
+  CastTranscodeResolver? transcodeResolver;
 
   CastSessionState _state = CastSessionState.idle;
   final List<CastTarget> _devices = [];
@@ -458,13 +479,21 @@ class CastController extends ChangeNotifier {
       sinkMimes: sink,
       viaRelay: media.viaRelay,
       needsProxy: media.headers.isNotEmpty,
-      codecHint: media.codecHint,
+      // 编码提示合并口径（R1）：红果显式 stream.codec 优先，内容嗅探其次
+      // （MP4 ftyp brand / HLS 主清单 CODECS）；嗅探只影响选路。
+      codecHint: mergeCodecHint(media.codecHint, sourceType.codecHint),
     );
     CastDiagnostics.instance.recordTimeline(
         '选路：${_routeLabel(route)}（模式 ${transcodeMode.name}，${sourceType.mime}）');
     switch (route) {
       case CastRoute.relay:
-        final relayed = await _transcodeResolve(media);
+        // 输出档位（R2）：Sink 含 HLS → hls；无 HLS 有 TS → ts；
+        // Sink 缺失/未知 → hls（relayFormatFor 证据缺失回落现状）。
+        final relayed = await _transcodeResolve(
+          media,
+          relayFormat: relayFormatFor(sink),
+          relaySubtitleUrl: subtitleUrl,
+        );
         if (relayed != null && relayed.isNotEmpty) {
           return (url: relayed, sourceType: sourceType, viaRelay: true);
         }
@@ -516,11 +545,19 @@ class CastController extends ChangeNotifier {
 
   /// 调用本机转码挂点（M5-0）。任何失败只进 ErrorLog 并返回 null——
   /// 转码失败走选路回退，不算投屏失败（原始异常不与用户见面）。
-  Future<String?> _transcodeResolve(CastMedia media) async {
+  Future<String?> _transcodeResolve(
+    CastMedia media, {
+    String? relayFormat,
+    Uri? relaySubtitleUrl,
+  }) async {
     final resolver = transcodeResolver;
     if (resolver == null) return null;
     try {
-      return await resolver(media);
+      return await resolver(
+        media,
+        relayFormat: relayFormat,
+        relaySubtitleUrl: relaySubtitleUrl,
+      );
     } on Exception catch (e, stack) {
       ErrorLog.instance.record('投屏兼容模式转码', e, stack);
       return null;
@@ -532,6 +569,24 @@ class CastController extends ChangeNotifier {
         CastRoute.proxy => '本机代理',
         CastRoute.relay => '本机转码',
       };
+
+  /// 配方链按产物形态调整（R2 DIDL 对齐）：中继 TS 档产物把默认 standard
+  /// 模板升级为 sinkEntry——Sink 有 TS 条目时照抄设备第 4 段（WMP 族对
+  /// protocolInfo 第 4 段敏感），无条目时模板自身回落 standard。其余产物
+  /// 形态走 [CastRecipeStore.fallbackChain] 原样。
+  List<CastRecipe> _recipeChainFor(
+    CastTarget target,
+    Set<String> sink, {
+    required bool viaRelay,
+    required String productMime,
+  }) {
+    final chain = recipes.fallbackChain(target,
+        sink: sink.toList(), profile: profiles?.lookup(target.id));
+    if (viaRelay && isTsMime(productMime)) {
+      return upgradeChainForTsProduct(chain);
+    }
+    return chain;
+  }
 
   /// 字幕投送前的准备：带源站头的字幕必须经代理；SRT 是否转 VTT 按协议
   /// 分流（M5-1）——DLNA 保持 SRT 原样（修正「转 VTT 却在 DIDL 声明
@@ -663,11 +718,11 @@ class CastController extends ChangeNotifier {
       // 设备 Sink 只参与「拼写选择」，绝不用它覆盖判定结果（AC-13）。
       // 嗅探到 HTML/JSON 会抛 CastException：投屏前就报「这个地址不是视频」。
       // 选路阶段已判定源类型时直接复用（直投同 URL、代理不改 mime）；
-      // 本机转码产物恒为 HLS，按产物 URL + HLS hint 判定。
+      // 本机转码产物按产物 URL 形态判 hint（hls 档恒 HLS，ts 档 stream.ts）。
       final mediaType = prepared.viaRelay
           ? await resolveCastMediaType(
               url: Uri.parse(playUrl),
-              hintMime: kRelayProductMimeHint,
+              hintMime: _relayProductMimeHint(playUrl),
               sinkMimes: sink,
             )
           : prepared.sourceType ??
@@ -702,11 +757,13 @@ class CastController extends ChangeNotifier {
                 : Uri.tryParse(media.subtitleUrl),
             headers: media.headers,
           ),
-          // M3 配方链（design §4.5）：udn → model(+sinkHash) → 画像预设 → 梯度。
-          recipes: recipes.fallbackChain(
+          // M3 配方链（design §4.5）：udn → model(+sinkHash) → 画像预设 → 梯度；
+          // 中继 TS 档产物把默认 standard 模板升级 sinkEntry（R2）。
+          recipes: _recipeChainFor(
             target,
-            sink: sink.toList(),
-            profile: profiles?.lookup(target.id),
+            sink,
+            viaRelay: prepared.viaRelay,
+            productMime: mediaType.mime,
           ),
           protocolInfo: sink,
         ));
@@ -752,20 +809,27 @@ class CastController extends ChangeNotifier {
     }
   }
 
-  /// 诊断目标字段（M0.5 接真实值）：本机伺服（本地文件/代理）时投屏 URL
-  /// 的 host 就是按目标设备解析出的路由源 IP（per-device IP）；
+  /// 诊断目标字段（M0.5 接真实值）：本机伺服（本地文件/代理/本机转码）时
+  /// 投屏 URL 的 host 就是按目标设备解析出的路由源 IP（per-device IP）；
   /// 直投公网 URL 时 IP/端口为空态。纯采集。
+  ///
+  /// 中继产物（viaRelay）的 IP/端口随后由 [CastRelayProbe] 按 Go
+  /// `castRelayStatus` 回传的监听值转写校正（R3）——这里先按产物 URL
+  /// 取值，防盗链源不再误报成代理端口。
   void _traceTarget(CastMedia media) {
     final uri = Uri.tryParse(media.url);
-    final servedLocally = media.isLocalFile || media.headers.isNotEmpty;
+    final servedLocally =
+        media.isLocalFile || media.headers.isNotEmpty || media.viaRelay;
     int? servingPort;
     if (media.isLocalFile) {
       servingPort = _mediaServer.port;
+    } else if (media.viaRelay) {
+      servingPort = uri?.port;
     } else if (media.headers.isNotEmpty) {
       servingPort = _castProxy.port;
     }
     CastDiagnostics.instance.recordTimeline(
-        '媒体地址：${media.isLocalFile ? '本地文件' : (media.headers.isNotEmpty ? '本机代理' : '直投')}');
+        '媒体地址：${media.isLocalFile ? '本地文件' : media.viaRelay ? '本机转码' : (media.headers.isNotEmpty ? '本机代理' : '直投')}');
     CastDiagnostics.instance.setTarget(
       selectedIp: servedLocally ? uri?.host : null,
       mediaPort: servingPort,
@@ -885,12 +949,12 @@ class CastController extends ChangeNotifier {
       CastDiagnostics.instance.setTarget(mediaUrl: playUrl);
       CastDiagnostics.instance.recordTimeline('连播下一集：${next.title}');
       if (compat != null) {
-        // 媒体类型判定：选路已判定源类型时复用；本机转码产物按 HLS hint
-        // 判定（与首投同口径）。
+        // 媒体类型判定：选路已判定源类型时复用；本机转码产物按产物 URL
+        // 形态判 hint（与首投同口径）。
         final mediaType = prepared.viaRelay
             ? await resolveCastMediaType(
                 url: Uri.parse(playUrl),
-                hintMime: kRelayProductMimeHint,
+                hintMime: _relayProductMimeHint(playUrl),
                 sinkMimes: sink,
               )
             : prepared.sourceType ??
@@ -918,10 +982,11 @@ class CastController extends ChangeNotifier {
             subtitleUri: subtitleUri,
             headers: next.headers,
           ),
-          recipes: recipes.fallbackChain(
+          recipes: _recipeChainFor(
             device,
-            sink: sink.toList(),
-            profile: profiles?.lookup(device.id),
+            sink,
+            viaRelay: prepared.viaRelay,
+            productMime: mediaType.mime,
           ),
           protocolInfo: sink,
         ));

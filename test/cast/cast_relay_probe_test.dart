@@ -98,5 +98,68 @@ void main() {
       expect(probe.watching, isTrue, reason: '正常响应不触发自停');
       probe.unwatch();
     });
+
+    test('R3：lanIp/port/url 转写进诊断目标字段（中继会话激活期间）', () async {
+      final d = CastDiagnostics();
+      d.beginSession(deviceName: 'WMP 电视', protocol: 'dlna');
+      final probe = CastRelayProbe(diagnostics: d);
+      probe.watch((session) async => <String, dynamic>{
+            'session': session,
+            'lanIp': '192.168.1.9',
+            'port': 29170,
+            'url': 'http://192.168.1.9:29170/cast/AbCdEf0123456789AbCdEf0123456789/stream.ts',
+            'recent': <dynamic>[],
+          }, 'session-1');
+      await probe.pollOnce();
+      expect(d.selectedIp, '192.168.1.9');
+      expect(d.mediaPort, 29170);
+      expect(d.mediaUrl,
+          'http://192.168.1.9:29170/cast/AbCdEf0123456789AbCdEf0123456789/stream.ts');
+      probe.unwatch();
+    });
+
+    test('R3：旧版核心缺 lanIp 字段 → 不误清已有目标字段', () async {
+      final d = CastDiagnostics();
+      d.beginSession(protocol: 'dlna');
+      d.setTarget(
+        selectedIp: '192.168.1.2',
+        mediaPort: 18280,
+        mediaUrl: 'http://192.168.1.2:18280/m/tok/index.m3u8',
+      );
+      final probe = CastRelayProbe(diagnostics: d);
+      probe.watch((session) async => <String, dynamic>{'ready': true},
+          'session-1');
+      await probe.pollOnce();
+      expect(d.selectedIp, '192.168.1.2', reason: '缺字段不覆盖');
+      expect(d.mediaPort, 18280);
+      expect(d.mediaUrl, 'http://192.168.1.2:18280/m/tok/index.m3u8');
+      probe.unwatch();
+    });
+
+    test('R3：中继路径 verdict=acceptedButNotFetched 时 IP/端口可见'
+        '（面板防火墙指引生效前提，AC-5）', () async {
+      final d = CastDiagnostics();
+      d.beginSession(deviceName: '投屏电视Q3', protocol: 'dlna');
+      d.recordSoap(SoapTrace(
+        action: 'SetAVTransportURI',
+        requestBody: '<s:Envelope/>',
+        httpStatus: 200,
+      ));
+      expect(d.computeVerdict(), CastVerdict.acceptedButNotFetched,
+          reason: '命令已接受但电视没来取流');
+      final probe = CastRelayProbe(diagnostics: d);
+      probe.watch((session) async => <String, dynamic>{
+            'lanIp': '192.168.1.9',
+            'port': 29171,
+            'url': 'http://192.168.1.9:29171/cast/AbCdEf0123456789AbCdEf0123456789/index.m3u8',
+          }, 'session-1');
+      await probe.pollOnce();
+      expect(d.computeVerdict(), CastVerdict.acceptedButNotFetched,
+          reason: '取流记录仍为空，判定不变');
+      expect(d.selectedIp, '192.168.1.9');
+      expect(d.mediaPort, 29171,
+          reason: '中继监听端口对面板可见 → 防火墙指引带端口');
+      probe.unwatch();
+    });
   });
 }

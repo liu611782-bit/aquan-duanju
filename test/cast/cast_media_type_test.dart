@@ -8,6 +8,19 @@ import 'package:aquan_duanju/core/cast/cast_target.dart';
 
 CastMediaType _resolveSync(Uri url) => castMediaTypeFromUrlPath(url);
 
+/// 构造 ftyp box 头字节：size(4) + 'ftyp'(4) + brand 逐个 4 字节。
+List<int> _ftypHead(List<String> brands) {
+  final size = 8 + brands.length * 4;
+  return <int>[
+    (size >> 24) & 0xFF,
+    (size >> 16) & 0xFF,
+    (size >> 8) & 0xFF,
+    size & 0xFF,
+    ...'ftyp'.codeUnits,
+    ...brands.expand((b) => b.codeUnits),
+  ];
+}
+
 void main() {
   group('判定表：URL 扩展名（design §4.1）', () {
     test('HLS → vnd.apple.mpegurl + index.m3u8', () {
@@ -195,6 +208,127 @@ void main() {
         sniffHead: (u) async => utf8.encode('0123456789ABCDEF'),
       );
       expect(t.kind, CastMediaKind.unknown);
+    });
+  });
+
+  group('编码嗅探 codecHint（R1，design §2.2 判定表）', () {
+    test('ftyp HEVC 家族 brand（hev1/hvc1/dvh1/mhv1）→ hevc', () async {
+      for (final brand in ['hev1', 'hvc1', 'dvh1', 'mhv1']) {
+        final t = await resolveCastMediaType(
+          url: Uri.parse('http://x/media'),
+          sniffHead: (u) async => _ftypHead([brand]),
+        );
+        expect(t.codecHint, 'hevc', reason: brand);
+        expect(t.mime, 'video/mp4', reason: brand);
+      }
+    });
+
+    test('ftyp av01 brand → av1', () async {
+      final t = await resolveCastMediaType(
+        url: Uri.parse('http://x/media'),
+        sniffHead: (u) async => _ftypHead(['av01']),
+      );
+      expect(t.codecHint, 'av1');
+      expect(t.mime, 'video/mp4');
+    });
+
+    test('major brand 无编码时 compatible brands 命中也判', () async {
+      final t = await resolveCastMediaType(
+        url: Uri.parse('http://x/media'),
+        sniffHead: (u) async => _ftypHead(['isom', 'mhv1']),
+      );
+      expect(t.codecHint, 'hevc', reason: '第二个 brand（compatible）命中');
+    });
+
+    test('isom/mp42 等无编码 brand → codecHint null（现状不回归）', () async {
+      for (final brands in [
+        ['isom'],
+        ['mp42'],
+        ['isom', 'mp41', 'avc1'],
+      ]) {
+        final t = await resolveCastMediaType(
+          url: Uri.parse('http://x/media'),
+          sniffHead: (u) async => _ftypHead(brands),
+        );
+        expect(t.codecHint, isNull, reason: brands.join('/'));
+        expect(t.mime, 'video/mp4', reason: brands.join('/'));
+      }
+    });
+
+    test('非 MP4 容器（TS/FLV/HLS 无 CODECS）→ codecHint null', () async {
+      final ts = await resolveCastMediaType(
+        url: Uri.parse('http://x/media'),
+        sniffHead: (u) async =>
+            (List<int>.filled(256, 0xAB)..[0] = 0x47..[188] = 0x47),
+      );
+      expect(ts.codecHint, isNull, reason: 'TS 容器无法从 8KB 判编码，不做');
+      final flv = await resolveCastMediaType(
+        url: Uri.parse('http://x/media'),
+        sniffHead: (u) async => utf8.encode('FLV\x01\x05\x00\x00\x00\x09'),
+      );
+      expect(flv.codecHint, isNull);
+    });
+
+    test('HLS 主清单 CODECS 各拼写 → hevc', () async {
+      for (final codecs in [
+        'hvc1.1.6.L93.B0,mp4a.40.2',
+        'hev1.1.6.L93.B0',
+        'dvh1.05.01,ec-3',
+        'mp4a.40.2,mhv1.2',
+      ]) {
+        final head =
+            utf8.encode('#EXTM3U\n#EXT-X-STREAM-INF:CODECS="$codecs"\n');
+        final t = await resolveCastMediaType(
+          url: Uri.parse('http://x/api/play'),
+          sniffHead: (u) async => head,
+        );
+        expect(t.codecHint, 'hevc', reason: codecs);
+        expect(t.mime, 'application/vnd.apple.mpegurl', reason: codecs);
+      }
+    });
+
+    test('HLS 主清单 CODECS 含 av01 → av1', () async {
+      final t = await resolveCastMediaType(
+        url: Uri.parse('http://x/api/play'),
+        sniffHead: (u) async => utf8.encode(
+            '#EXTM3U\n#EXT-X-STREAM-INF:CODECS="av01.0.04M.08,mp4a.40.2"\n'),
+      );
+      expect(t.codecHint, 'av1');
+    });
+
+    test('HLS 主清单无 CODECS → null', () async {
+      final t = await resolveCastMediaType(
+        url: Uri.parse('http://x/api/play'),
+        sniffHead: (u) async =>
+            utf8.encode('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000\n'),
+      );
+      expect(t.codecHint, isNull);
+    });
+
+    test('媒体清单（无 STREAM-INF）不判 codec（有 hvc1 字样也不判）', () async {
+      final t = await resolveCastMediaType(
+        url: Uri.parse('http://x/api/play'),
+        sniffHead: (u) async => utf8.encode(
+            '#EXTM3U\n#EXTINF:4.0,\nhvc1seg1.ts\n#EXT-X-ENDLIST\n'),
+      );
+      expect(t.codecHint, isNull,
+          reason: '分片级编码无法从媒体清单判，不猜');
+    });
+
+    test('codecHint 随 Sink 拼写选择与 live 重包保留', () async {
+      final spelled = await resolveCastMediaType(
+        url: Uri.parse('http://x/media'),
+        sinkMimes: ['http-get:*:video/mp4:*'],
+        sniffHead: (u) async => _ftypHead(['hvc1']),
+      );
+      expect(spelled.codecHint, 'hevc');
+      final live = await resolveCastMediaType(
+        url: Uri.parse('http://x/media'),
+        live: true,
+        sniffHead: (u) async => _ftypHead(['hvc1']),
+      );
+      expect(live.codecHint, 'hevc');
+      expect(live.live, isTrue);
     });
   });
 

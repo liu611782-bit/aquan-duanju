@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,6 +53,50 @@ func TestBuildFFmpegArgs(t *testing.T) {
 	for _, a := range args {
 		if a == "-headers" {
 			t.Fatalf("无头时不应出现 -headers: %v", args)
+		}
+	}
+}
+
+// TestBuildFFmpegArgsTs：ts 档分支（R2）——-f mpegts 写 stream.ts、-c copy
+// 不重编码、muxer 降延迟参数；不出现 hls/转码参数。
+func TestBuildFFmpegArgsTs(t *testing.T) {
+	dir := t.TempDir()
+	args := buildFFmpegArgs("ffmpeg", relayOptions{
+		URL:    "http://up/1.mkv",
+		Format: "ts",
+	}, dir, "")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-f mpegts") {
+		t.Fatalf("ts 档应输出 mpegts: %v", args)
+	}
+	if !strings.Contains(joined, filepath.Join(dir, "stream.ts")) {
+		t.Fatalf("ts 档应写 stream.ts: %v", args)
+	}
+	if !strings.Contains(joined, "-c copy") {
+		t.Fatalf("ts 档应 remux 不重编码: %v", args)
+	}
+	if !strings.Contains(joined, "-muxdelay 0 -muxpreload 0") {
+		t.Fatalf("ts 档应带 muxer 降延迟参数: %v", args)
+	}
+	if strings.Contains(joined, "-f hls") || strings.Contains(joined, "libx264") {
+		t.Fatalf("ts 档不应出现 hls/转码参数: %v", args)
+	}
+}
+
+// TestBuildFFmpegArgsFormatFallback：Format 为空/未知值一律按 hls（R2 证据
+// 缺失回落现状，旧调用方零改动）。
+func TestBuildFFmpegArgsFormatFallback(t *testing.T) {
+	for _, format := range []string{"", "hls", "webvtt"} {
+		args := buildFFmpegArgs("ffmpeg", relayOptions{
+			URL:    "http://up/1.m3u8",
+			Format: format,
+		}, t.TempDir(), "")
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, "-f hls") || !strings.Contains(joined, "index.m3u8") {
+			t.Fatalf("format=%q 应回落 hls: %v", format, args)
+		}
+		if strings.Contains(joined, "mpegts") {
+			t.Fatalf("format=%q 不应走 ts 分支: %v", format, args)
 		}
 	}
 }
@@ -406,4 +451,292 @@ func rawHttpGet(t *testing.T, rawURL string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// serveRelaySession 把手工构造的会话挂到临时监听上（ts 档/响应头单测共用），
+// 返回 base URL（http://127.0.0.1:<port>/cast/<token>）。
+func serveRelaySession(t *testing.T, s *relaySession) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/cast/"+s.token+"/", s.serveCastFile)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return fmt.Sprintf("http://127.0.0.1:%d/cast/%s", ln.Addr().(*net.TCPAddr).Port, s.token)
+}
+
+// noRedirectClient：不跟随 301 的直连客户端（中继是局域网直连语义，
+// HTTP 客户端必须 Proxy:nil——系统代理会 502）。
+func noRedirectClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{Proxy: nil},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// TestTsReady：TS 产物就绪判定（R2）——stream.ts 存在且 > 64KB。
+func TestTsReady(t *testing.T) {
+	dir := t.TempDir()
+	if tsReady(dir) {
+		t.Fatal("无文件不应就绪")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stream.ts"), bytes.Repeat([]byte{0x47}, 64*1024-1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if tsReady(dir) {
+		t.Fatal("64KB 以下不应就绪（空洞/极小文件不算）")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stream.ts"), bytes.Repeat([]byte{0x47}, 64*1024+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !tsReady(dir) {
+		t.Fatal("超过 64KB 应就绪")
+	}
+}
+
+// TestRelayTsMode：TS 直流档（R2）——stream.ts 伺服 200/Range 206、token
+// 根路径 301 到 stream.ts、取流日志三态全记、info 出参 format/url/segments、
+// 停止回收（会话 + 临时目录）。HTTP 客户端必须 Proxy:nil。
+func TestRelayTsMode(t *testing.T) {
+	dir := t.TempDir()
+	payload := bytes.Repeat([]byte{0x47}, 256*1024)
+	if err := os.WriteFile(filepath.Join(dir, "stream.ts"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &relaySession{
+		id: "s-ts", token: "tok1234567890abcdef", dir: dir, format: "ts",
+		startedAt: time.Now(), lastAccess: time.Now(),
+	}
+	base := serveRelaySession(t, s)
+	direct := noRedirectClient()
+
+	// 1) stream.ts 全量 200。
+	resp, err := direct.Get(base + "/stream.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || len(body) != len(payload) {
+		t.Fatalf("stream.ts 应 200 全量: %d %dB", resp.StatusCode, len(body))
+	}
+
+	// 2) Range → 206（ServeFile 真答，与 hls 分片同口径）。
+	req, err := http.NewRequest("GET", base+"/stream.ts", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Range", "bytes=0-9")
+	respRange, err := direct.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seg, _ := io.ReadAll(respRange.Body)
+	respRange.Body.Close()
+	if respRange.StatusCode != 206 || len(seg) != 10 {
+		t.Fatalf("Range 取流应 206/10B: %d %dB", respRange.StatusCode, len(seg))
+	}
+
+	// 3) token 根路径 → 301 到 stream.ts（ts 档无清单）。
+	respRoot, err := direct.Get(base + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(respRoot.Body)
+	respRoot.Body.Close()
+	if respRoot.StatusCode != http.StatusMovedPermanently {
+		t.Fatalf("token 根路径应 301: %d", respRoot.StatusCode)
+	}
+	if loc := respRoot.Header.Get("Location"); !strings.HasSuffix(loc, "stream.ts") {
+		t.Fatalf("301 应指向 stream.ts: %q", loc)
+	}
+
+	// 4) info 出参：format=ts、URL 指向 stream.ts、segments=0、lanIp 非空。
+	info := s.info()
+	if info.Format != "ts" {
+		t.Fatalf("format=%q", info.Format)
+	}
+	if !strings.HasSuffix(info.URL, "/cast/"+s.token+"/stream.ts") {
+		t.Fatalf("URL 应指向 stream.ts: %s", info.URL)
+	}
+	if info.Segments != 0 {
+		t.Fatalf("ts 档不应把 stream.ts 当分片计数: %d", info.Segments)
+	}
+	if info.LanIP == "" {
+		t.Fatal("lanIp 出参缺失")
+	}
+
+	// 5) 取流日志：200/206/301 三条全记（诊断「电视拉了但没拉到」依赖）。
+	recent := s.recentAccess()
+	if len(recent) < 3 {
+		t.Fatalf("应有 3 条取流记录: %d", len(recent))
+	}
+	if recent[0].Status != 200 || recent[1].Status != 206 || recent[2].Status != 301 {
+		t.Fatalf("记录状态码不符: %d/%d/%d", recent[0].Status, recent[1].Status, recent[2].Status)
+	}
+
+	// 6) 停止回收：会话不存在 + 临时目录删除（与 hls 档同口径）。
+	putRelaySession(s)
+	castRelayStop(s.id)
+	if _, err := castRelayStatus(s.id); !errors.Is(err, ErrRelayNoSession) {
+		t.Fatalf("停止后 Status 应报 no_session: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("临时目录应随会话删除: %v", err)
+	}
+}
+
+// TestRelayTsModeLive：本地 ffmpeg 存在时走完整 TS 链路（remux → stream.ts
+// 伺服 → Range 206 → 停止回收），与 hls 完整链路（TestCastRelayServeFile）
+// 同口径。上游用 testsrc 强制 2M 码率，保证产物越过 64KB 就绪线。
+func TestRelayTsModeLive(t *testing.T) {
+	ffmpeg, err := findFFmpeg()
+	if err != nil {
+		t.Skip("本机无 ffmpeg，跳过完整链路测试")
+	}
+	upstream := filepath.Join(t.TempDir(), "up.mp4")
+	gen := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc=duration=10:size=640x480:rate=25",
+		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", "2M", "-pix_fmt", "yuv420p", upstream)
+	if out, err := gen.CombinedOutput(); err != nil {
+		t.Fatalf("上游生成失败: %v (%s)", err, out)
+	}
+	info, err := castRelayStart(relayOptions{URL: upstream, Format: "ts"})
+	if err != nil {
+		t.Fatalf("启动失败: %v", err)
+	}
+	defer castRelayStop(info.Session)
+	if info.Format != "ts" {
+		t.Fatalf("format=%q", info.Format)
+	}
+	if !strings.HasSuffix(info.URL, "/stream.ts") {
+		t.Fatalf("URL 应指向 stream.ts: %s", info.URL)
+	}
+
+	direct := &http.Client{Transport: &http.Transport{Proxy: nil}}
+	deadline := time.Now().Add(10 * time.Second)
+	served := int64(0)
+	for time.Now().Before(deadline) {
+		resp, err := direct.Get(info.URL)
+		if err == nil {
+			n, _ := io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == 200 && n > 64*1024 {
+				served = n
+				break
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if served <= 64*1024 {
+		t.Fatalf("stream.ts 未产出（>64KB）: %dB", served)
+	}
+
+	// Range 206：ts 产物与 hls 分片同口径。
+	req, _ := http.NewRequest("GET", info.URL, nil)
+	req.Header.Set("Range", "bytes=0-9")
+	resp2, err := direct.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != 206 || len(b) != 10 {
+		t.Fatalf("Range 应 206/10B: %d %dB", resp2.StatusCode, len(b))
+	}
+
+	castRelayStop(info.Session)
+	if _, err := castRelayStatus(info.Session); err == nil {
+		t.Fatal("停止后 Status 应报会话不存在")
+	}
+}
+
+// TestRelayInfoLanIP：lanIp 出参（R3）——会话内缓存值优先；未缓存（测试
+// 直建结构体/旧路径）回落 lanIP()。
+func TestRelayInfoLanIP(t *testing.T) {
+	s := &relaySession{
+		id: "s", token: "tok", port: 1, startedAt: time.Now(),
+		lastAccess: time.Now(), lanIP: "10.1.2.3",
+	}
+	info := s.info()
+	if info.LanIP != "10.1.2.3" {
+		t.Fatalf("缓存值应优先: %q", info.LanIP)
+	}
+	raw, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"lanIp":"10.1.2.3"`) {
+		t.Fatalf("出参应含 lanIp 字段: %s", raw)
+	}
+	s2 := &relaySession{
+		id: "s2", token: "tok", port: 1, startedAt: time.Now(),
+		lastAccess: time.Now(),
+	}
+	if s2.info().LanIP == "" {
+		t.Fatal("未缓存应回落 lanIP()")
+	}
+}
+
+// TestRelayCaptionInfoHeader：CaptionInfo.sec 第三通道（R3）——会话登记字幕
+// 时媒体响应带该头（直写 header map 保留驼峰拼写），未登记不带（不产生噪声）。
+func TestRelayCaptionInfoHeader(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "stream.ts"), bytes.Repeat([]byte{0x47}, 256), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	caption := "http://192.168.1.5:18280/m/AbCdEf0123456789AbCdEf0123456789/subtitle.srt"
+	s := &relaySession{
+		id: "s-cap", token: "tok1234567890abcdef", dir: dir, format: "ts",
+		subtitleURL: caption,
+		startedAt:   time.Now(), lastAccess: time.Now(),
+	}
+	base := serveRelaySession(t, s)
+	direct := noRedirectClient()
+
+	resp, err := direct.Get(base + "/stream.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if got := resp.Header.Get("CaptionInfo.sec"); got != caption {
+		t.Fatalf("登记字幕应带 CaptionInfo.sec: %q", got)
+	}
+	raw, err := rawHttpGet(t, base+"/stream.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, "CaptionInfo.sec: "+caption) {
+		t.Fatalf("响应头应保留规范驼峰拼写: %s", raw)
+	}
+
+	// 未登记字幕：不带（AC-6 不误带）。
+	s2 := &relaySession{
+		id: "s-cap2", token: "tok1234567890abcdef", dir: dir, format: "ts",
+		startedAt: time.Now(), lastAccess: time.Now(),
+	}
+	base2 := serveRelaySession(t, s2)
+	resp2, err := direct.Get(base2 + "/stream.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.Header.Get("CaptionInfo.sec") != "" {
+		t.Fatal("未登记字幕不应带 CaptionInfo.sec")
+	}
+	raw2, err := rawHttpGet(t, base2+"/stream.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw2, "CaptionInfo.sec:") {
+		t.Fatalf("未登记字幕线上字节不应出现该头: %s", raw2)
+	}
 }

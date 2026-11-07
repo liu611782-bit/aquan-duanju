@@ -831,7 +831,9 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
     final castIndex = _index;
     // M5-0：兼容模式选路的本机转码执行体（Go castRelayStart 适配器）。
     // 中继会话沿用 _castRelaySession 生命周期（停旧 → 起新 → 断开回收）。
-    castController.transcodeResolver = (m) async {
+    // R2/R3：选路决定的输出档位（hls/ts）与已登记的会话字幕一起透传。
+    castController.transcodeResolver = (m,
+        {relayFormat, relaySubtitleUrl}) async {
       final oldSession = _castRelaySession;
       _castRelaySession = null;
       if (oldSession != null) {
@@ -843,6 +845,8 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
         url: m.url,
         userAgent: headerOf(m.headers, 'user-agent') ?? '',
         referer: headerOf(m.headers, 'referer') ?? '',
+        format: relayFormat ?? '',
+        subtitleUrl: relaySubtitleUrl?.toString() ?? '',
       );
       _castRelayApi = scope.api;
       _castRelaySession = relay['session'] as String?;

@@ -19,6 +19,7 @@ class CastMediaType {
     required this.fileName,
     required this.kind,
     this.live = false,
+    this.codecHint,
   });
 
   final String mime;
@@ -28,6 +29,11 @@ class CastMediaType {
   /// 直播流（HLS 事件流 / 镜像 TS）。只影响 DIDL 侧语义（M3 起使用），
   /// 不改变 mime 与文件名判定。
   final bool live;
+
+  /// 内容嗅探出的编码提示（R1）：`'hevc'` / `'av1'`，无证据为 null。
+  /// 只影响兼容模式 auto 选路（HEVC/AV1 → 本机转码），**不改** DIDL/URL
+  /// 形态语义；调用方合并时显式提示（红果 `stream.codec`）优先。
+  final String? codecHint;
 
   /// mime 是否属于 HLS 别名组（`application/vnd.apple.mpegurl` /
   /// `application/x-mpegurl`）。
@@ -52,8 +58,13 @@ class CastMediaType {
       : unknown;
 
   @override
-  String toString() => 'CastMediaType($mime, $fileName, ${kind.name})';
+  String toString() =>
+      'CastMediaType($mime, $fileName, ${kind.name}, codec=$codecHint)';
 }
+
+/// mime 是否属于 TS 容器别名组（`video/mp2t` / `video/vnd.dlna.mpeg-tts`）。
+/// 中继 TS 档选路（cast_route.dart relayFormatFor）与 TS 产物 DIDL 判定共用。
+bool isTsMime(String mime) => _tsAliasGroup.contains(mime.toLowerCase());
 
 /// mime 别名组（review §8.7/§8.9）：同一容器的多种设备拼写。
 ///
@@ -138,6 +149,7 @@ Future<CastMediaType> resolveCastMediaType({
         fileName: type.fileName,
         kind: type.kind,
         live: live,
+        codecHint: type.codecHint,
       );
     }
   }
@@ -148,6 +160,7 @@ Future<CastMediaType> resolveCastMediaType({
     fileName: type.fileName,
     kind: type.kind,
     live: live,
+    codecHint: type.codecHint,
   );
 }
 
@@ -255,8 +268,12 @@ CastMediaType _hls() => CastMediaType(
     kind: CastMediaKind.video);
 CastMediaType _ts() => CastMediaType(
     mime: 'video/mp2t', fileName: 'stream.ts', kind: CastMediaKind.video);
-CastMediaType _video(String mime, String fileName) =>
-    CastMediaType(mime: mime, fileName: fileName, kind: CastMediaKind.video);
+CastMediaType _video(String mime, String fileName, {String? codec}) =>
+    CastMediaType(
+        mime: mime,
+        fileName: fileName,
+        kind: CastMediaKind.video,
+        codecHint: codec);
 CastMediaType _audio(String mime, String fileName) =>
     CastMediaType(mime: mime, fileName: fileName, kind: CastMediaKind.audio);
 CastMediaType _image(String mime, String fileName) =>
@@ -264,14 +281,72 @@ CastMediaType _image(String mime, String fileName) =>
 
 /// 内容嗅探（前 8KB 原始字节）：HLS / MP4(ftyp) / TS sync(0x47@0&188) / FLV。
 /// 二进制容器特征优先于文本特征（MP4 首字节可能是任意值，包括 `{`）。
+///
+/// R1 编码嗅探：MP4 按 ftyp brand、HLS 主清单按 CODECS 属性产出
+/// [CastMediaType.codecHint]；TS 容器无法从 8KB 判编码（需 PES 解析），
+/// 不做——显式提示与「兼容模式 → 始终」兜住。
 CastMediaType? _typeFromSniff(List<int>? head) {
   if (head == null || head.isEmpty) return null;
-  if (_asciiStartsWith(head, _textStart(head), '#EXTM3U')) return _hls();
+  if (_asciiStartsWith(head, _textStart(head), '#EXTM3U')) {
+    return CastMediaType(
+      mime: 'application/vnd.apple.mpegurl',
+      fileName: 'index.m3u8',
+      kind: CastMediaKind.video,
+      codecHint: _codecFromHlsMaster(head),
+    );
+  }
   if (head.length >= 8 && _asciiEqualsAt(head, 4, 'ftyp')) {
-    return _video('video/mp4', 'video.mp4');
+    return _video('video/mp4', 'video.mp4', codec: _codecFromFtypBrands(head));
   }
   if (_asciiStartsWith(head, 0, 'FLV')) return _video('video/x-flv', 'video.flv');
   if (head[0] == 0x47 && head.length > 188 && head[188] == 0x47) return _ts();
+  return null;
+}
+
+/// HEVC 家族 brand / codec 拼写（R1，design §2.2 判定表）。
+const List<String> _hevcBrandMarks = <String>[
+  'hev1',
+  'hvc1',
+  'dvh1',
+  'mhv1',
+];
+
+/// ftyp box brand 解析（R1）：box 头 offset 4..8 == `ftyp`，从 offset 8 起
+/// 每 4 字节一个 brand（major + compatible；minor version 是版本数字，不会
+/// 撞上 brand 拼写）。扫描止于 box 声明的总长（offset 0..4 大端），不越过
+/// mdat——压缩数据里撞出 4 字节 ASCII brand 的理论误判不值得冒。
+///
+/// brand ∈ {hev1,hvc1,dvh1,mhv1} → `'hevc'`；`av01` → `'av1'`；isom/mp42 等
+/// 无编码信息的 brand → null。
+String? _codecFromFtypBrands(List<int> head) {
+  var end = head.length;
+  final boxSize =
+      (head[0] << 24) | (head[1] << 16) | (head[2] << 8) | head[3];
+  if (boxSize >= 16 && boxSize <= head.length) end = boxSize;
+  for (var off = 8; off + 4 <= end; off += 4) {
+    final brand = String.fromCharCodes(head.sublist(off, off + 4));
+    if (_hevcBrandMarks.contains(brand)) return 'hevc';
+    if (brand == 'av01') return 'av1';
+  }
+  return null;
+}
+
+/// HLS 主清单 `#EXT-X-STREAM-INF` 的 `CODECS="…"` 属性解析（R1）。
+/// 逗号分段取段首拼写：hvc1/hev1/dvh1/mhv1 → `'hevc'`；`av01` → `'av1'`。
+/// 媒体清单（无 STREAM-INF）不判 codec——分片级编码无法从清单判。
+String? _codecFromHlsMaster(List<int> head) {
+  // 嗅探层只有 ASCII 判定：latin1 逐字节取字符足够。
+  final text = String.fromCharCodes(head);
+  if (!text.contains('#EXT-X-STREAM-INF')) return null;
+  final m = RegExp(r'CODECS="([^"]*)"', caseSensitive: false).firstMatch(text);
+  if (m == null) return null;
+  for (final seg in m.group(1)!.split(',')) {
+    final s = seg.trim().toLowerCase();
+    if (s.length < 4) continue;
+    final mark = s.substring(0, 4);
+    if (_hevcBrandMarks.contains(mark)) return 'hevc';
+    if (mark == 'av01') return 'av1';
+  }
   return null;
 }
 

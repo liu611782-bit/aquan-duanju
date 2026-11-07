@@ -12,9 +12,9 @@ package core
 
 import (
 	"crypto/rand"
-	"errors"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -30,12 +30,14 @@ import (
 
 // relayOptions 是 castRelayStart 的入参（Dart 侧拍平后的播放要素）。
 type relayOptions struct {
-	URL       string `json:"url"`
-	BackupURL string `json:"backup_url"`
-	DecKey    string `json:"dec_key"` // hex 内容密钥；空 = 未加密（不必要走中继，但允许）
-	UserAgent string `json:"user_agent"`
-	Referer   string `json:"referer"`
-	AudioURL  string `json:"audio_url"` // DASH 双轨上游（可选）
+	URL         string `json:"url"`
+	BackupURL   string `json:"backup_url"`
+	DecKey      string `json:"dec_key"` // hex 内容密钥；空 = 未加密（不必要走中继，但允许）
+	UserAgent   string `json:"user_agent"`
+	Referer     string `json:"referer"`
+	AudioURL    string `json:"audio_url"`    // DASH 双轨上游（可选）
+	Format      string `json:"format"`       // 输出档位（R2）：""/"hls"（默认）| "ts"；未知值一律按 hls
+	SubtitleURL string `json:"subtitle_url"` // 会话字幕地址（R3）：非空时媒体响应带 CaptionInfo.sec
 }
 
 // relaySessionInfo 是 castRelayStart/Status 的出参。
@@ -45,6 +47,7 @@ type relaySessionInfo struct {
 	Port      int                `json:"port"`
 	URL       string             `json:"url"`
 	Format    string             `json:"format"`
+	LanIP     string             `json:"lanIp"` // 本机 LAN IP（R3：会话内缓存，诊断面板防火墙指引用）
 	Encrypted bool               `json:"encrypted"`
 	UptimeMs  int64              `json:"uptimeMs"`
 	Segments  int                `json:"segments"`
@@ -64,16 +67,19 @@ type relayAccessEntry struct {
 }
 
 type relaySession struct {
-	id         string
-	token      string
-	port       int
-	dir        string
-	cmd        *exec.Cmd
-	srv        *http.Server
-	startedAt  time.Time
-	lastAccess time.Time
-	ready      bool
-	encrypted  bool
+	id          string
+	token       string
+	port        int
+	dir         string
+	cmd         *exec.Cmd
+	srv         *http.Server
+	startedAt   time.Time
+	lastAccess  time.Time
+	ready       bool
+	encrypted   bool
+	format      string // 输出档位："hls"（默认）| "ts"（R2）
+	subtitleURL string // 会话字幕（R3）：serveCastFile 据此带 CaptionInfo.sec
+	lanIP       string // 本机 LAN IP（R3）：会话内缓存一次，info() 不重复枚举网卡
 
 	// 电视取流环形日志（M0-5）：最近 relayAccessLogSize 条。
 	// 独立小锁：info() 会在持 relayMu 的调用点（castRelayStatus）里读取，
@@ -148,16 +154,24 @@ func castRelayStart(opts relayOptions) (*relaySessionInfo, error) {
 	}
 	srv := &http.Server{Handler: http.NotFoundHandler()}
 
+	// 输出档位（R2）：空/未知值一律按 hls —— 旧调用方零改动（证据缺失回落现状）。
+	if opts.Format != "ts" {
+		opts.Format = "hls"
+	}
+
 	sessionID := token[:16]
 	session := &relaySession{
-		id:         sessionID,
-		token:      token,
-		port:       port,
-		dir:        dir,
-		srv:        srv,
-		startedAt:  time.Now(),
-		lastAccess: time.Now(),
-		encrypted:  opts.DecKey != "",
+		id:          sessionID,
+		token:       token,
+		port:        port,
+		dir:         dir,
+		srv:         srv,
+		startedAt:   time.Now(),
+		lastAccess:  time.Now(),
+		encrypted:   opts.DecKey != "",
+		format:      opts.Format,
+		subtitleURL: opts.SubtitleURL,
+		lanIP:       lanIP(), // 会话内缓存一次：info() 高频拉取不再重复枚举网卡
 	}
 
 	args := buildFFmpegArgs(ffmpeg, opts, dir, opts.DecKey)
@@ -184,6 +198,15 @@ func castRelayStart(opts relayOptions) (*relaySessionInfo, error) {
 		_ = srv.Serve(ln) // 端口已预先绑定，不存在二次绑定竞态
 	}()
 
+	// 产物就绪判定按档位分流（R2）：hls = 清单+分片；ts = stream.ts > 64KB
+	// （对齐 hls ready 的保守口径，起步阶段的空洞文件不算就绪）。
+	productReady := func() bool {
+		if opts.Format == "ts" {
+			return tsReady(dir)
+		}
+		return indexReady(dir) && hasSegments(dir)
+	}
+
 	// 3 秒快检：进程提前退出时，若已产出清单与分片则视为「转码完成」
 	// （短视频/小文件秒级完成，静态服务即可），否则才是早期失败。
 	deadline := time.NewTimer(relayFastWait)
@@ -191,7 +214,7 @@ func castRelayStart(opts relayOptions) (*relaySessionInfo, error) {
 	for {
 		select {
 		case <-session.waitCh:
-			if indexReady(dir) && hasSegments(dir) {
+			if productReady() {
 				session.ready = true
 				relayMu.Lock()
 				relaySessions[sessionID] = session
@@ -203,13 +226,17 @@ func castRelayStart(opts relayOptions) (*relaySessionInfo, error) {
 				"中继启动失败（ffmpeg 提前退出，检查密钥与播放地址）")
 		case <-deadline.C:
 			// 超时但进程仍存活：转码慢属正常，放行交给电视端边转边播。
-			session.ready = indexReady(dir)
+			if opts.Format == "ts" {
+				session.ready = tsReady(dir)
+			} else {
+				session.ready = indexReady(dir)
+			}
 			relayMu.Lock()
 			relaySessions[sessionID] = session
 			relayMu.Unlock()
 			return session.info(), nil
 		default:
-			if indexReady(dir) && hasSegments(dir) {
+			if productReady() {
 				session.ready = true
 				relayMu.Lock()
 				relaySessions[sessionID] = session
@@ -247,20 +274,41 @@ func (s *relaySession) touch() {
 }
 
 func (s *relaySession) info() *relaySessionInfo {
+	// 分片数只对 hls 档有意义；ts 档产物是单文件 stream.ts（不能把它当
+	// 分片计数，诊断「电视拉到几个分片」会失真）。
 	segments := 0
-	if entries, err := os.ReadDir(s.dir); err == nil {
-		for _, e := range entries {
-			if strings.HasSuffix(e.Name(), ".ts") {
-				segments++
+	if s.format != "ts" {
+		if entries, err := os.ReadDir(s.dir); err == nil {
+			for _, e := range entries {
+				if strings.HasSuffix(e.Name(), ".ts") {
+					segments++
+				}
 			}
 		}
+	}
+	// LAN IP 会话内缓存一次（castRelayStart 时取好）；测试直建的结构体
+	// 无缓存值时回落 lanIP()。
+	lan := s.lanIP
+	if lan == "" {
+		lan = lanIP()
+	}
+	// 产物 URL 按档位分流（R2）：hls 指向清单；ts 指向 stream.ts——
+	// Dart 侧按 URL 扩展名自动判 video/mp2t。
+	url := fmt.Sprintf("http://%s:%d/cast/%s/index.m3u8", lan, s.port, s.token)
+	if s.format == "ts" {
+		url = fmt.Sprintf("http://%s:%d/cast/%s/stream.ts", lan, s.port, s.token)
+	}
+	format := s.format
+	if format != "ts" {
+		format = "hls"
 	}
 	return &relaySessionInfo{
 		Session:   s.id,
 		Token:     s.token,
 		Port:      s.port,
-		URL:       fmt.Sprintf("http://%s:%d/cast/%s/index.m3u8", lanIP(), s.port, s.token),
-		Format:    "hls",
+		URL:       url,
+		Format:    format,
+		LanIP:     lan,
 		Encrypted: s.encrypted,
 		UptimeMs:  time.Since(s.startedAt).Milliseconds(),
 		Segments:  segments,
@@ -311,7 +359,13 @@ func startSweeper() {
 	}(relaySweeper)
 }
 
-// buildFFmpegArgs 组装解密转码命令（H.264/AAC HLS，guoappxxx 验证参数）。
+// buildFFmpegArgs 组装转码命令，按输出档位分流（R2）：
+//
+//   - hls（默认/空/未知值）：libx264+aac 转 HLS（guoappxxx 验证参数，
+//     **字节级保持现状**——hls 分支的任何改动都会影响已调通的设备）；
+//   - ts：Sink 只认 TS 容器时 remux（-c copy 不重编码，WMP 族不认 HLS
+//     清单，TS 直流才是它们的母语；-muxdelay 0 / -muxpreload 0 降起播
+//     延迟），产物单文件 stream.ts。
 func buildFFmpegArgs(ffmpeg string, opts relayOptions, dir string, decKey string) []string {
 	input := opts.URL
 	if decKey != "" {
@@ -330,6 +384,16 @@ func buildFFmpegArgs(ffmpeg string, opts relayOptions, dir string, decKey string
 	}
 	if decKey != "" {
 		args = append(args, "-decryption_key", decKey)
+	}
+	if opts.Format == "ts" {
+		args = append(args,
+			"-i", input,
+			"-c", "copy",
+			"-muxdelay", "0", "-muxpreload", "0",
+			"-f", "mpegts",
+			filepath.Join(dir, "stream.ts"),
+		)
+		return args
 	}
 	// 备用地址：主地址 ffmpeg 自己会失败退出 → 上层重试时换备用。
 	args = append(args,
@@ -473,6 +537,14 @@ func indexReady(dir string) bool {
 	return err == nil
 }
 
+// tsReady 判定 TS 直流产物就绪（R2）：stream.ts 存在且 > 64KB——对齐 hls
+// ready 的保守口径（起步阶段的空洞/极小文件不算就绪，避免把启动瞬间当
+// 「转码完成」）。
+func tsReady(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, "stream.ts"))
+	return err == nil && info.Size() > 64*1024
+}
+
 func hasSegments(dir string) bool {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -592,11 +664,28 @@ func serveCastFiles(s *relaySession, ln net.Listener) {
 // serveCastFile 伺服单个清单/分片并记录电视取流日志（M0-5）。
 // http.ServeFile 自己处理 Range/206/416：用 accessRecorder 包一层拿状态码
 // 与字节数，并按 M1-9 条件化规则附加 DLNA 响应头。
+//
+// ts 档（R2）：token 根路径（无清单可给）301 到 stream.ts——部分接收端只
+// 拼 token 前缀取流，重定向保证拿得到产物；stream.ts 走 ServeFile 现有
+// Range/206/accessRecorder 路径，与 hls 分片同口径。
 func (s *relaySession) serveCastFile(w http.ResponseWriter, r *http.Request) {
 	s.touch()
 	name := strings.TrimPrefix(r.URL.Path, "/cast/"+s.token+"/")
+	if s.format == "ts" && (name == "" || name == "/") {
+		rec := s.newAccessRecorder(w, r, "")
+		http.Redirect(rec, r, "stream.ts", http.StatusMovedPermanently)
+		s.recordAccess(r, rec.status, rec.bytes)
+		return
+	}
 	name = filepath.Base(name) // 防 ../ 穿越
-	rec := &accessRecorder{
+	rec := s.newAccessRecorder(w, r, name)
+	http.ServeFile(rec, r, filepath.Join(s.dir, name))
+	s.recordAccess(r, rec.status, rec.bytes)
+}
+
+// newAccessRecorder 组装取流记录器（条件化 DLNA 头规则见 accessRecorder）。
+func (s *relaySession) newAccessRecorder(w http.ResponseWriter, r *http.Request, name string) *accessRecorder {
+	return &accessRecorder{
 		ResponseWriter: w,
 		status:         http.StatusOK,
 		// playbridge 条件化写法：设备显式索要才回 contentFeatures。
@@ -604,9 +693,10 @@ func (s *relaySession) serveCastFile(w http.ResponseWriter, r *http.Request) {
 		// 清单路由不声明 byte-seek（review §8.5 诚实化）：只删 Accept-Ranges
 		// 声明，Range 请求仍按 ServeFile 真实行为应答。
 		suppressAcceptRanges: strings.HasSuffix(strings.ToLower(name), ".m3u8"),
+		// 字幕第三通道（R3）：仅会话登记了字幕才带（与 Dart 侧
+		// LocalMediaServer/CastMediaProxy 同规，未登记不产生噪声）。
+		captionSec: s.subtitleURL,
 	}
-	http.ServeFile(rec, r, filepath.Join(s.dir, name))
-	s.recordAccess(r, rec.status, rec.bytes)
 }
 
 // relayContentFeatures 是 contentFeatures.dlna.org 的值：中继产物是静态
@@ -626,7 +716,8 @@ func setDlnaHeader(h http.Header, name, value string) {
 // 并在首写头时附加 DLNA 响应头（M1-9，与 LocalMediaServer/CastMediaProxy 同规）：
 // transferMode.dlna.org: Streaming 恒带；contentFeatures.dlna.org 仅当请求带
 // getcontentFeatures.dlna.org: 1 才回；realTimeInfo.dlna.org 恒带；
-// HLS 清单响应删除 Accept-Ranges 声明（TS 分片按 ServeFile 真实现状保留）。
+// CaptionInfo.sec 仅会话登记字幕才带（R3）；HLS 清单响应删除 Accept-Ranges
+// 声明（TS 分片按 ServeFile 真实现状保留）。
 type accessRecorder struct {
 	http.ResponseWriter
 	status               int
@@ -634,6 +725,7 @@ type accessRecorder struct {
 	bytes                int64
 	wantContentFeatures  bool
 	suppressAcceptRanges bool
+	captionSec           string // 非空时媒体响应带 CaptionInfo.sec（R3）
 }
 
 func (w *accessRecorder) WriteHeader(code int) {
@@ -643,6 +735,11 @@ func (w *accessRecorder) WriteHeader(code int) {
 		setDlnaHeader(h, "transferMode.dlna.org", "Streaming")
 		if w.wantContentFeatures {
 			setDlnaHeader(h, "contentFeatures.dlna.org", relayContentFeatures)
+		}
+		if w.captionSec != "" {
+			// 直写 header map 保留 Samsung 规范驼峰拼写（与 transferMode 同坑：
+			// net/http 的 Set 会把键名改写成首字母大写形式）。
+			setDlnaHeader(h, "CaptionInfo.sec", w.captionSec)
 		}
 		setDlnaHeader(h, "realTimeInfo.dlna.org", "DLNA.ORG_TLAG=*")
 		if w.suppressAcceptRanges {

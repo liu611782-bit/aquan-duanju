@@ -62,6 +62,19 @@ class CastRelayProbe {
     if (reader == null || session == null) return;
     try {
       final status = await reader(session);
+      // R3：转写中继会话的监听 IP/端口/URL 进诊断目标字段（会话激活期间）。
+      // 面板防火墙指引消费 selectedIp/mediaPort——中继投屏时同样可见；
+      // setTarget 只覆盖非 null 项，旧版核心缺字段时不误清已有值。
+      final lan = status['lanIp']?.toString() ?? '';
+      final port = (status['port'] as num?)?.toInt();
+      final url = status['url']?.toString() ?? '';
+      if (lan.isNotEmpty || port != null || url.isNotEmpty) {
+        _diagnostics.setTarget(
+          selectedIp: lan.isEmpty ? null : lan,
+          mediaPort: port,
+          mediaUrl: url.isEmpty ? null : url,
+        );
+      }
       final recent = status['recent'];
       if (recent is! List) return;
       for (final raw in recent) {

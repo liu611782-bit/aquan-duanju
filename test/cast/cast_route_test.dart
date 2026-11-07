@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:aquan_duanju/core/cast/cast_media_type.dart';
 import 'package:aquan_duanju/core/cast/cast_recipe.dart';
 import 'package:aquan_duanju/core/cast/cast_route.dart';
+import 'package:aquan_duanju/core/cast/didl.dart';
 
 void main() {
   const mp4 = CastMediaType(mime: 'video/mp4', fileName: 'video.mp4', kind: CastMediaKind.video);
@@ -171,6 +172,134 @@ void main() {
       expect(sinkHasHls(const <String>['http-get:*:application/x-mpegurl:*']), isTrue);
       expect(sinkHasHls(const <String>['http-get:*:*:*', 'http-get']), isFalse);
       expect(sinkHasHls(const <String>[]), isFalse);
+    });
+  });
+
+  group('编码提示合并与嗅探→relay（R1 / AC-2）', () {
+    test('mergeCodecHint：红果显式优先于嗅探（回归断言）', () {
+      // 显式提示恒优先——哪怕显式是 H.264、嗅探说 HEVC（显式就是权威）。
+      expect(mergeCodecHint('h264', 'hevc'), 'h264');
+      expect(mergeCodecHint('hevc', 'av1'), 'hevc');
+      expect(mergeCodecHint(' HEVC ', 'av1'), 'HEVC', reason: '显式原样透传，大小写归一在 _isHighCodec');
+      // 显式为空 → 用嗅探。
+      expect(mergeCodecHint('', 'av1'), 'av1');
+      expect(mergeCodecHint('  ', 'hevc'), 'hevc');
+      // 都缺 → 空串（不转码）。
+      expect(mergeCodecHint('', null), '');
+    });
+
+    test('嗅探 codecHint → auto 中继（CMS 无显式提示的源）', () {
+      const sniffedHevc = CastMediaType(
+          mime: 'video/mp4', fileName: 'video.mp4', kind: CastMediaKind.video, codecHint: 'hevc');
+      const sniffedAv1 = CastMediaType(
+          mime: 'video/mp4', fileName: 'video.mp4', kind: CastMediaKind.video, codecHint: 'av1');
+      expect(
+        resolveCastRoute(mode: CastTranscodeMode.auto, mediaType: sniffedHevc),
+        CastRoute.relay,
+      );
+      expect(
+        resolveCastRoute(mode: CastTranscodeMode.auto, mediaType: sniffedAv1, sinkMimes: sinkHls),
+        CastRoute.relay,
+        reason: '嗅探 HEVC/AV1 无视 Sink 宣告，统一转 H.264',
+      );
+      // 无嗅探无显式（现状回归）：MP4 直投。
+      const plain = CastMediaType(mime: 'video/mp4', fileName: 'video.mp4', kind: CastMediaKind.video);
+      expect(
+        resolveCastRoute(mode: CastTranscodeMode.auto, mediaType: plain),
+        CastRoute.direct,
+      );
+    });
+
+    test('显式提示与嗅探提示合并后进选路（controller 口径演练）', () {
+      const sniffed = CastMediaType(
+          mime: 'video/mp4', fileName: 'video.mp4', kind: CastMediaKind.video, codecHint: 'hevc');
+      // 红果说 h264 → 合并结果 h264 → 不转码（显式优先，现状不回归）。
+      expect(
+        resolveCastRoute(
+            mode: CastTranscodeMode.auto,
+            mediaType: sniffed,
+            codecHint: mergeCodecHint('h264', sniffed.codecHint)),
+        CastRoute.direct,
+      );
+      // 红果无提示 → 合并结果 hevc → 中继。
+      expect(
+        resolveCastRoute(
+            mode: CastTranscodeMode.auto,
+            mediaType: sniffed,
+            codecHint: mergeCodecHint('', sniffed.codecHint)),
+        CastRoute.relay,
+      );
+    });
+  });
+
+  group('中继输出档位 relayFormatFor（R2 / AC-4）', () {
+    test('Sink 含 HLS mime → hls（现状）', () {
+      expect(relayFormatFor(sinkHls), 'hls');
+      expect(relayFormatFor(const <String>['http-get:*:application/x-mpegurl:*']), 'hls');
+      // HLS 与 TS 同告 → HLS 优先（hls 产物是最普遍的兼容形态）。
+      expect(
+        relayFormatFor(const <String>[
+          'http-get:*:video/mp2t:*',
+          'http-get:*:application/x-mpegurl:*',
+        ]),
+        'hls',
+      );
+    });
+
+    test('Sink 无 HLS 有 TS 容器拼写 → ts（WMP 族）', () {
+      expect(relayFormatFor(const <String>['http-get:*:video/mp2t:*']), 'ts');
+      expect(
+        relayFormatFor(const <String>['http-get:*:video/vnd.dlna.mpeg-tts:*']),
+        'ts',
+        reason: '果果投屏/投屏电视Q3 的 TS 拼写',
+      );
+      expect(
+        relayFormatFor(const <String>['http-get:*:video/mp4:*', 'http-get:*:video/mp2t:*']),
+        'ts',
+      );
+    });
+
+    test('Sink 缺失/未知 → hls（证据缺失回落现状，不回归）', () {
+      expect(relayFormatFor(const <String>[]), 'hls');
+      expect(relayFormatFor(const <String>['http-get:*:video/mp4:*']), 'hls');
+      expect(relayFormatFor(const <String>['http-get:*:*/*:*', 'http-get']), 'hls',
+          reason: '通配与残缺条目不算证据');
+    });
+  });
+
+  group('中继 TS 档配方链升级 upgradeChainForTsProduct（R2 DIDL 对齐）', () {
+    test('默认 standard 升级 sinkEntry；其余模板保持原样', () {
+      const chain = <CastRecipe>[
+        CastRecipe(), // full + standard（梯度首项 = 现状默认形态）
+        CastRecipe(
+            didl: DidlVariant.compact,
+            protocolInfoTemplate: DidlProtocolInfoTemplate.bare),
+        CastRecipe(
+            didl: DidlVariant.full,
+            protocolInfoTemplate: DidlProtocolInfoTemplate.withPn),
+      ];
+      final upgraded = upgradeChainForTsProduct(chain);
+      expect(upgraded[0].protocolInfoTemplate, DidlProtocolInfoTemplate.sinkEntry,
+          reason: 'standard → sinkEntry（Sink 无 TS 条目时模板自身回落 standard）');
+      expect(upgraded[0].didl, DidlVariant.full, reason: '其余字段不动');
+      expect(upgraded[1].protocolInfoTemplate, DidlProtocolInfoTemplate.bare,
+          reason: '显式旋钮不覆盖');
+      expect(upgraded[2].protocolInfoTemplate, DidlProtocolInfoTemplate.withPn);
+      expect(upgraded.length, chain.length);
+    });
+
+    test('sinkEntry 模板自身回落语义：Sink 无同容器条目 → 第 4 段用标准 flags', () {
+      // didl.dart 现有语义演练：升级到 sinkEntry 后 Sink 缺条目不炸。
+      final fourth = sinkEntryFourthSegment(
+        const <String>['http-get:*:video/mp4:*'],
+        'video/mp2t',
+      );
+      expect(fourth, isNull, reason: '无同容器条目回落 standard（buildDidl 处理）');
+      final hit = sinkEntryFourthSegment(
+        const <String>['http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=MPEG_TS_HD_NA;*'],
+        'video/mp2t',
+      );
+      expect(hit, 'DLNA.ORG_PN=MPEG_TS_HD_NA;*', reason: '别名组对上后逐字照抄');
     });
   });
 }

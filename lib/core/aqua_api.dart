@@ -91,6 +91,9 @@ class AquaApi implements AquaImageFetcher, MangaPageFetcher {
 
   /// 启动局域网解密中继：返回 {session, token, port, url, format, ready}。
   /// [userAgent]/[referer] 透传给 ffmpeg -headers（B 站等 CDN 防盗链必需）。
+  /// [format] 是输出档位（R2）：空/"hls"（默认）| "ts"——Go 侧对空/未知值
+  /// 一律按 hls，旧调用方零改动。[subtitleUrl] 是会话字幕地址（R3）：非空
+  /// 时中继媒体响应带 `CaptionInfo.sec` 第三通道。
   Future<Map<String, dynamic>> castRelayStart({
     required String url,
     String backupUrl = '',
@@ -98,6 +101,8 @@ class AquaApi implements AquaImageFetcher, MangaPageFetcher {
     String audioUrl = '',
     String userAgent = '',
     String referer = '',
+    String format = '',
+    String subtitleUrl = '',
   }) async {
     final r = await _client.call('castRelayStart', [
       jsonEncode({
@@ -107,6 +112,8 @@ class AquaApi implements AquaImageFetcher, MangaPageFetcher {
         'audio_url': audioUrl,
         'user_agent': userAgent,
         'referer': referer,
+        'format': format,
+        'subtitle_url': subtitleUrl,
       }),
     ]);
     return _map(r);

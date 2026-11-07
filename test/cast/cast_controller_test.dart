@@ -447,7 +447,7 @@ void main() {
     /// 注入记录型转码挂点，返回调用记录列表；[fail] = 模拟中继起不来。
     List<String> hook(CastController controller, {bool fail = false}) {
       final hooked = <String>[];
-      controller.transcodeResolver = (m) async {
+      controller.transcodeResolver = (m, {relayFormat, relaySubtitleUrl}) async {
         hooked.add(m.url);
         return fail ? null : 'http://192.168.1.9:18280/relay/index.m3u8';
       };
@@ -518,6 +518,158 @@ void main() {
       expect(hooked2, hasLength(1), reason: 'Sink 无 HLS mime → 走中继');
       expect(unsupported.lastRequest!.didl.mimeType,
           'application/vnd.apple.mpegurl');
+      controller2.dispose();
+    });
+
+    test('auto + MKV + Sink 无 HLS 有 TS → ts 档：resolver 收 relayFormat=ts，'
+        '产物 URL .ts 结尾且 DIDL 判 video/mp2t（AC-4）', () async {
+      final compat = CapturingCompatTransport()
+        ..sinkAnswer = <String>{'http-get:*:video/mp2t:*'};
+      final controller = CastController(transportFactory: (_) => compat);
+      final formats = <String>[];
+      controller.transcodeResolver = (m, {relayFormat, relaySubtitleUrl}) async {
+        formats.add(relayFormat ?? '');
+        return 'http://192.168.1.9:29170/cast/AbCdEf0123456789AbCdEf0123456789/stream.ts';
+      };
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(url: 'http://192.168.1.10/1.mkv', title: 't'),
+      );
+      expect(formats, ['ts'], reason: 'Sink 无 HLS 有 TS → ts 档');
+      expect(compat.lastRequest!.url.toString(), endsWith('/stream.ts'),
+          reason: 'ts 档产物 URL 以 .ts 结尾');
+      expect(compat.lastRequest!.didl.mimeType, 'video/mp2t',
+          reason: '产物 mime 按 URL 扩展名判，DIDL 与产物同源');
+      controller.dispose();
+    });
+
+    test('Sink 含 HLS → relayFormat=hls（现状）；Sink 缺失 → hls（证据缺失回落）',
+        () async {
+      // Sink 含 HLS 时 HLS 源走直投，用 MKV 强制进中继看档位。
+      final compat1 = CapturingCompatTransport()
+        ..sinkAnswer = <String>{'http-get:*:application/vnd.apple.mpegurl:*'};
+      final controller1 = CastController(transportFactory: (_) => compat1);
+      final formats1 = <String>[];
+      controller1.transcodeResolver =
+          (m, {relayFormat, relaySubtitleUrl}) async {
+        formats1.add(relayFormat ?? '');
+        return 'http://192.168.1.9:18280/relay/index.m3u8';
+      };
+      await controller1.castTo(
+        _target('d1'),
+        const CastMedia(url: 'http://192.168.1.10/1.mkv', title: 't'),
+      );
+      expect(formats1, ['hls'], reason: 'Sink 含 HLS → hls 档（现状）');
+      expect(compat1.lastRequest!.didl.mimeType, 'application/vnd.apple.mpegurl');
+      controller1.dispose();
+
+      final compat2 = CapturingCompatTransport()..sinkAnswer = <String>{};
+      final controller2 = CastController(transportFactory: (_) => compat2);
+      final formats2 = <String>[];
+      controller2.transcodeResolver =
+          (m, {relayFormat, relaySubtitleUrl}) async {
+        formats2.add(relayFormat ?? '');
+        return 'http://192.168.1.9:18280/relay/index.m3u8';
+      };
+      await controller2.castTo(
+        _target('d1'),
+        const CastMedia(url: 'http://192.168.1.10/1.mkv', title: 't'),
+      );
+      expect(formats2, ['hls'], reason: 'Sink 缺失/未知 → hls（不回归）');
+      controller2.dispose();
+    });
+
+    test('TS 档配方链升级：默认 standard → sinkEntry，Sink TS 拼写进 DIDL',
+        () async {
+      final compat = CapturingCompatTransport()
+        ..sinkAnswer = <String>{
+          'http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=MPEG_TS_HD_NA;*'
+        };
+      final controller = CastController(transportFactory: (_) => compat);
+      controller.transcodeResolver =
+          (m, {relayFormat, relaySubtitleUrl}) async {
+        return 'http://192.168.1.9:29170/cast/AbCdEf0123456789AbCdEf0123456789/stream.ts';
+      };
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(url: 'http://192.168.1.10/1.mkv', title: 't'),
+      );
+      expect(compat.lastRequest!.recipes.first.protocolInfoTemplate,
+          DidlProtocolInfoTemplate.sinkEntry,
+          reason: 'TS 档产物：梯度首项 standard 升级 sinkEntry');
+      expect(compat.lastRequest!.didl.mimeType, 'video/vnd.dlna.mpeg-tts',
+          reason: '产物 mime 照抄设备 TS 拼写（preferSinkSpelling）');
+      controller.dispose();
+    });
+
+    test('R3：会话字幕随中继调用透传（relaySubtitleUrl）', () async {
+      final compat = CapturingCompatTransport()
+        ..sinkAnswer = <String>{'http-get:*:video/mp2t:*'};
+      final controller = CastController(transportFactory: (_) => compat);
+      Uri? passed;
+      controller.transcodeResolver = (m, {relayFormat, relaySubtitleUrl}) async {
+        passed = relaySubtitleUrl;
+        return 'http://192.168.1.9:29170/cast/AbCdEf0123456789AbCdEf0123456789/stream.ts';
+      };
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(
+          url: 'http://192.168.1.10/1.mkv',
+          title: 't',
+          subtitleUrl: 'http://192.168.1.10/sub.srt',
+        ),
+      );
+      expect(passed, Uri.parse('http://192.168.1.10/sub.srt'),
+          reason: '登记的字幕地址传给适配器 → castRelayStart subtitle_url');
+      controller.dispose();
+    });
+
+    test('R1：编码提示合并——显式 h264 压过嗅探 hevc（红果优先级回归）', () async {
+      // 本地伺服一个 ftyp=hvc1 的 MP4 头：控制器走 defaultSniffHead 真嗅探，
+      // 嗅探产出 codecHint=hevc（模拟 CMS 无显式提示源的内容特征）。
+      final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      upstream.listen((req) async {
+        const size = 8 + 4;
+        req.response.add(<int>[
+          0, 0, 0, size, ...'ftyp'.codeUnits, ...'hvc1'.codeUnits,
+        ]);
+        await req.response.close();
+      });
+      addTearDown(upstream.close);
+      final mediaUrl = 'http://127.0.0.1:${upstream.port}/media';
+
+      // 显式 codecHint=h264：合并结果 h264 → 直投不转码（红果行为不回归）。
+      final compat1 = CapturingCompatTransport();
+      final controller1 = CastController(transportFactory: (_) => compat1);
+      final hooked1 = <String>[];
+      controller1.transcodeResolver =
+          (m, {relayFormat, relaySubtitleUrl}) async {
+        hooked1.add(m.url);
+        return 'http://192.168.1.9:18280/relay/index.m3u8';
+      };
+      await controller1.castTo(
+        _target('d1'),
+        CastMedia(url: mediaUrl, title: 't', codecHint: 'h264'),
+      );
+      expect(hooked1, isEmpty, reason: '显式 h264 优先于嗅探 hevc → 不转码');
+      expect(compat1.lastRequest!.didl.mimeType, 'video/mp4');
+      controller1.dispose();
+
+      // 无显式提示：同一内容嗅探 hevc 生效 → 中继转码（AC-2）。
+      final compat2 = CapturingCompatTransport();
+      final controller2 = CastController(transportFactory: (_) => compat2);
+      final hooked2 = <String>[];
+      controller2.transcodeResolver =
+          (m, {relayFormat, relaySubtitleUrl}) async {
+        hooked2.add(m.url);
+        return 'http://192.168.1.9:18280/relay/index.m3u8';
+      };
+      await controller2.castTo(
+        _target('d1'),
+        CastMedia(url: mediaUrl, title: 't'),
+      );
+      expect(hooked2, hasLength(1), reason: '嗅探 hevc → auto 中继');
+      expect(compat2.lastRequest!.didl.mimeType, 'application/vnd.apple.mpegurl');
       controller2.dispose();
     });
 
@@ -737,7 +889,7 @@ void main() {
       await controller.recipes
           .setTranscodeMode(_target('d1'), CastTranscodeMode.always);
       final hooked = <String>[];
-      controller.transcodeResolver = (m) async {
+      controller.transcodeResolver = (m, {relayFormat, relaySubtitleUrl}) async {
         hooked.add(m.url);
         return 'http://127.0.0.1:18280/relay/index.m3u8';
       };
