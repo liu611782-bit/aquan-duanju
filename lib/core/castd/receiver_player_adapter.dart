@@ -7,6 +7,8 @@
 /// [StubReceiverPlayer]。
 library;
 
+import 'dart:async';
+
 /// UPnP TransportState 常量（蓝本 DlnaState.kt）。
 const String kTransportNoMedia = 'NO_MEDIA_PRESENT';
 const String kTransportTransitioning = 'TRANSITIONING';
@@ -40,6 +42,30 @@ class ReceiverPlayerStatus {
   final bool muted;
 }
 
+/// 引擎实况 → UPnP TransportState 的纯映射（media_kit 适配层使用；stub
+/// 引擎状态本就是 UPnP 口径不经此）。
+///
+/// 优先级（蓝本 DlnaState.kt 口径 + 本任务 design §4）：
+/// 无媒体 → NO_MEDIA_PRESENT；收到过 Stop → STOPPED（下次 load/play 前
+/// 引擎实况不可信）；缓冲中 → TRANSITIONING；播放中 → PLAYING；
+/// 自然播完 / 已加载未播 → STOPPED；其余（暂停）→ PAUSED_PLAYBACK。
+String mapReceiverTransportState({
+  required bool hasMedia,
+  required bool stopRequested,
+  required bool loadedNotPlayed,
+  required bool buffering,
+  required bool playing,
+  required bool completed,
+}) {
+  if (!hasMedia) return kTransportNoMedia;
+  if (stopRequested) return kTransportStopped;
+  if (buffering) return kTransportTransitioning;
+  if (playing) return kTransportPlaying;
+  if (completed) return kTransportStopped;
+  if (loadedNotPlayed) return kTransportStopped;
+  return kTransportPaused;
+}
+
 /// 接收端播放引擎抽象。
 ///
 /// `status()` 为同步读取（实现方持有引擎回调缓存的最新值）；动作方法
@@ -47,6 +73,10 @@ class ReceiverPlayerStatus {
 /// ErrorLog——协议面只对「非法请求」回 fault）。
 abstract class ReceiverPlayer {
   ReceiverPlayerStatus status();
+
+  /// 实况流（接收端播放页订阅；实现方在状态/进度变化时推送，位置类
+  /// 事件可节流）。
+  Stream<ReceiverPlayerStatus> get statusStream;
 
   /// 载入媒体（SetAVTransportURI）：进入 TRANSITIONING，完成后 STOPPED
   /// （已加载待播）。重复 load = 新投替换当前会话。
@@ -63,7 +93,8 @@ abstract class ReceiverPlayer {
 /// 测试 / Phase A 默认引擎：内存状态机，[position] 不自走（测试直接赋值）。
 ///
 /// [duration] 由引擎持有方（真实引擎=媒体元数据；测试=直接赋值）设置，
-/// GetPositionInfo 的 TrackDuration 从这里出 `H:MM:SS`。
+/// GetPositionInfo 的 TrackDuration 从这里出 `H:MM:SS`。任何状态/进度
+/// 变化都会往 [statusStream] 推一帧实况。
 class StubReceiverPlayer implements ReceiverPlayer {
   StubReceiverPlayer({this.loadDelay = Duration.zero, this.autoPlay = false});
 
@@ -73,11 +104,14 @@ class StubReceiverPlayer implements ReceiverPlayer {
   /// load 完成后是否自动 PLAYING（多数 DLNA 发送端会显式 Play，默认 false）。
   final bool autoPlay;
 
+  final StreamController<ReceiverPlayerStatus> _status =
+      StreamController<ReceiverPlayerStatus>.broadcast();
+
   String _state = kTransportNoMedia;
   Duration _position = Duration.zero;
-  Duration duration = Duration.zero;
-  int volume = 100;
-  bool muted = false;
+  Duration _duration = Duration.zero;
+  int _volume = 100;
+  bool _muted = false;
 
   Uri? loadedUri;
   String? loadedTitle;
@@ -90,17 +124,42 @@ class StubReceiverPlayer implements ReceiverPlayer {
   final List<bool> mutes = [];
 
   /// 测试直改状态（驱动全转移表）。
-  set state(String value) => _state = value;
+  set state(String value) {
+    _state = value;
+    _notify();
+  }
 
-  set position(Duration value) => _position = value;
+  set position(Duration value) {
+    _position = value;
+    _notify();
+  }
+
+  Duration get duration => _duration;
+
+  set duration(Duration value) {
+    _duration = value;
+    _notify();
+  }
+
+  int get volume => _volume;
+
+  bool get muted => _muted;
+
+  void _notify() {
+    if (!_status.hasListener) return;
+    _status.add(status());
+  }
+
+  @override
+  Stream<ReceiverPlayerStatus> get statusStream => _status.stream;
 
   @override
   ReceiverPlayerStatus status() => ReceiverPlayerStatus(
         transportState: _state,
         position: _position,
-        duration: duration,
-        volume: volume,
-        muted: muted,
+        duration: _duration,
+        volume: _volume,
+        muted: _muted,
       );
 
   @override
@@ -110,10 +169,11 @@ class StubReceiverPlayer implements ReceiverPlayer {
     loadedTitle = title;
     _state = kTransportTransitioning;
     _position = Duration.zero;
+    _notify();
     if (loadDelay > Duration.zero) {
       await Future<void>.delayed(loadDelay);
     }
-    _state = autoPlay ? kTransportPlaying : kTransportStopped;
+    state = autoPlay ? kTransportPlaying : kTransportStopped;
   }
 
   @override
@@ -123,36 +183,38 @@ class StubReceiverPlayer implements ReceiverPlayer {
     if (_state == kTransportTransitioning || _state == kTransportNoMedia) {
       return;
     }
-    _state = kTransportPlaying;
+    state = kTransportPlaying;
   }
 
   @override
   Future<void> pause() async {
     pauseCount++;
-    if (_state == kTransportPlaying) _state = kTransportPaused;
+    if (_state == kTransportPlaying) state = kTransportPaused;
   }
 
   @override
   Future<void> stop() async {
     stopCount++;
-    if (_state != kTransportNoMedia) _state = kTransportStopped;
+    if (_state != kTransportNoMedia) state = kTransportStopped;
   }
 
   @override
   Future<void> seek(Duration position) async {
     seeks.add(position);
-    if (_state != kTransportNoMedia) _position = position;
+    if (_state != kTransportNoMedia) this.position = position;
   }
 
   @override
   Future<void> setVolume(int percent) async {
     volumes.add(percent);
-    volume = percent;
+    _volume = percent;
+    _notify();
   }
 
   @override
   Future<void> setMuted(bool value) async {
     mutes.add(value);
-    muted = value;
+    _muted = value;
+    _notify();
   }
 }

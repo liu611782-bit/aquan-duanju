@@ -37,6 +37,7 @@ class ReceiverSession {
 class ReceiverController {
   ReceiverController({
     this.playerOverride,
+    this.playerFactory,
     this.udnSeed,
     this.udnLoader,
     this.friendlyNameSeed,
@@ -48,9 +49,17 @@ class ReceiverController {
 
   /// Phase A 默认 stub 引擎；Phase B 注入 media_kit 适配实现。
   final ReceiverPlayer? playerOverride;
+
+  /// 惰性引擎工厂：首次 start() 才创建（media_kit Player 不在构造期
+  /// 初始化媒体库；测试传 [playerOverride] 即可，不走工厂）。
+  final ReceiverPlayer Function()? playerFactory;
+
   final String? udnSeed;
   final Future<String?> Function()? udnLoader;
   final String? friendlyNameSeed;
+
+  /// 用户改过的接收名（设置页可改；覆盖 [friendlyNameSeed]，空 = 未改）。
+  String? friendlyNameOverride;
 
   final int preferredPort;
   final int portAttempts;
@@ -73,6 +82,9 @@ class ReceiverController {
 
   ReceiverPlayer get player => _player!;
 
+  /// 未 start 过时为 null（开关关闭路径「尽力停引擎」用，不炸断言）。
+  ReceiverPlayer? get playerOrNull => _player;
+
   bool get running => _running;
 
   /// HTTP 描述服务端口；未运行为 null。
@@ -80,8 +92,10 @@ class ReceiverController {
 
   String? get udn => _udn;
 
-  /// 接收名（默认「<主机名>（aquan 接收）」，Phase B 可改并持久化）。
+  /// 接收名：用户改名 > 注入名 > 「<主机名>（aquan 接收）」（R4.2 可改）。
   String get friendlyName {
+    final override = friendlyNameOverride;
+    if (override != null && override.isNotEmpty) return override;
     final seed = friendlyNameSeed;
     if (seed != null && seed.isNotEmpty) return seed;
     var host = '';
@@ -99,7 +113,7 @@ class ReceiverController {
     _running = true;
     try {
       _udn = udnSeed ?? (await udnLoader?.call()) ?? uuidV4();
-      _player ??= playerOverride ?? StubReceiverPlayer();
+      _player ??= playerOverride ?? playerFactory?.call() ?? StubReceiverPlayer();
       final player = _player!;
       _renderer ??= ReceiverRenderer(player: player, onOpened: _onMediaOpened);
       _gena ??= ReceiverGena(renderer: _renderer!);

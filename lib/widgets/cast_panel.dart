@@ -16,6 +16,7 @@ import '../core/cast/cast_service.dart';
 import '../core/cast/soap_client.dart';
 import '../core/cast/ssdp_discovery.dart';
 import '../core/error_log.dart';
+import 'cast_receiver_tile.dart';
 import 'common.dart';
 import 'loading.dart';
 import 'tv_focusable.dart';
@@ -295,6 +296,15 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
               ],
             ),
             const SizedBox(height: 4),
+            // DLNA 接收端入口（仅桌面）：与设置页同一开关状态，本机也能
+            // 成为投屏目标；非桌面平台整块隐藏（B-4 守卫）。
+            CastReceiverTile(
+              compact: true,
+              onPersistEnabled: (v) =>
+                  widget.scope.settings.castReceiverEnabled = v,
+              receiverName: widget.scope.settings.castReceiverName,
+            ),
+            const Divider(height: 16),
             Row(
               children: [
                 Expanded(

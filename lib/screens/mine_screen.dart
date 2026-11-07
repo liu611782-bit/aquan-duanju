@@ -20,6 +20,7 @@ import '../core/backup_service.dart';
 import '../core/download_service.dart';
 import '../core/cache_maintenance.dart';
 import '../core/error_log.dart';
+import '../widgets/cast_receiver_tile.dart';
 import '../core/reader/reader_listen_settings.dart';
 import '../core/tv/tv_mode.dart';
 import '../widgets/tv_scope.dart';
@@ -656,6 +657,13 @@ class SettingsPanel extends StatelessWidget {
                 const SnackBar(content: Text('已保存，重启应用后生效')),
               );
             },
+          ),
+          // DLNA 接收端（仅桌面）：允许局域网内设备投到本机（含改名与
+          // 防火墙放行命令复制，非桌面整块隐藏）。
+          CastReceiverTile(
+            onPersistEnabled: (v) => scope.settings.castReceiverEnabled = v,
+            onRename: (name) => scope.settings.castReceiverName = name,
+            receiverName: scope.settings.castReceiverName,
           ),
           ListTile(
             leading: const Icon(Icons.mic_none),

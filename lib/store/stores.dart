@@ -327,6 +327,20 @@ class SettingsStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 接收端开关（「允许其他设备投到本机」，默认关；仅桌面暴露）。
+  bool get castReceiverEnabled => _prefs.getBool('cast.receiverEnabled') ?? false;
+  set castReceiverEnabled(bool v) {
+    _prefs.setBool('cast.receiverEnabled', v);
+    notifyListeners();
+  }
+
+  /// 接收端名称（空 = 默认「<主机名>（aquan 接收）」）。
+  String get castReceiverName => _prefs.getString('cast.receiverName') ?? '';
+  set castReceiverName(String v) {
+    _prefs.setString('cast.receiverName', v);
+    notifyListeners();
+  }
+
   // ---------- 播放器高级设置（带白名单 / 范围校验） ----------
 
   /// 默认硬解方式：拷回（copy）路径。

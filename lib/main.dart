@@ -21,11 +21,13 @@ import 'core/reader/speech/listen_media_bridge.dart';
 import 'core/aqua_client.dart';
 import 'core/aqua_error.dart';
 import 'core/cast/cast_service.dart';
+import 'core/castd/receiver_service.dart';
 import 'core/download_service.dart';
 import 'core/error_log.dart';
 import 'models/models.dart';
 import 'screens/detail_screen.dart';
 import 'screens/home_screen.dart';
+import 'screens/receiver_player_screen.dart';
 import 'core/books/book_source_store.dart';
 import 'core/ops_switches.dart';
 import 'core/sources/auto_source_manager.dart';
@@ -278,6 +280,34 @@ class AquaApp extends StatefulWidget {
 }
 
 class _AquaAppState extends State<AquaApp> {
+  /// DLNA 接收端接线（Phase B）：UDN 走 CastStore 持久化，来投会话开
+  /// 接收端播放页（全屏路由）；开关关闭且页开着时 popUntil 精确关页。
+  void _configureReceiver(CastStore cast) {
+    final receiver = CastReceiverService.instance;
+    receiver.udnLoader = cast.ensureReceiverUdn;
+    receiver.openSessionPage = (session) {
+      final navigator = rootNavigatorKey.currentState;
+      if (navigator == null) return false;
+      navigator.push(
+        MaterialPageRoute<void>(
+          fullscreenDialog: true,
+          settings: const RouteSettings(name: ReceiverPlayerScreen.routeName),
+          builder: (_) => const ReceiverPlayerScreen(),
+        ),
+      );
+      return true;
+    };
+    receiver.closeSessionPage = () {
+      rootNavigatorKey.currentState?.popUntil(
+        (route) => route.settings.name != ReceiverPlayerScreen.routeName,
+      );
+    };
+    unawaited(receiver.startIfEnabled(
+      enabledFlag: widget.settings.castReceiverEnabled,
+      name: widget.settings.castReceiverName,
+    ));
+  }
+
   AquaApi? _api;
   HistoryStore? _history;
   ReadingProgressStore? _reading;
@@ -407,6 +437,9 @@ class _AquaAppState extends State<AquaApp> {
       // 跨启动命中依赖这里）。
       CastService.instance
           .attachStores(recipes: cast.recipes, profiles: cast.profiles);
+      // DLNA 接收端（Phase B）：UDN 持久化 + 来投页路由；设置里开着则
+      // 直接拉起（失败只进 ErrorLog，不阻断启动）。
+      _configureReceiver(cast);
       await readerSettings.ensureLoaded();
       // 本地导入的阅读字体：重启后按记录过的路径重新注册。
       await ReaderFontRegistrar.ensureRegistered(
