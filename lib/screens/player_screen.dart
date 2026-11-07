@@ -18,6 +18,7 @@ import 'package:window_manager/window_manager.dart';
 import '../cli/launch_command.dart';
 import '../cli/player_bus.dart';
 import '../core/aqua_api.dart';
+import '../core/cast/cast_diagnostics.dart';
 import '../core/error_log.dart';
 import '../core/aqua_error.dart';
 import '../core/cast/cast_controller.dart';
@@ -2481,7 +2482,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       final pb = cached != null && prefetchUsable(cached, DateTime.now())
           ? cached
           : await castScope.api.resolvePlayback(nep.id);
-      if (pb.playback.streams.isEmpty) return null;
+      if (pb.playback.streams.isEmpty) {
+        // 连播终止可观测（UI 冒烟发现 143/144 静默未达接收端）：解析空流
+        // 是候选根因之一，记时间线与日志供诊断报告定位。
+        CastDiagnostics.instance.recordTimeline('连播终止：第${nep.number}集解析无可用流');
+        ErrorLog.instance.record('投屏', '连播解析无可用流：第${nep.number}集（${nep.id}）', null);
+        return null;
+      }
       final stream = _selectStream(pb.playback, _quality);
       var nextUrl = stream.url;
       var nextViaRelay = false;
@@ -2512,8 +2519,14 @@ class _PlayerScreenState extends State<PlayerScreen>
           }
           nextUrl = relay['url'] as String? ?? stream.url;
           nextViaRelay = true;
-        } catch (_) {
-          return null; // 中继起不来：本轮连播终止，走远端停止路径。
+        } catch (e) {
+          // 中继起不来：本轮连播终止，走远端停止路径——原因入时间线与日志
+          //（UI 冒烟发现连播部分集数静默未达接收端，此处原为静默 null）。
+          CastDiagnostics.instance
+              .recordTimeline('连播终止：第${nep.number}集中继启动失败');
+          ErrorLog.instance
+              .record('投屏', '连播中继启动失败：第${nep.number}集：$e', StackTrace.current);
+          return null;
         }
       }
       return CastMedia(
