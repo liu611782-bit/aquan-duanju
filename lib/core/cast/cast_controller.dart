@@ -266,6 +266,11 @@ class CastController extends ChangeNotifier {
   /// 由 UI 在发起投屏时注入（捕获当时的集数上下文），会话结束自动清空。
   Future<CastMedia?> Function()? onNextEpisode;
 
+  /// 跳集队列（遥控器上一集/手动跳集）：与 [onNextEpisode] 同一注入模式。
+  /// [delta] 语义由 UI 队列决定（-1 = 上一集）；0 或越界返回 null。
+  /// 会话结束自动清空。未注入时 UI 按钮置灰（直播/无队列场景）。
+  Future<CastMedia?> Function(int delta)? onEpisodeJump;
+
   bool _autoAdvancing = false;
 
   CastSessionState get state => _state;
@@ -274,6 +279,10 @@ class CastController extends ChangeNotifier {
   CastMedia? get currentMedia => _currentMedia;
   Duration get remoteDuration => _lastDuration;
   bool get isCasting => _state == CastSessionState.casting;
+
+  /// 最近一次轮询到的远端 transportState（原始 UPnP/CASTv2 词汇，未映射）。
+  /// 空串 = 尚未轮询到（UI 据此隐藏状态徽标）。
+  String get remoteTransportState => _lastTransportState;
 
   /// 远端进度：两次轮询之间按本地时钟插值，进度条不再「一秒一跳」。
   ///
@@ -296,6 +305,7 @@ class CastController extends ChangeNotifier {
   Duration _lastDuration = Duration.zero;
   DateTime? _polledAt;
   bool _lastRunning = false;
+  String _lastTransportState = '';
   int _pollFailures = 0;
   SsdpDiscovery? _discovery;
   StreamSubscription<SsdpEvent>? _discoverySub;
@@ -635,6 +645,7 @@ class CastController extends ChangeNotifier {
     _userStopping = false;
     _state = CastSessionState.connecting;
     _lastTimelineState = '';
+    _lastTransportState = '';
     _sessionSink = const <String>{};
     _sessionPreflightOk = false;
     // 诊断会话（M0）：重置会话级采集，保留发现阶段证据。纯采集，不影响链路。
@@ -911,126 +922,171 @@ class CastController extends ChangeNotifier {
       // 超时直接抛 TimeoutException，由下面的 catch 归一为「连投失败」。
       final next = await provider().timeout(const Duration(seconds: 10));
       if (next == null) return false;
-      // URL 形态旋钮与兼容模式三态沿用会话配方（连播与首投同选路）。
-      final remembered = recipes.lookup(device);
-      final suffixMode =
-          remembered?.urlSuffixMode ?? CastUrlSuffixMode.withExtension;
-      final transcodeMode = remembered?.transcodeMode ?? CastTranscodeMode.auto;
-      final compat =
-          transport is CastCompatTransport ? transport as CastCompatTransport : null;
-      // 预检刷新 Sink（失败沿用会话内记忆，不阻断连播）；提前到媒体准备
-      // 之前——兼容模式选路依赖 Sink 判定（M5-3）。
-      var sink = _sessionSink;
-      if (compat != null) {
-        try {
-          final probed =
-              await compat.preflight().timeout(const Duration(seconds: 2));
-          if (probed.isNotEmpty) {
-            sink = probed;
-            _sessionSink = probed;
-          }
-        } on Exception {
-          // 预检失败不阻断连播。
-        }
-      }
-      final subtitleUri = await _prepareSubtitle(device, next,
-          urlSuffixMode: suffixMode);
-      // 连播与首投共用同一段选路代码（M5-0/M5-3）。
-      final prepared = await _preparePlayUrl(
-        device,
-        next,
-        sink: sink,
-        transcodeMode: transcodeMode,
-        urlSuffixMode: suffixMode,
-        subtitleUrl: subtitleUri,
-      );
-      final playUrl = prepared.url;
-      // 连播换集：诊断目标只换 URL（IP/端口仍是本会话的服务）。
-      CastDiagnostics.instance.setTarget(mediaUrl: playUrl);
-      CastDiagnostics.instance.recordTimeline('连播下一集：${next.title}');
-      if (compat != null) {
-        // 媒体类型判定：选路已判定源类型时复用；本机转码产物按产物 URL
-        // 形态判 hint（与首投同口径）。
-        final mediaType = prepared.viaRelay
-            ? await resolveCastMediaType(
-                url: Uri.parse(playUrl),
-                hintMime: _relayProductMimeHint(playUrl),
-                sinkMimes: sink,
-              )
-            : prepared.sourceType ??
-                await resolveCastMediaType(
-                  url: Uri.parse(playUrl),
-                  hintMime: next.mimeHint,
-                  sinkMimes: sink,
-                  sniffHead: defaultSniffHead,
-                );
-        CastDiagnostics.instance.recordTimeline(
-            '连播媒体类型：${mediaType.mime}（${mediaType.fileName}）');
-        final succeeded = await compat.load(CastLoadRequest(
-          url: Uri.parse(playUrl),
-          title: next.title,
-          duration:
-              next.duration == null ? null : formatUpnpTime(next.duration!),
-          subtitleUrl: subtitleUri,
-          position: next.position,
-          didl: DidlRequest(
-            uri: Uri.parse(playUrl),
-            title: next.title,
-            mimeType: mediaType.mime,
-            duration: next.duration,
-            live: mediaType.live,
-            subtitleUri: subtitleUri,
-            headers: next.headers,
-          ),
-          recipes: _recipeChainFor(
-            device,
-            sink,
-            viaRelay: prepared.viaRelay,
-            productMime: mediaType.mime,
-          ),
-          protocolInfo: sink,
-        ));
-        if (succeeded != null) {
-          await _rememberRecipe(device, succeeded, sink: sink);
-        }
-      } else {
-        // 非 compat transport（Chromecast / 测试假件）：保持既有标准序列。
-        await transport.setUri(
-          Uri.parse(playUrl),
-          title: next.title,
-          duration:
-              next.duration == null ? null : formatUpnpTime(next.duration!),
-          subtitleUrl: subtitleUri,
-        );
-        await transport.play();
-      }
-      _currentMedia = CastMedia(
-        url: playUrl,
-        title: next.title,
-        coverUrl: next.coverUrl,
-        episodeIndex: next.episodeIndex,
-        episodeCount: next.episodeCount,
-        localPath: next.localPath,
-        headers: next.headers,
-        subtitleUrl: subtitleUri?.toString() ?? '',
-        isMirror: next.isMirror,
-        mimeHint: next.mimeHint,
-        duration: next.duration,
-        viaRelay: prepared.viaRelay,
-        codecHint: next.codecHint,
-      );
-      _lastPosition = Duration.zero;
-      _lastDuration = Duration.zero;
-      _polledAt = DateTime.now();
-      _lastRunning = true;
-      notifyListeners();
-      return true;
+      return await _pushMedia(device, transport, next);
     } on Exception {
       // 提供器超时/推送失败：按「没有下一集」处理，走远端停止路径。
       return false;
     } finally {
       _autoAdvancing = false;
     }
+  }
+
+  /// 遥控器「下一集」：复用连播链路（预取/选路/中继语义与自动连投一致，
+  /// 在当前 transport 上换集，不重复起停中继）。
+  ///
+  /// 与自动连投的差异：手动换集时当前集仍在播，提供器返回 null 或推送
+  /// 失败都**不**归一为远端停止路径——会话保持，返回 false 由 UI 给固定文案。
+  Future<bool> advanceNextEpisode() {
+    if (_autoAdvancing) return Future<bool>.value(false);
+    return _tryAdvance();
+  }
+
+  /// 遥控器跳集（上一集/任意 delta）：走 [onEpisodeJump] 取目标媒体后
+  /// 复用 [_pushMedia]（连播推送链路）。未注入 / delta == 0 / 提供器返回
+  /// null（越界）/ 推送失败都返回 false；会话保持，UI 给固定文案。
+  Future<bool> jumpEpisode(int delta) async {
+    final provider = onEpisodeJump;
+    final device = _currentDevice;
+    final transport = _transport;
+    if (provider == null || device == null || transport == null) return false;
+    if (delta == 0) return false;
+    if (_autoAdvancing) return false;
+    _autoAdvancing = true;
+    try {
+      // 与 _tryAdvance 同口径：不带 onTimeout（泛型协变坑，见 P1a 契约）。
+      final media = await provider(delta).timeout(const Duration(seconds: 10));
+      if (media == null) return false;
+      return await _pushMedia(device, transport, media);
+    } on Exception {
+      return false;
+    } finally {
+      _autoAdvancing = false;
+    }
+  }
+
+  /// 把 [next] 推到当前会话的 [transport] 上（连播/手动换集共用）：
+  /// URL 选路 → compat.load 或标准序列 → 更新会话媒体与进度。推送期间
+  /// [_autoAdvancing] 为 true（调用方设置），轮询到 STOPPED 不会误判为
+  /// 电视端主动停止。
+  Future<bool> _pushMedia(
+    CastTarget device,
+    CastTransport transport,
+    CastMedia next,
+  ) async {
+    // URL 形态旋钮与兼容模式三态沿用会话配方（连播与首投同选路）。
+    final remembered = recipes.lookup(device);
+    final suffixMode =
+        remembered?.urlSuffixMode ?? CastUrlSuffixMode.withExtension;
+    final transcodeMode = remembered?.transcodeMode ?? CastTranscodeMode.auto;
+    final compat =
+        transport is CastCompatTransport ? transport as CastCompatTransport : null;
+    // 预检刷新 Sink（失败沿用会话内记忆，不阻断连播）；提前到媒体准备
+    // 之前——兼容模式选路依赖 Sink 判定（M5-3）。
+    var sink = _sessionSink;
+    if (compat != null) {
+      try {
+        final probed =
+            await compat.preflight().timeout(const Duration(seconds: 2));
+        if (probed.isNotEmpty) {
+          sink = probed;
+          _sessionSink = probed;
+        }
+      } on Exception {
+        // 预检失败不阻断连播。
+      }
+    }
+    final subtitleUri = await _prepareSubtitle(device, next,
+        urlSuffixMode: suffixMode);
+    // 连播与首投共用同一段选路代码（M5-0/M5-3）。
+    final prepared = await _preparePlayUrl(
+      device,
+      next,
+      sink: sink,
+      transcodeMode: transcodeMode,
+      urlSuffixMode: suffixMode,
+      subtitleUrl: subtitleUri,
+    );
+    final playUrl = prepared.url;
+    // 连播换集：诊断目标只换 URL（IP/端口仍是本会话的服务）。
+    CastDiagnostics.instance.setTarget(mediaUrl: playUrl);
+    CastDiagnostics.instance.recordTimeline('连播下一集：${next.title}');
+    if (compat != null) {
+      // 媒体类型判定：选路已判定源类型时复用；本机转码产物按产物 URL
+      // 形态判 hint（与首投同口径）。
+      final mediaType = prepared.viaRelay
+          ? await resolveCastMediaType(
+              url: Uri.parse(playUrl),
+              hintMime: _relayProductMimeHint(playUrl),
+              sinkMimes: sink,
+            )
+          : prepared.sourceType ??
+              await resolveCastMediaType(
+                url: Uri.parse(playUrl),
+                hintMime: next.mimeHint,
+                sinkMimes: sink,
+                sniffHead: defaultSniffHead,
+              );
+      CastDiagnostics.instance.recordTimeline(
+          '连播媒体类型：${mediaType.mime}（${mediaType.fileName}）');
+      final succeeded = await compat.load(CastLoadRequest(
+        url: Uri.parse(playUrl),
+        title: next.title,
+        duration:
+            next.duration == null ? null : formatUpnpTime(next.duration!),
+        subtitleUrl: subtitleUri,
+        position: next.position,
+        didl: DidlRequest(
+          uri: Uri.parse(playUrl),
+          title: next.title,
+          mimeType: mediaType.mime,
+          duration: next.duration,
+          live: mediaType.live,
+          subtitleUri: subtitleUri,
+          headers: next.headers,
+        ),
+        recipes: _recipeChainFor(
+          device,
+          sink,
+          viaRelay: prepared.viaRelay,
+          productMime: mediaType.mime,
+        ),
+        protocolInfo: sink,
+      ));
+      if (succeeded != null) {
+        await _rememberRecipe(device, succeeded, sink: sink);
+      }
+    } else {
+      // 非 compat transport（Chromecast / 测试假件）：保持既有标准序列。
+      await transport.setUri(
+        Uri.parse(playUrl),
+        title: next.title,
+        duration:
+            next.duration == null ? null : formatUpnpTime(next.duration!),
+        subtitleUrl: subtitleUri,
+      );
+      await transport.play();
+    }
+    _currentMedia = CastMedia(
+      url: playUrl,
+      title: next.title,
+      coverUrl: next.coverUrl,
+      episodeIndex: next.episodeIndex,
+      episodeCount: next.episodeCount,
+      localPath: next.localPath,
+      headers: next.headers,
+      subtitleUrl: subtitleUri?.toString() ?? '',
+      isMirror: next.isMirror,
+      mimeHint: next.mimeHint,
+      duration: next.duration,
+      viaRelay: prepared.viaRelay,
+      codecHint: next.codecHint,
+    );
+    _lastPosition = Duration.zero;
+    _lastDuration = Duration.zero;
+    _polledAt = DateTime.now();
+    _lastRunning = true;
+    notifyListeners();
+    return true;
   }
 
   Future<void> setMute(bool muted) async => _transport?.setMute(muted);
@@ -1108,12 +1164,16 @@ class CastController extends ChangeNotifier {
     _lastDuration = poll.duration;
     _polledAt = DateTime.now();
     _lastRunning = poll.isRunning;
+    _lastTransportState = poll.transportState;
     if (poll.transportState != _lastTimelineState) {
       _lastTimelineState = poll.transportState;
       CastDiagnostics.instance.recordTimeline(
           'transportState=${poll.transportState.isEmpty ? '未知' : poll.transportState}');
     }
-    if (poll.isStopped && !_userStopping) {
+    // 换集推送进行中（连投/手动跳集）设备可能短暂上报 STOPPED：不是电视端
+    // 主动停止，不打断会话；推送失败时 _autoAdvancing 已复位，下一次轮询
+    // 照常走远端停止路径。
+    if (poll.isStopped && !_userStopping && !_autoAdvancing) {
       final position = _lastPosition;
       // 播完自动连投：停在时长结尾（±5s）且注入了下一集提供器；
       // 停在中途视为遥控器手动停止，不连投。
@@ -1210,9 +1270,11 @@ class CastController extends ChangeNotifier {
     _lastDuration = Duration.zero;
     _polledAt = null;
     _lastRunning = false;
+    _lastTransportState = '';
     _pollFailures = 0;
     _userStopping = false;
     onNextEpisode = null;
+    onEpisodeJump = null;
     transcodeResolver = null;
     _state = CastSessionState.idle;
     notifyListeners();

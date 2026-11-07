@@ -2439,9 +2439,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       return relay['url'] as String?;
     };
-    castController.onNextEpisode = () async {
-      final n = castIndex + 1;
-      if (n >= widget.episodes.length) return null;
+    // 解析第 n 集的投屏媒体（连播下一集与手动跳集共用）：本地缓存集投本地
+    // 文件；加密分集停旧中继、起新中继。越界返回 null（连播归一为远端停止，
+    // 手动跳集由控制器保持会话）。
+    Future<CastMedia?> resolveCastEpisode(int n) async {
+      if (n < 0 || n >= widget.episodes.length) return null;
       final nep = widget.episodes[n];
       final local = castScope.downloads.localEntryOf(nep.id);
       if (local != null) {
@@ -2499,6 +2501,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         // M5-0：连播加密分集的产物已是本机中继 HLS，选路恒直投。
         viaRelay: nextViaRelay,
       );
+    }
+    castController.onNextEpisode = () => resolveCastEpisode(castIndex + 1);
+    // 遥控器上一集/手动跳集（delta 语义；0 与越界返回 null）。
+    castController.onEpisodeJump = (delta) async {
+      if (delta == 0) return null;
+      return resolveCastEpisode(castIndex + delta);
     };
     // 断开回本地时的行为设置：在 sheet 之前捕获（M4-1：await 之后不摸 context）。
     final resumeLocal =

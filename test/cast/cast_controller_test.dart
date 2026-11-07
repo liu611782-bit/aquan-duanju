@@ -27,6 +27,7 @@ class FakeTransport implements CastTransport {
       const CastPoll(transportState: 'RUNNING', position: Duration(seconds: 30));
   Object? setUriError;
   Object? stopError;
+  Object? seekError;
 
   @override
   Future<void> setUri(Uri url,
@@ -48,7 +49,10 @@ class FakeTransport implements CastTransport {
   }
 
   @override
-  Future<void> seekTo(Duration position) async => calls.add('seek:$position');
+  Future<void> seekTo(Duration position) async {
+    calls.add('seek:$position');
+    if (seekError != null) throw seekError!;
+  }
   @override
   Future<void> setVolume(int percent) async => calls.add('volume:$percent');
   @override
@@ -207,6 +211,55 @@ void main() {
     expect(transport.calls.contains('play'), isTrue);
     expect(transport.calls.contains('volume:40'), isTrue);
     controller.dispose();
+  });
+
+  group('进度拖动（乐观 seek / 失败回读）', () {
+    test('seekTo 下发 transport 并乐观对齐本地进度（不等轮询）', () async {
+      final transport = FakeTransport()
+        ..pollResult = const CastPoll(
+            transportState: 'PAUSED_PLAYBACK',
+            position: Duration(seconds: 42),
+            duration: Duration(minutes: 10));
+      final controller = CastController(transportFactory: (_) => transport);
+      await controller.castTo(_target('d1'), _media());
+      // 先轮询一次拿到真值（42s），再模拟用户拖动。
+      await controller.forceRefresh();
+      expect(controller.remotePosition, const Duration(seconds: 42));
+
+      await controller.seekTo(const Duration(minutes: 3));
+
+      expect(transport.calls, contains('seek:${const Duration(minutes: 3)}'),
+          reason: '拖动结束立即下发 Seek');
+      expect(controller.remotePosition, const Duration(minutes: 3),
+          reason: '乐观对齐：进度条不回跳，等下一轮轮询用真值校正');
+      controller.dispose();
+    });
+
+    test('seekTo 失败：本地进度不被乐观值污染，forceRefresh 回读真实位置', () async {
+      final transport = FakeTransport()
+        ..seekError = SoapException('Seek 失败 HTTP 501', faultCode: 'UPnPError')
+        ..pollResult = const CastPoll(
+            transportState: 'PAUSED_PLAYBACK',
+            position: Duration(seconds: 42),
+            duration: Duration(minutes: 10));
+      final controller = CastController(transportFactory: (_) => transport);
+      await controller.castTo(_target('d1'), _media());
+      // 先轮询一次拿到真值（42s），再模拟用户拖动。
+      await controller.forceRefresh();
+      expect(controller.remotePosition, const Duration(seconds: 42));
+
+      await expectLater(
+        controller.seekTo(const Duration(minutes: 5)),
+        throwsA(isA<SoapException>()),
+      );
+      // 失败后本地进度仍是轮询真值（42s），没有乐观漂移。
+      expect(controller.remotePosition, const Duration(seconds: 42));
+      // 面板失败回读路径：forceRefresh 立即拉真实位置（仍是设备上报值）。
+      await controller.forceRefresh();
+      expect(controller.remotePosition, const Duration(seconds: 42));
+      expect(transport.calls.where((c) => c.startsWith('seek:')).length, 1);
+      controller.dispose();
+    });
   });
 
   group('M1 媒体类型与 duration 接线（compat 链）', () {

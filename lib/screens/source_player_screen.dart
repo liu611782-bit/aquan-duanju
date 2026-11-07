@@ -862,6 +862,13 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
       if (n >= _line.episodes.length) return null;
       return _resolveCastMedia(_line.episodes[n], n, scope);
     };
+    // 遥控器上一集/手动跳集（delta 语义；0 与越界返回 null）。
+    castController.onEpisodeJump = (delta) async {
+      if (delta == 0) return null;
+      final n = castIndex + delta;
+      if (n < 0 || n >= _line.episodes.length) return null;
+      return _resolveCastMedia(_line.episodes[n], n, scope);
+    };
     final result = await showCastSheet(
       context,
       media: media,

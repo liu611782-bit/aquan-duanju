@@ -78,6 +78,70 @@ Future<void> castAndRemember({
   await remember();
 }
 
+/// transportState → 会话抽屉状态徽标固定文案（五态映射）：
+/// PLAYING/RUNNING → 播放中、PAUSED_PLAYBACK → 已暂停、
+/// TRANSITIONING/BUFFERING → 缓冲中、STOPPED/NO_MEDIA_PRESENT → 已停止；
+/// 未知/空串（尚未轮询到）返回 null，UI 不显示徽标。
+String? castTransportStateLabel(String transportState) {
+  switch (transportState.trim().toUpperCase()) {
+    case 'PLAYING':
+    case 'RUNNING':
+      return '播放中';
+    case 'PAUSED_PLAYBACK':
+      return '已暂停';
+    case 'TRANSITIONING':
+    case 'BUFFERING':
+      return '缓冲中';
+    case 'STOPPED':
+    case 'NO_MEDIA_PRESENT':
+      return '已停止';
+    default:
+      return null;
+  }
+}
+
+/// TRANSITIONING 状态抖动消抖（800ms）：设备起播/换集瞬间 PLAYING ↔
+/// TRANSITIONING 快速抖动，窗口内维持上一状态显示，抖回就不闪「缓冲中」。
+class CastTransitionDebouncer {
+  CastTransitionDebouncer({this.window = const Duration(milliseconds: 800)});
+
+  /// 消抖窗口（默认 800ms）。
+  final Duration window;
+
+  Timer? _timer;
+  bool _elapsed = false;
+  bool _holding = false;
+
+  /// 窗口过后由内部 [Timer] 触发（UI 侧据此刷新显示）。
+  void Function()? onElapsed;
+
+  /// 输入原始 transportState；返回 true = 处于消抖窗口，UI 维持上一状态。
+  bool shouldHold(String transportState) {
+    if (transportState.trim().toUpperCase() != 'TRANSITIONING') {
+      _timer?.cancel();
+      _timer = null;
+      _elapsed = false;
+      _holding = false;
+      return false;
+    }
+    if (!_elapsed && _timer == null) {
+      _holding = true;
+      _timer = Timer(window, () {
+        _timer = null;
+        _elapsed = true;
+        _holding = false;
+        onElapsed?.call();
+      });
+    }
+    return _holding;
+  }
+
+  void dispose() {
+    _timer?.cancel();
+    _timer = null;
+  }
+}
+
 /// 播放器顶栏投屏按钮入口。
 /// 返回：'started'（已开始投屏，调用方应暂停本地）/'disconnect'（用户要求断开，
 /// 调用方应 await castController.disconnect() 取进度并按设置回本地）/null。
@@ -932,7 +996,7 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
   }
 }
 
-/// 投屏会话抽屉：设备名 + 进度 + 静音 + 断开。
+/// 投屏会话抽屉：设备名 + 状态徽标 + 进度条 + 上下集 + 播放/暂停/静音/断开。
 class _CastSessionSheet extends StatefulWidget {
   const _CastSessionSheet();
 
@@ -944,6 +1008,59 @@ class _CastSessionSheetState extends State<_CastSessionSheet> {
   bool _muted = false;
   // 远端音量乐观维护（各厂商 GetVolume 差异大，不做轮询对齐）。
   double _volume = 0.5;
+  // 进度拖动（乐观 UI）：拖动中显示拖动值，不跟随轮询回跳；结束后 seekTo。
+  bool _scrubbing = false;
+  double? _dragValue;
+  // TRANSITIONING 抖动消抖 + 上一帧显示的状态文案（消抖窗口内维持不变）。
+  final CastTransitionDebouncer _transitionDebounce = CastTransitionDebouncer();
+  String? _displayedStatus;
+
+  @override
+  void initState() {
+    super.initState();
+    _transitionDebounce.onElapsed = () {
+      if (mounted) setState(() {});
+    };
+  }
+
+  @override
+  void dispose() {
+    _transitionDebounce.dispose();
+    super.dispose();
+  }
+
+  void _toast(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(text),
+        duration: const Duration(milliseconds: 800),
+      ));
+  }
+
+  /// 拖动结束：乐观 seekTo（控制器先对齐本地再等轮询校正）；失败回读真实
+  /// 位置（立即轮询一次）并提示一次固定文案，不让面板位置与电视永久漂移。
+  Future<void> _seekTo(double seconds) async {
+    final target = Duration(milliseconds: (seconds * 1000).round());
+    try {
+      await castController.seekTo(target);
+    } catch (e, stack) {
+      ErrorLog.instance.record('投屏拖动进度', e, stack);
+      unawaited(castController.forceRefresh());
+      _toast('该设备不支持拖动进度');
+    }
+  }
+
+  Future<void> _nextEpisode() async {
+    final ok = await castController.advanceNextEpisode();
+    if (!ok && mounted) _toast('下一集不可用');
+  }
+
+  Future<void> _prevEpisode() async {
+    final ok = await castController.jumpEpisode(-1);
+    if (!ok && mounted) _toast('上一集不可用');
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -954,91 +1071,158 @@ class _CastSessionSheetState extends State<_CastSessionSheet> {
         builder: (context, _) {
           final device = castController.currentDevice;
           final media = castController.currentMedia;
-          final position = castController.remotePosition;
+          final duration = castController.remoteDuration;
+          final hasDuration = duration > Duration.zero;
+          final maxSeconds = duration.inMilliseconds / 1000.0;
+          final double? dragSeconds = _scrubbing ? _dragValue : null;
+          final remotePosition = castController.remotePosition;
+          final shownPosition = dragSeconds != null
+              ? Duration(milliseconds: (dragSeconds * 1000).round())
+              : remotePosition;
+          // 状态徽标（TRANSITIONING 消抖：窗口内维持上一状态显示）。
+          final rawState = castController.remoteTransportState;
+          final hold = _transitionDebounce.shouldHold(rawState);
+          final status =
+              hold ? _displayedStatus : castTransportStateLabel(rawState);
+          _displayedStatus = status;
           return Padding(
             padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('正在投屏', style: theme.textTheme.titleMedium),
-                const SizedBox(height: 8),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: const Icon(Icons.tv),
-                  title: Text(device?.name ?? '设备'),
-                  subtitle: Text(
-                    [
-                      if (media != null) media.title,
-                      if (position > Duration.zero) _fmt(position),
-                    ].join(' · '),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+            // 控件增多（进度条/上下集）：矮窗口（横屏手机）下防溢出。
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('正在投屏', style: theme.textTheme.titleMedium),
+                  const SizedBox(height: 8),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.tv),
+                    title: Text(device?.name ?? '设备'),
+                    subtitle: Text(
+                      [
+                        // null-aware element（?status）：与上面的 if-null 同义。
+                        ?status,
+                        if (media != null) media.title,
+                        if (shownPosition > Duration.zero) _fmt(shownPosition),
+                      ].join(' · '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    OutlinedButton.icon(
-                      onPressed: () => castController.resume(),
-                      icon: const Icon(Icons.play_arrow),
-                      label: const Text('播放'),
+                  // 进度条：仅当远端回报真实时长时显示（直播/未知时长只留文本）。
+                  if (hasDuration)
+                    Row(
+                      children: [
+                        Text(_fmt(shownPosition),
+                            style: theme.textTheme.bodySmall),
+                        Expanded(
+                          child: Slider(
+                            value: (dragSeconds ??
+                                    remotePosition.inMilliseconds / 1000.0)
+                                .clamp(0.0, maxSeconds),
+                            max: maxSeconds,
+                            onChangeStart: (_) =>
+                                setState(() => _scrubbing = true),
+                            onChanged: (v) => setState(() => _dragValue = v),
+                            onChangeEnd: (v) {
+                              setState(() {
+                                _scrubbing = false;
+                                _dragValue = null;
+                              });
+                              unawaited(_seekTo(v));
+                            },
+                          ),
+                        ),
+                        Text(_fmt(duration), style: theme.textTheme.bodySmall),
+                      ],
                     ),
-                    const SizedBox(width: 8),
-                    OutlinedButton.icon(
-                      onPressed: () => castController.pause(),
-                      icon: const Icon(Icons.pause),
-                      label: const Text('暂停'),
-                    ),
-                    const SizedBox(width: 8),
-                    OutlinedButton(
-                      onPressed: () {
-                        // 静音状态本地乐观维护（RCS GetMute 各厂商差异大，不做轮询对齐）。
-                        final next = !_muted;
-                        castController.setMute(next).then((_) {
-                          if (mounted) setState(() => _muted = next);
-                        }).catchError((_) {});
-                      },
-                      child: Icon(
-                          _muted ? Icons.volume_off : Icons.volume_up),
-                    ),
-                    const Spacer(),
-                    FilledButton.tonalIcon(
-                      onPressed: () => Navigator.of(context).pop(),
-                      icon: const Icon(Icons.close),
-                      label: const Text('关闭面板'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Icon(Icons.volume_down,
-                        size: 18, color: theme.colorScheme.outline),
-                    Expanded(
-                      child: Slider(
-                        value: _volume,
-                        onChanged: (v) {
-                          setState(() => _volume = v);
-                          castController
-                              .setVolume((v * 100).round())
-                              .catchError((_) {});
-                        },
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: () => castController.resume(),
+                        icon: const Icon(Icons.play_arrow),
+                        label: const Text('播放'),
                       ),
-                    ),
-                    Icon(Icons.volume_up,
-                        size: 18, color: theme.colorScheme.outline),
-                  ],
-                ),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    icon: const Icon(Icons.cast),
-                    label: const Text('断开投屏'),
-                    onPressed: () => Navigator.of(context).pop('disconnect'),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed: () => castController.pause(),
+                        icon: const Icon(Icons.pause),
+                        label: const Text('暂停'),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton(
+                        onPressed: () {
+                          // 静音状态本地乐观维护（RCS GetMute 各厂商差异大，不做轮询对齐）。
+                          final next = !_muted;
+                          castController.setMute(next).then((_) {
+                            if (mounted) setState(() => _muted = next);
+                          }).catchError((_) {});
+                        },
+                        child: Icon(
+                            _muted ? Icons.volume_off : Icons.volume_up),
+                      ),
+                      const Spacer(),
+                      FilledButton.tonalIcon(
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.close),
+                        label: const Text('关闭面板'),
+                      ),
+                    ],
                   ),
-                ),
-              ],
+                  const SizedBox(height: 8),
+                  // 上一集/下一集：复用连播链路（手动换集不重复起停中继）。
+                  // 回调未注入（直播/无队列场景）时按钮置灰。
+                  Row(
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: castController.onEpisodeJump == null
+                            ? null
+                            : _prevEpisode,
+                        icon: const Icon(Icons.skip_previous),
+                        label: const Text('上一集'),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed: castController.onNextEpisode == null
+                            ? null
+                            : _nextEpisode,
+                        icon: const Icon(Icons.skip_next),
+                        label: const Text('下一集'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Icon(Icons.volume_down,
+                          size: 18, color: theme.colorScheme.outline),
+                      Expanded(
+                        child: Slider(
+                          value: _volume,
+                          onChanged: (v) {
+                            setState(() => _volume = v);
+                            castController
+                                .setVolume((v * 100).round())
+                                .catchError((_) {});
+                          },
+                        ),
+                      ),
+                      Icon(Icons.volume_up,
+                          size: 18, color: theme.colorScheme.outline),
+                    ],
+                  ),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      icon: const Icon(Icons.cast),
+                      label: const Text('断开投屏'),
+                      onPressed: () => Navigator.of(context).pop('disconnect'),
+                    ),
+                  ),
+                ],
+              ),
             ),
           );
         },
