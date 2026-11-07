@@ -86,6 +86,14 @@ void main() {
     });
   });
 
+  group('addByIp 端口候选', () {
+    test('含自家接收端默认端口 18099（SSDP 不可靠时手动 IP 直连兜底）', () {
+      expect(SsdpDiscovery.commonPorts, contains(18099));
+      // 显式端口仍作为首选候选（优先于 commonPorts 探测）。
+      expect(SsdpDiscovery.dynamicPortStart, 49152);
+    });
+  });
+
   group('multicastBindCandidates（M8 多网卡）', () {
     InternetAddress v4(String s) =>
         InternetAddress(s, type: InternetAddressType.IPv4);
