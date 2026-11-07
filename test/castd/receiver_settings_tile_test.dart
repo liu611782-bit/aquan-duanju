@@ -1,3 +1,4 @@
+import 'package:aquan_duanju/core/castd/receiver_admission.dart';
 import 'package:aquan_duanju/core/castd/receiver_controller.dart';
 import 'package:aquan_duanju/core/castd/receiver_player_adapter.dart';
 import 'package:aquan_duanju/core/castd/receiver_service.dart';
@@ -93,6 +94,65 @@ void main() {
     expect(persisted, [true, false], reason: '启动失败回滚持久化');
     expect(find.text('接收端启动失败，请稍后再试'), findsOneWidget);
     expect(find.byType(SnackBar), findsOneWidget);
+  });
+
+  testWidgets('CastReceiverTile：投送准入三选生效；管理允许列表可删可清', (tester) async {
+    final service = CastReceiverService.forTest(
+      controller: ReceiverController(playerOverride: StubReceiverPlayer()),
+    );
+    service.admission.allowDevice('192.168.1.9', userAgent: 'Bidebar/1.0');
+    service.admission.denyDevice('192.168.1.10', userAgent: 'handset/1');
+    final modes = <String>[];
+    var listsChanged = 0;
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: CastReceiverTile(
+          service: service,
+          supported: true,
+          admissionMode: 'anyone',
+          onAdmissionModeChanged: modes.add,
+          onAdmissionListsChanged: (_, __) => listsChanged++,
+        ),
+      ),
+    ));
+
+    // 设置页形态两行常驻（开关不开也有）：三选 + 管理入口。
+    expect(find.text('投送准入'), findsOneWidget);
+    expect(find.text('管理允许列表'), findsOneWidget);
+    expect(find.text('任何人可投'), findsOneWidget);
+
+    // 三选：选「每次询问」→ 运行态写策略 + 落盘回调。
+    await tester.tap(find.text('投送准入'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('仅允许列表'), findsOneWidget);
+    await tester.tap(find.textContaining('每次询问'));
+    await tester.pumpAndSettle();
+    expect(service.admission.mode, ReceiverAdmissionMode.ask);
+    expect(modes, ['ask']);
+
+    // 管理允许列表：允许/拒绝两个分区都显示，条目带 IP/UA。
+    await tester.tap(find.text('管理允许列表'));
+    await tester.pumpAndSettle();
+    expect(find.text('允许名单（1）'), findsOneWidget);
+    expect(find.text('拒绝名单（每次询问记住）（1）'), findsOneWidget);
+    expect(find.text('192.168.1.9'), findsOneWidget);
+    expect(find.textContaining('Bidebar/1.0'), findsOneWidget);
+
+    // 单删允许条目 → 策略变化 + 落盘回调。
+    await tester.tap(find.byTooltip('删除此条目').first);
+    await tester.pumpAndSettle();
+    expect(service.admission.allowEntries, isEmpty);
+    expect(listsChanged, 1);
+    expect(find.text('允许名单（1）'), findsNothing);
+
+    // 清空拒绝名单。
+    await tester.tap(find.text('清空'));
+    await tester.pumpAndSettle();
+    expect(service.admission.denyEntries, isEmpty);
+    expect(listsChanged, 2);
+    expect(find.text('暂无记录。开启「每次询问」后，勾选「记住此设备」的设备会出现在这里'),
+        findsOneWidget);
   });
 }
 

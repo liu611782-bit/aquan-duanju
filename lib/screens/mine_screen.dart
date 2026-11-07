@@ -660,10 +660,18 @@ class SettingsPanel extends StatelessWidget {
           ),
           // DLNA 接收端：允许局域网内设备投到本机（桌面 + Android；
           // iOS 等其余平台整块隐藏，防火墙放行命令仅 Windows 显示）。
+          // 投送准入三选与名单管理（设置页形态），运行态写服务准入策略。
           CastReceiverTile(
             onPersistEnabled: (v) => scope.settings.castReceiverEnabled = v,
             onRename: (name) => scope.settings.castReceiverName = name,
             receiverName: scope.settings.castReceiverName,
+            admissionMode: scope.settings.castReceiverAdmissionMode,
+            onAdmissionModeChanged: (mode) =>
+                scope.settings.castReceiverAdmissionMode = mode,
+            onAdmissionListsChanged: (allowJson, denyJson) {
+              scope.settings.castReceiverAllowIps = allowJson;
+              scope.settings.castReceiverDenyIps = denyJson;
+            },
           ),
           ListTile(
             leading: const Icon(Icons.mic_none),

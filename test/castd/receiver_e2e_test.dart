@@ -24,6 +24,7 @@ import 'package:aquan_duanju/core/cast/dlna_transport.dart';
 import 'package:aquan_duanju/core/cast/gena_subscriber.dart';
 import 'package:aquan_duanju/core/cast/soap_client.dart';
 import 'package:aquan_duanju/core/cast/ssdp_discovery.dart';
+import 'package:aquan_duanju/core/castd/receiver_admission.dart';
 import 'package:aquan_duanju/core/castd/receiver_controller.dart';
 import 'package:aquan_duanju/core/castd/receiver_player_adapter.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -284,6 +285,167 @@ void main() {
       expect(device.connectionManagerUrl,
           'http://127.0.0.1:${controller!.port}/ConnectionManager/control');
     }, timeout: testBudget);
+  });
+
+  group('AC-5b 端到端·准入控制（R3.2）：ask 超时 401 / 允许 → PLAYING / 白名单拒绝', () {
+    final fixture = _MediaFixture();
+
+    setUp(() async {
+      await fixture.start();
+    });
+
+    tearDown(() async {
+      await fixture.close();
+    });
+
+    /// 原始 SOAP POST（不经 SoapClient 的重试/异常包装，锁线缆形状）。
+    Future<http.Response> postSetUri(int port, {String metadata = ''}) async {
+      final body = '<?xml version="1.0" encoding="utf-8"?>'
+          '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+          's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+          '<s:Body><u:SetAVTransportURI '
+          'xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+          '<InstanceID>0</InstanceID>'
+          '<CurrentURI>${fixture.url}</CurrentURI>'
+          '<CurrentURIMetaData>$metadata</CurrentURIMetaData>'
+          '</u:SetAVTransportURI></s:Body></s:Envelope>';
+      final client = directHttpClient();
+      try {
+        return await client.post(
+          Uri.parse('http://127.0.0.1:$port/AVTransport/control'),
+          headers: {
+            'SOAPACTION':
+                '"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI"',
+            'Content-Type': 'text/xml; charset="utf-8"',
+          },
+          body: body,
+        );
+      } finally {
+        client.close();
+      }
+    }
+
+    test('ask 模式 + 假 handler 超时 → fault 401（线缆形状 + 不开会话）',
+        () async {
+      var prompts = 0;
+      final policy = AdmissionPolicy(
+        mode: ReceiverAdmissionMode.ask,
+        promptTimeout: const Duration(milliseconds: 150),
+        promptHandler: (_) async {
+          prompts++;
+          return Completer<AdmissionPromptOutcome>().future; // 永不响应
+        },
+      );
+      final stub = StubReceiverPlayer();
+      final controller = ReceiverController(
+        playerOverride: stub,
+        udnSeed: 'udn-e2e-adm-ask',
+        preferredPort: e2ePreferredPort + 1,
+        enableSsdp: false,
+        admission: policy,
+      );
+      addTearDown(controller.stop);
+      await controller.start();
+
+      final res = await postSetUri(controller.port!)
+          .timeout(const Duration(seconds: 8));
+      expect(res.statusCode, 500, reason: 'fault 走 HTTP 500');
+      expect(res.body, contains('<errorCode>401</errorCode>'));
+      expect(res.body, contains('Action Not Authorized'));
+      expect(prompts, 1, reason: 'ask 模式询问过一次（然后超时拒绝）');
+      expect(stub.loadCount, 0, reason: '拒绝不进引擎');
+      expect(controller.currentSession, isNull);
+    }, timeout: const Timeout(Duration(seconds: 25)));
+
+    test('ask 允许（记住）→ PLAYING；再次投送不再询问', () async {
+      var prompts = 0;
+      final policy = AdmissionPolicy(
+        mode: ReceiverAdmissionMode.ask,
+        promptHandler: (_) async {
+          prompts++;
+          return const AdmissionPromptOutcome(allow: true, remember: true);
+        },
+      );
+      final stub = StubReceiverPlayer();
+      final controller = ReceiverController(
+        playerOverride: stub,
+        udnSeed: 'udn-e2e-adm-allow',
+        preferredPort: e2ePreferredPort + 1,
+        enableSsdp: false,
+        admission: policy,
+      );
+      addTearDown(controller.stop);
+      await controller.start();
+
+      // 首投：询问 → 允许（记住）→ 正常链路（DlnaTransport 全真实）。
+      final discovery = SsdpDiscovery();
+      addTearDown(discovery.stop);
+      final device = await discovery
+          .addByIp('127.0.0.1', port: controller.port!)
+          .timeout(const Duration(seconds: 10));
+      final transport = DlnaTransport(
+        device!,
+        client: SoapClient(client: directHttpClient()),
+        playPollInterval: const Duration(milliseconds: 100),
+        playGateTimeout: const Duration(seconds: 5),
+        retryBudget: const Duration(seconds: 10),
+      );
+      addTearDown(transport.close);
+      final mediaUrl = fixture.url;
+      final recipe = await transport
+          .load(CastLoadRequest(
+            url: mediaUrl,
+            didl: DidlRequest(
+              uri: mediaUrl,
+              title: '准入放行',
+              mimeType: 'video/mp4',
+              duration: const Duration(minutes: 10),
+            ),
+            title: '准入放行',
+          ))
+          .timeout(const Duration(seconds: 12));
+      expect(recipe, isNotNull);
+      expect(prompts, 1);
+      expect(stub.loadCount, 1);
+      expect(
+        await transport.getTransportState().timeout(const Duration(seconds: 4)),
+        'PLAYING',
+      );
+
+      // 二次投送（新投替换）：记住后不再询问。
+      await postSetUri(controller.port!);
+      expect(stub.loadCount, 2);
+      expect(prompts, 1, reason: '已记住的允许不再询问');
+    }, timeout: const Timeout(Duration(seconds: 30)));
+
+    test('whitelist 名单外 → fault 401；把发送方 IP 加进允许表后放行',
+        () async {
+      final policy = AdmissionPolicy(mode: ReceiverAdmissionMode.whitelist);
+      final stub = StubReceiverPlayer();
+      final controller = ReceiverController(
+        playerOverride: stub,
+        udnSeed: 'udn-e2e-adm-wl',
+        preferredPort: e2ePreferredPort + 1,
+        enableSsdp: false,
+        admission: policy,
+      );
+      addTearDown(controller.stop);
+      await controller.start();
+
+      final denied = await postSetUri(controller.port!)
+          .timeout(const Duration(seconds: 8));
+      expect(denied.statusCode, 500);
+      expect(denied.body, contains('<errorCode>401</errorCode>'));
+      expect(stub.loadCount, 0);
+
+      // 名单加入发送方（127.0.0.1）→ 放行（白名单模式不询问）。
+      policy.allowDevice('127.0.0.1', userAgent: 'e2e');
+      final allowed = await postSetUri(controller.port!)
+          .timeout(const Duration(seconds: 8));
+      expect(allowed.statusCode, 200, reason: '白名单命中直接放行');
+      expect(allowed.body, contains('SetAVTransportURIResponse'));
+      expect(stub.loadCount, 1);
+    }, timeout: const Timeout(Duration(seconds: 25)));
   });
 
   group('SSDP 尽力而为（同机组播不可靠：收到才断言，收不到不算失败）', () {

@@ -7,6 +7,11 @@
 ///   接收端与 SSDP 广播继续（发端随后会轮询到 STOPPED）；
 /// - 新投替换 → `service.session` 通知刷新顶栏，引擎已被渲染器 load 换源，
 ///   不关页。
+///
+/// 投送封面（11-07-cast-receiver-advanced §2）：DIDL `upnp:albumArtURI` 提取的
+/// [ReceiverSession.albumArtUrl]——视频首帧前（TRANSITIONING/已加载待播）作
+/// backdrop（视频起播后被画面自然盖住）；音频投送显示大图 + 标题/投送方信息。
+/// 图片加载失败静默（errorBuilder 收起，回现状黑底），不落 ErrorLog。
 library;
 
 import 'dart:async';
@@ -20,6 +25,9 @@ import '../core/castd/receiver_player_adapter.dart';
 import '../core/castd/receiver_player_mediakit.dart';
 import '../core/castd/receiver_service.dart';
 import '../core/error_log.dart';
+
+export '../core/castd/receiver_controller.dart'
+    show receiverCastIsAudio;
 
 /// 全屏路由壳：仅投送会话信息 + 画面 + 控件，无系统栏。
 class ReceiverPlayerScreen extends StatefulWidget {
@@ -112,10 +120,23 @@ class _ReceiverPlayerScreenState extends State<ReceiverPlayerScreen> {
   Widget build(BuildContext context) {
     final session = _service.session.value ?? _service.controller.currentSession;
     final controller = _videoController;
+    final albumArt = session?.albumArtUrl ?? '';
+    final isAudio = session != null &&
+        receiverCastIsAudio(mimeType: session.mimeType, url: session.url);
+    // 视频首帧前（加载中 / 已加载待播 / 停止态）显示封面 backdrop；
+    // 播放/暂停后画面已出帧（或 letterbox 内被视频覆盖），不再回显。
+    final showBackdrop = albumArt.isNotEmpty &&
+        (isAudio ||
+            _status.transportState == kTransportTransitioning ||
+            _status.transportState == kTransportStopped ||
+            _status.transportState == kTransportNoMedia);
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: [
+          // 封面 backdrop（垫在视频下；视频起播后自然盖住）。
+          if (showBackdrop)
+            Positioned.fill(child: _albumArtImage(albumArt, BoxFit.cover)),
           Positioned.fill(
             child: controller == null
                 ? const SizedBox.expand()
@@ -125,6 +146,13 @@ class _ReceiverPlayerScreenState extends State<ReceiverPlayerScreen> {
                     fit: BoxFit.contain,
                   ),
           ),
+          // 音频投送：大图 + 标题/投送方信息（无画面可盖，居中常驻）。
+          if (session != null && isAudio)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: _buildAudioCard(context, session, albumArt),
+              ),
+            ),
           // 点画面切换控件显隐。
           Positioned.fill(
             child: GestureDetector(
@@ -138,6 +166,78 @@ class _ReceiverPlayerScreenState extends State<ReceiverPlayerScreen> {
             _buildBadge(context),
           if (_showControls)
             Align(alignment: Alignment.bottomCenter, child: _buildControls()),
+        ],
+      ),
+    );
+  }
+
+  /// 封面图：150ms 淡入（仓库 CoverImage 同口径），加载失败静默收起。
+  Widget _albumArtImage(String url, BoxFit fit) => Image.network(
+        url,
+        fit: fit,
+        frameBuilder: (context, child, frame, wasSyncLoaded) => wasSyncLoaded
+            ? child
+            : AnimatedOpacity(
+                opacity: frame == null ? 0 : 1,
+                duration: const Duration(milliseconds: 150),
+                child: child,
+              ),
+        errorBuilder: (_, _, _) => const SizedBox.shrink(),
+      );
+
+  Widget _buildAudioCard(
+    BuildContext context,
+    ReceiverSession session,
+    String albumArt,
+  ) {
+    final theme = Theme.of(context);
+    final userAgent = session.senderUserAgent;
+    final sender =
+        '投送方 ${session.senderAddress}${userAgent.isEmpty ? '' : ' · $userAgent'}';
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 220,
+            height: 220,
+            decoration: BoxDecoration(
+              color: Colors.white10,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: albumArt.isEmpty
+                ? const Icon(
+                    Icons.music_note_rounded,
+                    size: 72,
+                    color: Colors.white38,
+                  )
+                : _albumArtImage(albumArt, BoxFit.cover),
+          ),
+          const SizedBox(height: 20),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 480),
+            child: Column(
+              children: [
+                Text(
+                  session.title.trim().isEmpty ? '正在接收投屏' : session.title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.titleMedium
+                      ?.copyWith(color: Colors.white),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  sender,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: Colors.white70),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );

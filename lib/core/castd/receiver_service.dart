@@ -17,6 +17,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../error_log.dart';
+import 'receiver_admission.dart';
 import 'receiver_android_bridge.dart';
 import 'receiver_controller.dart';
 import 'receiver_player_adapter.dart';
@@ -32,6 +33,7 @@ bool receiverPlatformSupported() =>
 class CastReceiverService extends ChangeNotifier {
   CastReceiverService._() {
     _controller = _createController();
+    _wireAdmissionPrompt();
     if (Platform.isAndroid) {
       _attachAndroidBridge(ReceiverAndroidBridge());
     }
@@ -47,6 +49,7 @@ class CastReceiverService extends ChangeNotifier {
   }) {
     _controller = controller ?? _createController();
     _controller!.onIncomingSession = _onIncomingSession;
+    _wireAdmissionPrompt();
     if (androidBridge != null) {
       _attachAndroidBridge(androidBridge);
     }
@@ -72,6 +75,43 @@ class CastReceiverService extends ChangeNotifier {
   /// UDN 持久化（main bootstrap 注入 `CastStore.ensureReceiverUdn`；
   /// 未注入时控制器临时生成 UDN，重启变化仅影响发送端旧设备记忆）。
   Future<String?> Function()? udnLoader;
+
+  /// 准入策略（控制器持有同一实例；设置页/管理弹窗经此读写运行态）。
+  AdmissionPolicy get admission => _controller!.admission;
+
+  /// 准入询问回调（main 注入 rootNavigatorKey 全局对话框实现——不依赖
+  /// 播放页打开，首投即问；测试注入假 handler）。未注入时 ask 模式对
+  /// 陌生设备按拒绝处理（策略层兜底，不能静默放行）。
+  AdmissionPromptHandler? admissionPromptHandler;
+
+  /// 把 [admissionPromptHandler] 接到策略上（策略层对 null/异常兜底拒绝）。
+  void _wireAdmissionPrompt() {
+    _controller!.admission.promptHandler = (request) async {
+      final handler = admissionPromptHandler;
+      if (handler == null) {
+        return const AdmissionPromptOutcome(allow: false);
+      }
+      return handler(request);
+    };
+  }
+
+  /// 应用准入设置（main bootstrap / 设置页调用；只覆盖给出的字段）。
+  /// [mode] 取 SettingsStore 键值（anyone/ask/whitelist，非法回落 anyone）；
+  /// [allowJson] / [denyJson] 为 SettingsStore 名单 JSON（坏串容错归空）。
+  void applyAdmissionSettings({
+    String? mode,
+    String? allowJson,
+    String? denyJson,
+  }) {
+    final policy = _controller!.admission;
+    if (mode != null) policy.mode = admissionModeFromString(mode);
+    if (allowJson != null) policy.loadAllowJson(allowJson);
+    if (denyJson != null) policy.loadDenyJson(denyJson);
+    notifyListeners();
+  }
+
+  /// 准入名单在弹窗里被增删后调用（tile 副标题的名单计数随之刷新）。
+  void notifyAdmissionChanged() => notifyListeners();
 
   /// 打开接收端播放页（main 注入 rootNavigatorKey.push；只在页未开时调用）。
   /// 返回是否真的开出了页（导航未就绪时返回 false，页标不置位）。

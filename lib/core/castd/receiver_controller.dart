@@ -10,6 +10,7 @@ import 'dart:async';
 import 'dart:io';
 
 import '../error_log.dart';
+import 'receiver_admission.dart';
 import 'receiver_descriptions.dart';
 import 'receiver_gena.dart';
 import 'receiver_http_server.dart';
@@ -26,6 +27,8 @@ class ReceiverSession {
     required this.senderUserAgent,
     required this.startedAt,
     this.subtitleUrl,
+    this.albumArtUrl,
+    this.mimeType,
   });
 
   final String url;
@@ -37,6 +40,25 @@ class ReceiverSession {
   /// 外挂字幕地址（DIDL sec:CaptionInfo/Ex 提取，R2.1；无则 null——
   /// 字幕已在渲染器 load 时附加给引擎，这里供会话展示/透传用）。
   final String? subtitleUrl;
+
+  /// 投送封面地址（DIDL upnp:albumArtURI 提取；无则 null。播放页：
+  /// 视频首帧前作 backdrop、音频投送显示大图）。
+  final String? albumArtUrl;
+
+  /// 媒体 mime 提示（audio/* 时播放页按音频投送显示大图；未知 null）。
+  final String? mimeType;
+}
+
+/// 纯音频投送判定（R2.2，播放页音频大图的占位逻辑）：mime `audio/*` 命中；
+/// DIDL 没带 mime 时按 URL 扩展名兜底。视频投送（video/* 或视频扩展名）
+/// 一律 false。
+bool receiverCastIsAudio({String? mimeType, required String url}) {
+  final mime = (mimeType ?? '').toLowerCase();
+  if (mime.startsWith('audio/')) return true;
+  return RegExp(
+    r'\.(mp3|m4a|aac|flac|wav|ogg|opus|wma)(\?|#|$)',
+    caseSensitive: false,
+  ).hasMatch(url);
 }
 
 class ReceiverController {
@@ -50,7 +72,8 @@ class ReceiverController {
     this.portAttempts = 20,
     this.enableSsdp = true,
     this.onIncomingSession,
-  });
+    AdmissionPolicy? admission,
+  }) : admission = admission ?? AdmissionPolicy();
 
   /// Phase A 默认 stub 引擎；Phase B 注入 media_kit 适配实现。
   final ReceiverPlayer? playerOverride;
@@ -72,6 +95,11 @@ class ReceiverController {
   /// SSDP 发现（B-4 Android 守卫与纯 HTTP 自测可关；关掉时设备只能靠
   /// 手动 IP 直连发现）。
   final bool enableSsdp;
+
+  /// 准入策略（默认 anyone：不弹窗不拦人，行为与旧版逐字节一致）。
+  /// 模式/名单的运行态由设置页直接改这个实例（渲染器持有同一引用，
+  /// 无需热替换）；持久化经 SettingsStore，由调用方负责同步。
+  final AdmissionPolicy admission;
 
   /// 来投回调（UI 打开接收端播放页；Phase B 接线）。
   void Function(ReceiverSession session)? onIncomingSession;
@@ -120,7 +148,11 @@ class ReceiverController {
       _udn = udnSeed ?? (await udnLoader?.call()) ?? uuidV4();
       _player ??= playerOverride ?? playerFactory?.call() ?? StubReceiverPlayer();
       final player = _player!;
-      _renderer ??= ReceiverRenderer(player: player, onOpened: _onMediaOpened);
+      _renderer ??= ReceiverRenderer(
+        player: player,
+        onOpened: _onMediaOpened,
+        admission: admission,
+      );
       _gena ??= ReceiverGena(renderer: _renderer!);
       _http ??= ReceiverHttpServer(
         renderer: _renderer!,
@@ -181,6 +213,8 @@ class ReceiverController {
       senderUserAgent: event.senderUserAgent,
       startedAt: DateTime.now(),
       subtitleUrl: event.subtitleUrl,
+      albumArtUrl: event.albumArtUrl,
+      mimeType: event.mimeType,
     );
     onIncomingSession?.call(_currentSession!);
   }

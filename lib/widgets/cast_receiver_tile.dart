@@ -7,7 +7,11 @@
 ///   页开着会一并关闭）；持久化由调用方经 [onPersistEnabled] 写 SettingsStore；
 /// - 防火墙提示：开启后提供「复制防火墙放行命令」（M0 的 program 级生成器，
 ///   Windows 专属；局域网搜不到本机时的自助手段）；
-/// - 接收名可在设置页改名（R4.2；空名 = 默认「<主机名>（aquan 接收）」）。
+/// - 接收名可在设置页改名（R4.2；空名 = 默认「<主机名>（aquan 接收）」）；
+/// - 投送准入（11-07-cast-receiver-advanced R1.5）：设置页形态增准入模式三选
+///   与允许列表管理入口；运行态写 [CastReceiverService.admission]，落盘经
+///   [onAdmissionModeChanged] / [onAdmissionListsChanged] 回调（core 不反向
+///   依赖 store 层）。面板紧凑形态不变。
 library;
 
 import 'dart:async';
@@ -17,6 +21,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/cast/cast_diagnostics.dart';
+import '../core/castd/receiver_admission.dart';
 import '../core/castd/receiver_service.dart';
 import '../core/error_log.dart';
 
@@ -29,6 +34,9 @@ class CastReceiverTile extends StatelessWidget {
     this.receiverName = '',
     this.compact = false,
     this.supported,
+    this.admissionMode = 'anyone',
+    this.onAdmissionModeChanged,
+    this.onAdmissionListsChanged,
   });
 
   /// null → 全局单例（widget 测试注入替身）。
@@ -49,6 +57,17 @@ class CastReceiverTile extends StatelessWidget {
   /// 平台判定覆盖（widget 测试模拟 Android；null = 按当前平台）。
   final bool? supported;
 
+  /// 持久化的准入模式（anyone/ask/whitelist；非法回落 anyone 显示）。
+  final String admissionMode;
+
+  /// 准入模式落盘（设置页传 `settings.castReceiverAdmissionMode = mode`）。
+  /// 运行态由本 tile 直接写 `receiver.admission.mode`。
+  final void Function(String mode)? onAdmissionModeChanged;
+
+  /// 名单（允许/拒绝）变化后的落盘回调：带策略出的两份 JSON 快照。
+  final void Function(String allowJson, String denyJson)?
+      onAdmissionListsChanged;
+
   @override
   Widget build(BuildContext context) {
     final isSupported = supported ?? CastReceiverService.platformSupported;
@@ -67,6 +86,27 @@ class CastReceiverTile extends StatelessWidget {
               value: enabled,
               onChanged: (v) => unawaited(_toggle(context, receiver, v)),
             ),
+            if (!compact) ...[
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.verified_user_outlined),
+                title: const Text('投送准入'),
+                subtitle: Text(
+                  receiverAdmissionModeLabel(admissionMode),
+                  maxLines: 2,
+                ),
+                trailing: const Icon(Icons.chevron_right, size: 18),
+                onTap: () => _pickAdmissionMode(context, receiver),
+              ),
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.rule_outlined),
+                title: const Text('管理允许列表'),
+                subtitle: Text(_allowListSubtitle(receiver), maxLines: 2),
+                trailing: const Icon(Icons.chevron_right, size: 18),
+                onTap: () => _manageAdmissionLists(context, receiver),
+              ),
+            ],
             if (!compact && enabled) ...[
               if (onRename != null)
                 ListTile(
@@ -102,6 +142,73 @@ class CastReceiverTile extends StatelessWidget {
     final port = receiver.port;
     final name = receiver.controller.friendlyName;
     return port == null ? '正在启动：$name' : '$name · 端口 $port';
+  }
+
+  String _allowListSubtitle(CastReceiverService receiver) {
+    final allow = receiver.admission.allowEntries.length;
+    final deny = receiver.admission.denyEntries.length;
+    final buffer = StringBuffer('已记住 $allow 台设备');
+    if (deny > 0) buffer.write(' · 拒绝名单 $deny 台');
+    return buffer.toString();
+  }
+
+  /// 准入模式三选（R1.1）：运行态写策略，落盘走回调。
+  Future<void> _pickAdmissionMode(
+    BuildContext context,
+    CastReceiverService receiver,
+  ) async {
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: const Text('投送准入'),
+        children: [
+          for (final mode in receiverAdmissionModes)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(dialogContext, mode),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Text(_admissionOptionLabel(admissionMode, mode)),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (picked == null || picked == admissionMode) return;
+    receiver.admission.mode = admissionModeFromString(picked);
+    onAdmissionModeChanged?.call(picked);
+  }
+
+  String _admissionOptionLabel(String current, String mode) {
+    final desc = switch (mode) {
+      'anyone' => '局域网内任何设备都能投送到本机',
+      'ask' => '陌生设备首次投送时弹窗确认，可记住',
+      'whitelist' => '只允许列表内的设备投送',
+      _ => '',
+    };
+    final prefix = current == mode ? '✓ ' : '';
+    return '$prefix${receiverAdmissionModeLabel(mode)}（$desc）';
+  }
+
+  /// 允许/拒绝名单管理（R1.5）：条目 = IP/UA/时间，单删 + 清空；
+  /// 白名单模式只看允许表，拒绝名单是「每次询问」记住的拒绝。
+  Future<void> _manageAdmissionLists(
+    BuildContext context,
+    CastReceiverService receiver,
+  ) async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => _AdmissionListsDialog(
+        receiver: receiver,
+        onChanged: () {
+          onAdmissionListsChanged?.call(
+            receiver.admission.encodeAllowJson(),
+            receiver.admission.encodeDenyJson(),
+          );
+          // 名单计数显示在 tile 副标题上：变更后刷新。
+          receiver.notifyAdmissionChanged();
+        },
+      ),
+    );
   }
 
   Future<void> _toggle(
@@ -170,5 +277,129 @@ class CastReceiverTile extends StatelessWidget {
     ScaffoldMessenger.maybeOf(context)
       ?..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(text)));
+  }
+}
+
+/// 准入名单管理弹窗：允许名单 + 拒绝名单（ask 模式记住的拒绝）两个分区，
+/// 条目显示 IP/UA/时间，支持单删与分区清空。变更经 [onChanged] 通知调用方
+/// 持久化，并经 `receiver.notifyAdmissionChanged()` 触发本弹窗重建
+/// （ListenableBuilder 监听 service，删空一个分区后区块即时消失）。
+class _AdmissionListsDialog extends StatelessWidget {
+  const _AdmissionListsDialog({required this.receiver, required this.onChanged});
+
+  final CastReceiverService receiver;
+  final VoidCallback onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: receiver,
+      builder: (context, _) {
+        final theme = Theme.of(context);
+        final policy = receiver.admission;
+        final allow = policy.allowEntries;
+        final deny = policy.denyEntries;
+        return AlertDialog(
+          title: const Text('投送准入名单'),
+          content: SizedBox(
+            width: 420,
+            child: (allow.isEmpty && deny.isEmpty)
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                    child: Text(
+                        '暂无记录。开启「每次询问」后，勾选「记住此设备」的设备会出现在这里'),
+                  )
+                : SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (allow.isNotEmpty) ...[
+                          _sectionHeader(context, '允许名单', allow.length, () {
+                            policy.clearAllowed();
+                            onChanged();
+                          }),
+                          for (final e in allow)
+                            _entryTile(context, theme, e, () {
+                              policy.removeAllowed(e.ip);
+                              onChanged();
+                            }),
+                        ],
+                        if (deny.isNotEmpty) ...[
+                          _sectionHeader(context, '拒绝名单（每次询问记住）',
+                              deny.length, () {
+                            policy.clearDenied();
+                            onChanged();
+                          }),
+                          for (final e in deny)
+                            _entryTile(context, theme, e, () {
+                              policy.removeDenied(e.ip);
+                              onChanged();
+                            }),
+                        ],
+                      ],
+                    ),
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _sectionHeader(
+    BuildContext context,
+    String label,
+    int count,
+    VoidCallback clear,
+  ) {
+    return Row(
+      children: [
+        Expanded(child: Text('$label（$count）')),
+        TextButton(onPressed: clear, child: const Text('清空')),
+      ],
+    );
+  }
+
+  Widget _entryTile(
+    BuildContext context,
+    ThemeData theme,
+    ReceiverAdmissionEntry entry,
+    VoidCallback remove,
+  ) =>
+      ListTile(
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        leading: Icon(
+          entry.userAgent.isEmpty ? Icons.devices_other : Icons.smartphone,
+          size: 20,
+        ),
+        title: Text(entry.ip, style: theme.textTheme.bodyMedium),
+        subtitle: Text(
+          _entrySubtitle(entry),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.bodySmall
+              ?.copyWith(color: theme.colorScheme.outline),
+        ),
+        trailing: IconButton(
+          tooltip: '删除此条目',
+          icon: const Icon(Icons.delete_outline, size: 20),
+          onPressed: remove,
+        ),
+      );
+
+  String _entrySubtitle(ReceiverAdmissionEntry e) {
+    final time = _formatTime(e.at);
+    return e.userAgent.isEmpty ? time : '${e.userAgent} · $time';
+  }
+
+  String _formatTime(DateTime t) {
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${t.year}-${two(t.month)}-${two(t.day)} ${two(t.hour)}:${two(t.minute)}';
   }
 }

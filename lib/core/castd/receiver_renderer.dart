@@ -4,12 +4,14 @@
 /// fault 码按 design.md §4 表（与蓝本的 701/711/714 口径不同，以设计为准）：
 /// SetAVTransportURI 无 URI → 402；Play/Pause/GetMediaInfo 无 URI → 710；
 /// Seek 不支持的 Unit → 401、非法 Target → 710；未知动作 → 401；
-/// SetVolume 越界 → 402。引擎故障（load/play 抛异常）不是协议错误，
-/// 不翻译成 fault，由 HTTP 层兜 500 + ErrorLog。
+/// SetVolume 越界 → 402；准入拒绝（SetAVTransportURI，11-07-cast-receiver-advanced）
+/// → 401 Action Not Authorized（UPnP 标准授权码）。引擎故障（load/play 抛异常）
+/// 不是协议错误，不翻译成 fault，由 HTTP 层兜 500 + ErrorLog。
 library;
 
 import 'package:xml/xml.dart';
 
+import 'receiver_admission.dart';
 import 'receiver_descriptions.dart';
 import 'receiver_player_adapter.dart';
 
@@ -40,6 +42,8 @@ class ReceiverMediaOpened {
     required this.senderAddress,
     required this.senderUserAgent,
     this.subtitleUrl,
+    this.albumArtUrl,
+    this.mimeType,
   });
 
   final String url;
@@ -49,6 +53,13 @@ class ReceiverMediaOpened {
 
   /// 外挂字幕地址（DIDL sec:CaptionInfo/Ex 提取，R2.1；无则 null）。
   final String? subtitleUrl;
+
+  /// 投送封面地址（DIDL upnp:albumArtURI 提取；无则 null）。
+  final String? albumArtUrl;
+
+  /// 媒体 mime 提示（DIDL res protocolInfo 第 3 段 / upnp:class 推导，
+  /// 音频投送显示大图用；未知 null）。
+  final String? mimeType;
 }
 
 /// Duration → `H:MM:SS`（小时不补零，蓝本 `%d:%02d:%02d`；自家发送端
@@ -122,7 +133,13 @@ String? didlSubtitleUrl(String? metadata, String currentUri) {
   return null;
 }
 
-String? _normalizeSubtitleValue(String raw, String currentUri) {
+String? _normalizeSubtitleValue(String raw, String currentUri) =>
+    _normalizeUrlValue(raw, currentUri);
+
+/// URL 值归一（字幕/封面共用）：CDATA 剥壳 + XML 反转义 + 取第一个
+/// http(s)；相对路径按 [currentUri] resolve。解析不出或非 http(s) 返回
+/// null——提取失败静默，不阻断主投送链。
+String? _normalizeUrlValue(String raw, String currentUri) {
   var text = raw;
   final cdata = _cdataPattern.firstMatch(text);
   if (cdata != null) text = cdata.group(1)!;
@@ -139,6 +156,58 @@ String? _normalizeSubtitleValue(String raw, String currentUri) {
   final resolved = base.resolveUri(relative);
   final scheme = resolved.scheme.toLowerCase();
   return (scheme == 'http' || scheme == 'https') ? resolved.toString() : null;
+}
+
+/// 投送封面（design §2 / R2.1）：DIDL 里的 `upnp:albumArtURI`。命名空间
+/// 前缀放宽到任意前缀（发送端 DIDL 经常不规范，同 didlTitle 口径）、
+/// 元素名大小写不敏感（野外有 `albumArtUri` 变体）；多值取文档序第一个
+/// 可用的 http(s) URL；相对路径按 [currentUri] resolve。无封面 / 解析
+/// 失败返回 null（封面失败静默）。
+final RegExp _albumArtPattern = RegExp(
+  r'<(?:[\w.-]+:)?(albumArtURI)\b[^>]*>(.*?)</(?:[\w.-]+:)?\1\s*>',
+  dotAll: true,
+  caseSensitive: false,
+);
+
+String? didlAlbumArtUrl(String? metadata, String currentUri) {
+  if (metadata == null || metadata.isEmpty) return null;
+  for (final match in _albumArtPattern.allMatches(metadata)) {
+    final url = _normalizeUrlValue(match.group(2) ?? '', currentUri);
+    if (url != null) return url;
+  }
+  return null;
+}
+
+final RegExp _protocolInfoPattern =
+    RegExp(r'<res\b[^>]*\bprotocolInfo="([^"]*)"', caseSensitive: false);
+
+final RegExp _upnpClassPattern = RegExp(
+  r'<(?:[\w.-]+:)?(class)\b[^>]*>(.*?)</(?:[\w.-]+:)?\1\s*>',
+  dotAll: true,
+  caseSensitive: false,
+);
+
+/// 媒体 mime 提示（音频投送显示大图用，R2.2）：优先取第一个 `res` 的
+/// protocolInfo 第 3 段（`http-get:*:audio/mpeg:*` → `audio/mpeg`；`*`
+/// 占位不算有效 mime）；
+/// 缺失时按 upnp:class 关键词推导通配 mime（audioItem → `audio/*` 等）。
+/// 都取不到返回 null。
+String? didlMimeType(String? metadata) {
+  if (metadata == null || metadata.isEmpty) return null;
+  final m = _protocolInfoPattern.firstMatch(metadata);
+  if (m != null) {
+    final parts = m.group(1)!.split(':');
+    final mime = parts.length >= 3 ? parts[2].trim() : '';
+    if (mime.isNotEmpty && mime != '*') {
+      return mime;
+    }
+  }
+  final cls = _upnpClassPattern.firstMatch(metadata);
+  final text = cls == null ? '' : _unescapeXml(cls.group(2) ?? '').trim();
+  if (text.contains('audioItem')) return 'audio/*';
+  if (text.contains('imageItem')) return 'image/*';
+  if (text.contains('videoItem')) return 'video/*';
+  return null;
 }
 
 /// 解析 SOAP 请求体（SOAP 1.1 与 1.2 信封同构，动作名取 Body 第一个元素
@@ -229,12 +298,16 @@ const Set<String> receiverQuietActions = {
 /// 语义等价蓝本 @Synchronized——前一个动作完成（含引擎 await）后才执行
 /// 下一个，避免 Play 插进 SetAVTransportURI 的加载窗口）。
 class ReceiverRenderer {
-  ReceiverRenderer({required this.player, this.onOpened});
+  ReceiverRenderer({required this.player, this.onOpened, this.admission});
 
   final ReceiverPlayer player;
 
   /// 新投会话（SetAVTransportURI 成功）回调；控制器转 onIncomingSession。
   final void Function(ReceiverMediaOpened event)? onOpened;
+
+  /// 准入策略（null = 不检查，等价 anyone——旧路径行为不变）。在
+  /// SetAVTransportURI 上前置调用，拒绝回 fault 401。
+  final AdmissionPolicy? admission;
 
   String _uri = '';
   String _metadata = '';
@@ -291,6 +364,17 @@ class ReceiverRenderer {
         if (url.isEmpty) {
           throw const ReceiverFault(402, 'Invalid Args');
         }
+        // 准入检查（design §1）：拒绝 → fault 401，不 load 不开会话。
+        final policy = admission;
+        if (policy != null) {
+          final allowed = await policy.decide(
+            senderIp: senderAddress,
+            senderUa: senderUserAgent,
+          );
+          if (!allowed) {
+            throw const ReceiverFault(401, 'Action Not Authorized');
+          }
+        }
         final metadata = action.args['CurrentURIMetaData'] ?? '';
         final subtitleUrl = didlSubtitleUrl(metadata, url);
         await player.load(Uri.parse(url),
@@ -303,6 +387,8 @@ class ReceiverRenderer {
           senderAddress: senderAddress,
           senderUserAgent: senderUserAgent,
           subtitleUrl: subtitleUrl,
+          albumArtUrl: didlAlbumArtUrl(metadata, url),
+          mimeType: didlMimeType(metadata),
         ));
         return const [];
       case 'Play':

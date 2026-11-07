@@ -21,6 +21,7 @@ import 'core/reader/speech/listen_media_bridge.dart';
 import 'core/aqua_client.dart';
 import 'core/aqua_error.dart';
 import 'core/cast/cast_service.dart';
+import 'core/castd/receiver_admission.dart';
 import 'core/castd/receiver_service.dart';
 import 'core/download_service.dart';
 import 'core/error_log.dart';
@@ -38,6 +39,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'store/stores.dart';
 import 'theme/app_theme.dart';
 import 'widgets/common.dart';
+import 'widgets/receiver_admission_dialog.dart';
 import 'widgets/tv_focus_scope.dart';
 import 'widgets/tv_scope.dart';
 
@@ -282,9 +284,28 @@ class AquaApp extends StatefulWidget {
 class _AquaAppState extends State<AquaApp> {
   /// DLNA 接收端接线（Phase B）：UDN 走 CastStore 持久化，来投会话开
   /// 接收端播放页（全屏路由）；开关关闭且页开着时 popUntil 精确关页。
+  /// 投送准入（11-07-cast-receiver-advanced）：启动时把持久化的模式/名单
+  /// 应用到策略；ask 模式的询问弹全局对话框（不依赖播放页打开，首投即问）。
   void _configureReceiver(CastStore cast) {
     final receiver = CastReceiverService.instance;
     receiver.udnLoader = cast.ensureReceiverUdn;
+    receiver.admissionPromptHandler = (request) async {
+      final context = rootNavigatorKey.currentContext;
+      if (context == null) {
+        // 导航未就绪（启动极早期来投）：按拒绝处理，由策略层兜底。
+        return const AdmissionPromptOutcome(allow: false);
+      }
+      return showReceiverAdmissionDialog(
+        context,
+        ip: request.ip,
+        userAgent: request.userAgent,
+      );
+    };
+    receiver.applyAdmissionSettings(
+      mode: widget.settings.castReceiverAdmissionMode,
+      allowJson: widget.settings.castReceiverAllowIps,
+      denyJson: widget.settings.castReceiverDenyIps,
+    );
     receiver.openSessionPage = (session) {
       final navigator = rootNavigatorKey.currentState;
       if (navigator == null) return false;

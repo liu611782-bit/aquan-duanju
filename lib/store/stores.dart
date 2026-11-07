@@ -341,6 +341,53 @@ class SettingsStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 接收端准入模式三值（11-07-cast-receiver-advanced R1.1）：anyone（默认，
+  /// 现状）/ ask（每次询问）/ whitelist（仅允许列表）。文案单一来源在
+  /// receiver_admission.dart 的 `receiverAdmissionModeLabel`。
+  static const List<String> castReceiverAdmissionValues = [
+    'anyone',
+    'ask',
+    'whitelist',
+  ];
+
+  String get castReceiverAdmissionMode {
+    final v = _prefs.getString('cast.receiverAdmissionMode') ?? 'anyone';
+    return castReceiverAdmissionValues.contains(v) ? v : 'anyone';
+  }
+
+  set castReceiverAdmissionMode(String v) {
+    _prefs.setString('cast.receiverAdmissionMode',
+        castReceiverAdmissionValues.contains(v) ? v : 'anyone');
+    notifyListeners();
+  }
+
+  /// 记住的允许设备名单（JSON 数组 `[{ip,ua,at}]`；空串 = 无）。运行态由
+  /// 准入策略管理，这里只做落盘/读出（进备份白名单，随备份走）。
+  String get castReceiverAllowIps =>
+      _prefs.getString('cast.receiverAllowIps') ?? '';
+
+  set castReceiverAllowIps(String v) {
+    if (v.isEmpty) {
+      _prefs.remove('cast.receiverAllowIps');
+    } else {
+      _prefs.setString('cast.receiverAllowIps', v);
+    }
+    notifyListeners();
+  }
+
+  /// 记住的拒绝设备名单（「每次询问」勾了记住的拒绝，JSON 同上）。
+  String get castReceiverDenyIps =>
+      _prefs.getString('cast.receiverDenyIps') ?? '';
+
+  set castReceiverDenyIps(String v) {
+    if (v.isEmpty) {
+      _prefs.remove('cast.receiverDenyIps');
+    } else {
+      _prefs.setString('cast.receiverDenyIps', v);
+    }
+    notifyListeners();
+  }
+
   /// 中继转码画质档位（R2 画质三档）：high（高清）/ balanced（均衡，现状
   /// 参数）/ compact（省流）。全局记忆，随备份走；非法值回落 balanced
   /// （与 Go 侧空/未知值缺省口径一致）。
@@ -586,6 +633,11 @@ class SettingsStore extends ChangeNotifier {
         'update.autoCheck': autoCheckUpdate,
         // 投屏中继画质三档（R2）：随备份走，换设备后行为一致。
         'cast.relayQuality': castRelayQuality,
+        // 接收端准入（11-07-cast-receiver-advanced）：模式 + 记住的名单
+        // 随备份走，换设备后准入行为一致。
+        'cast.receiverAdmissionMode': castReceiverAdmissionMode,
+        'cast.receiverAllowIps': castReceiverAllowIps,
+        'cast.receiverDenyIps': castReceiverDenyIps,
       };
 
   /// 从备份恢复设置：未知键忽略、非法值回落默认，返回实际写入的键数。
@@ -720,6 +772,20 @@ class SettingsStore extends ChangeNotifier {
       if (v is String && castRelayQualityValues.contains(v)) {
         castRelayQuality = v;
       }
+    });
+    apply('cast.receiverAdmissionMode', () {
+      final v = data['cast.receiverAdmissionMode'];
+      if (v is String && castReceiverAdmissionValues.contains(v)) {
+        castReceiverAdmissionMode = v;
+      }
+    });
+    apply('cast.receiverAllowIps', () {
+      final v = data['cast.receiverAllowIps'];
+      if (v is String) castReceiverAllowIps = v;
+    });
+    apply('cast.receiverDenyIps', () {
+      final v = data['cast.receiverDenyIps'];
+      if (v is String) castReceiverDenyIps = v;
     });
     return applied;
   }
