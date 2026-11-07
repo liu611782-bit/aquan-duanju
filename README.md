@@ -31,7 +31,7 @@ Apache-2.0）的 Flutter 短剧播放器，支持 **Windows / Android / Linux / 
 | 影视聚合 | 发现页入口：导入 TVBox / MoonTV / 多仓 / 文本行源（六形态解码含 2423 AES 加密配置），源市场从索引站一键抓源+逐源测速（「连接成功 XXXms」）、聚合搜索（流式先到先显示）、源管理（自检/钉选/排序/导入导出）、短剧源自动标记 |
 | B 站 | 扫码登录（免 appkey）、推荐/搜索（WBI 签名 + buvid/bili_ticket 风控）、视频/番剧 DASH 双轨播放、弹幕展示与发送、屏蔽词 |
 | 直播 | TVBox lives（TXT/M3U/JSON）：分组换台、备用地址自动切换、逐频道测速、EPG 节目单（XMLTV/xml.gz） |
-| 投屏 | **DLNA + Chromecast + AirPlay 三协议**（SSDP+mDNS 双发现，同设备自动换协议降级；AirPlay 一期为经典接收端的 `/play` 视频投送——UxPlay/shairport-sync 系等无需配对的接收端，新电视的 AirPlay 2 `/command` 与配对留二期，音量遥控不支持）；受保护流四级选路（直链/源站头代理/CENC 解密中继/本地文件）；**屏幕镜像**（MediaProjection→H264/AAC→MPEG-TS，含系统声音、编码器卡死自动降档恢复）；B 站 DASH 双轨合流投送；电视端播完自动连播下一集；GENA 事件推送替代高频轮询；静音/音量/字幕（sec:SubtitleUri + VTT）遥控；断开回本地续播；**接收端**（Windows/Android：本机可成为手机 App 的投屏目标，见「投屏 · 接收端」） |
+| 投屏 | **DLNA + Chromecast + AirPlay 三协议**（SSDP+mDNS 双发现，同设备自动换协议降级；AirPlay 一期为经典接收端的 `/play` 视频投送——UxPlay/shairport-sync 系等无需配对的接收端，新电视的 AirPlay 2 `/command` 与配对留二期，音量遥控不支持）；受保护流四级选路（直链/源站头代理/CENC 解密中继/本地文件）；**屏幕镜像**（MediaProjection→H264/AAC→MPEG-TS，含系统声音、编码器卡死自动降档恢复）；B 站 DASH 双轨合流投送；电视端播完自动连播下一集；GENA 事件推送替代高频轮询；静音/音量/字幕（sec:SubtitleUri + VTT）遥控；断开回本地续播；**中断自动恢复**（播放中失联先复检电视可达再恰一次重投并跳回最后位置，电视真关机静默回本地）；**接收端**（Windows/Android：本机可成为手机 App 的投屏目标，见「投屏 · 接收端」） |
 | 语音 | 搜索框语音输入：Android 系统识别；桌面 OpenAI 兼容端点（自备 key，设置里配置与自检） |
 | 去广告 | CMS 源播放经本地回环代理重写 m3u8（关键字表剔广告分片），失败自动回退直链 |
 | 扫码导入 | 源管理页生成一次性二维码，手机浏览器粘贴配置提交导入 |

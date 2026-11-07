@@ -286,6 +286,12 @@ class _PlayerScreenState extends State<PlayerScreen>
             'resumeLocal',
       );
     };
+    // 中断自动恢复成功（11-07-cast-auto-reconnect）：toast 一次固定文案
+    // （SnackBar 全局可见，投屏面板开与不开都显示）。
+    castController.onAutoReconnected = () {
+      if (!mounted) return;
+      _showToast('已自动恢复投屏');
+    };
     unawaited(_installMpvOptions());
     _playSkip = AppScope.read(context).playSkip.entryFor(widget.series.id);
     // 恢复上次音量；滑块状态由 stream.volume 双向同步（滚轮/快捷键改也跟得上）。
@@ -465,6 +471,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (castController.onRemoteStopped != null) {
       castController.onRemoteStopped = null;
     }
+    castController.onAutoReconnected = null;
     unawaited(_stopRelayIfAny());
     PlayerBus.instance.detach(this);
     // 记住本次音量，下次启动恢复。

@@ -250,6 +250,15 @@ class CastController extends ChangeNotifier {
   /// 防止镜像/本地文件会话把上一条记录的进度与时间戳改掉。
   bool _sessionRecorded = false;
 
+  /// 中断自动恢复一次性 flag（R1，任务 11-07-cast-auto-reconnect）：失联触发
+  /// 恢复尝试即置位，会话结束（[_finishSession]）复位——本会话内无论恢复
+  /// 成败都不再触发（恰一次，无重试风暴）。
+  bool _autoReconnectAttempted = false;
+
+  /// 恢复尝试进行中（复检 + 重投期间）：失联批次的重复触发在此静默，避免
+  /// 与恢复流程竞争（也不重复打 [onSessionLost]）。
+  bool _autoReconnecting = false;
+
   /// mDNS 发现挂点（Chromecast）注入点；null = 用默认 [MdnsDiscovery]。
   final Stream<CastDeviceInfo> Function()? mdnsDiscover;
 
@@ -308,6 +317,17 @@ class CastController extends ChangeNotifier {
 
   /// 连续多次轮询失败（电视休眠/换网）时回调，UI 据此提示「连接已断开」。
   void Function(CastTarget device)? onSessionLost;
+
+  /// 中断自动恢复成功（R3）：UI 据此 toast 一次「已自动恢复投屏」。播放器
+  /// 页注入（与 [onRemoteStopped] 同一注入模式；SnackBar 全局可见，投屏面板
+  /// 开与不开都显示）；未注入 = 只记诊断时间线。
+  void Function()? onAutoReconnected;
+
+  /// 中断自动恢复的可达性复检挂点（R2）：默认实现 GET DLNA 描述 URL / 无
+  /// 描述 URL 的协议按端口 TCP 探活（见 `_probeTargetReachable`）。测试注入
+  /// 假件（404/超时路径）；返回 false = 目标不可达 → 静默走既有「电视端
+  /// 停止」路径。
+  Future<bool> Function(CastTarget)? reachabilityProbe;
 
   /// 连播队列：电视端播完当前集后取下一集；返回 null 表示没有更多。
   /// 由 UI 在发起投屏时注入（捕获当时的集数上下文），会话结束自动清空。
@@ -1064,7 +1084,16 @@ class CastController extends ChangeNotifier {
   /// 损坏）——调用方应静默清理记录并隐藏恢复入口。恢复尝试失败时异常
   /// 原样上抛（与 [castTo] 同语义；UI 显示固定文案「恢复失败，请重新投屏」，
   /// 原始异常只进 ErrorLog）。
-  Future<bool> resumeLastSession() async {
+  Future<bool> resumeLastSession() => _replayLastSessionRecord();
+
+  /// 从恢复记录重投（[resumeLastSession] 与中断自动恢复 [_handleSessionLost]
+  /// 共用的私有链路，R3）：读记录 → 重建 target → 走 [castTo] 标准投屏序列
+  /// （选路/配方/同 IP 降级链照常，不新加报文）→ 记录位置 >3s 由既有序列
+  /// 自动 seek——lastSession 在会话中被持续更新，天然就是「最后位置」。
+  ///
+  /// 返回 false = 无可恢复记录（未注入 recorder / 无记录 / 记录或目标损坏）。
+  /// 重投失败异常原样上抛（与 [castTo] 同语义），由调用方决定呈现方式。
+  Future<bool> _replayLastSessionRecord() async {
     final record = sessionRecorder?.lastSession;
     if (record == null) return false;
     final target = record.resolveTarget();
@@ -1323,11 +1352,13 @@ class CastController extends ChangeNotifier {
       _pollFailures = 0;
       await _handlePoll(poll, device);
     } catch (_) {
-      // 单次轮询失败容忍（Wi-Fi 抖动）；连续 5 次判失联，交 UI 决定是否重连。
+      // 单次轮询失败容忍（Wi-Fi 抖动）；连续 5 次判失联：先做恰一次中断
+      // 自动恢复（R1），不符合条件（镜像/未记录/已尝试过）维持既有
+      // onSessionLost 行为（默认路径不变）。
       _pollFailures++;
       if (_pollFailures >= 5) {
         _pollFailures = 0;
-        if (device != null) onSessionLost?.call(device);
+        if (device != null) unawaited(_handleSessionLost(device));
       }
     }
   }
@@ -1338,6 +1369,85 @@ class CastController extends ChangeNotifier {
       _gena!.active &&
       _lastGenaAt != null &&
       DateTime.now().difference(_lastGenaAt!) < const Duration(seconds: 15);
+
+  /// 连续轮询失联（≥5 次）的统一入口（R1~R4，任务 11-07-cast-auto-reconnect）：
+  /// 符合条件（当前会话已写恢复记录、非镜像、本会话未尝试过、无并发推送）
+  /// 时做恰一次自动恢复——先复检门控（R2），目标不可达即静默走既有「电视端
+  /// 停止」路径；可达则复用会话恢复链路重投并 seek 最后位置（R3），成功记
+  /// 时间线「中断自动恢复」并回调 [onAutoReconnected]（面板 toast），失败走
+  /// 既有错误路径（原始异常只进 ErrorLog）。不符合条件维持既有 onSessionLost
+  /// 行为（默认路径不变）。
+  Future<void> _handleSessionLost(CastTarget device) async {
+    if (_autoReconnecting) return;
+    final media = _currentMedia;
+    if (_autoReconnectAttempted ||
+        _autoAdvancing ||
+        (media?.isMirror ?? false) ||
+        !_sessionRecorded) {
+      onSessionLost?.call(device);
+      return;
+    }
+    _autoReconnectAttempted = true;
+    _autoReconnecting = true;
+    // 触发时的会话记录状态：恢复重投失败的收尾要用（_castWith 会先复位它）。
+    final wasRecorded = _sessionRecorded;
+    // 恢复尝试全程（复检 + 重投）沿用换集推送护栏（R4）：期间的瞬态 STOPPED
+    // 不误判电视端主动停止，用户换集/连投暂不受理。
+    _autoAdvancing = true;
+    try {
+      final reachable = await _probeTargetReachable(device);
+      if (_state != CastSessionState.casting) return; // 复检期间会话已被结束
+      if (!reachable) {
+        // 电视不可达：静默走现有「电视端停止」路径（不 toast、不打扰）。
+        CastDiagnostics.instance.recordTimeline('中断自动恢复：目标不可达');
+        CastDiagnostics.instance.recordTimeline('电视端停止投屏');
+        final position = _lastPosition;
+        await _finishSession();
+        onRemoteStopped?.call(device, position);
+        return;
+      }
+      // 旧连接已失联：先释放，避免恢复 castTo 覆盖 _transport 引用后泄漏。
+      try {
+        _transport?.close();
+      } catch (_) {}
+      final ok = await _replayLastSessionRecord();
+      if (ok) {
+        CastDiagnostics.instance.recordTimeline('中断自动恢复');
+        onAutoReconnected?.call();
+      } else {
+        // 记录在恢复前被清（损坏清理/外部清理）：既有失联路径。
+        onSessionLost?.call(device);
+      }
+    } on Exception catch (e, stack) {
+      // 恢复失败（R3）：现有错误路径——异常只进 ErrorLog，会话完整收尾，
+      // 失联交既有 onSessionLost 通道（记录保留，用户可手动重投）。
+      ErrorLog.instance.record('投屏中断自动恢复', e, stack);
+      // 恢复重投失败时 _castWith 已把 _sessionRecorded 复位：还原触发时的
+      // 值，让 _finishSession 的会话收尾（endedAt 更新）按原会话语义执行。
+      _sessionRecorded = wasRecorded;
+      try {
+        await _finishSession();
+      } catch (_) {}
+      onSessionLost?.call(device);
+    } finally {
+      _autoAdvancing = false;
+      _autoReconnecting = false;
+    }
+  }
+
+  /// 复检门控（R2）：注入的 [reachabilityProbe] 优先；默认 GET DLNA 描述
+  /// URL（与发现期同 1.8s 超时口径），Chromecast/AirPlay 无描述 URL → 按
+  /// 端口 TCP 探活。判定不出（无 location/无端口）→ 放行重投（真不可达时
+  /// castTo 有界失败走错误路径，不会悬挂）。
+  Future<bool> _probeTargetReachable(CastTarget device) {
+    final probe = reachabilityProbe;
+    if (probe != null) return probe(device);
+    final location = device.dlna?.location ?? '';
+    if (location.isNotEmpty) return probeDeviceDescriptionReachable(location);
+    final port = device.cast?.port ?? device.airplay?.port ?? 0;
+    if (device.host.isEmpty || port <= 0) return Future<bool>.value(true);
+    return probeHostPortReachable(device.host, port);
+  }
 
   /// 轮询与 GENA 事件共用的状态处理（含播完连投判定）。
   Future<void> _handlePoll(CastPoll poll, CastTarget? device) async {
@@ -1469,6 +1579,8 @@ class CastController extends ChangeNotifier {
     _lastTransportState = '';
     _pollFailures = 0;
     _userStopping = false;
+    // 中断自动恢复一次性 flag（R1）：会话结束复位，新会话重新获得恰一次机会。
+    _autoReconnectAttempted = false;
     // 会话恢复记录（R1.1）：断开/电视端停止只更新 endedAt，不删记录——
     // 重启后仍可恢复。未记录的会话（镜像/本地文件）不动旧记录。
     if (_sessionRecorded) {

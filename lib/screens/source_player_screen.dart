@@ -236,6 +236,16 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
       _engine.play();
       setState(() {});
     };
+    // 中断自动恢复成功（11-07-cast-auto-reconnect）：toast 一次固定文案
+    // （SnackBar 全局可见，投屏面板开与不开都显示）。
+    castController.onAutoReconnected = () {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+            content: Text('已自动恢复投屏'),
+            duration: Duration(milliseconds: 800)));
+    };
     _open();
     _historyTimer = Timer.periodic(
         const Duration(seconds: 5), (_) => _recordHistory(finished: false));
@@ -244,6 +254,7 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   @override
   void dispose() {
     castController.onRemoteStopped = null;
+    castController.onAutoReconnected = null;
     _recordHistory(finished: false);
     _stopCastRelay();
     unawaited(_releaseProxy());
