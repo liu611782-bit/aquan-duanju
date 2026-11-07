@@ -92,8 +92,10 @@ class AquaApi implements AquaImageFetcher, MangaPageFetcher {
   /// 启动局域网解密中继：返回 {session, token, port, url, format, ready}。
   /// [userAgent]/[referer] 透传给 ffmpeg -headers（B 站等 CDN 防盗链必需）。
   /// [format] 是输出档位（R2）：空/"hls"（默认）| "ts"——Go 侧对空/未知值
-  /// 一律按 hls，旧调用方零改动。[subtitleUrl] 是会话字幕地址（R3）：非空
-  /// 时中继媒体响应带 `CaptionInfo.sec` 第三通道。
+  /// 一律按 hls，旧调用方零改动。[quality] 是画质档位（R2）：high /
+  /// balanced / compact——Go 侧对空/未知值缺省回 balanced（现状参数）。
+  /// [subtitleUrl] 是会话字幕地址（R3）：非空时中继媒体响应带
+  /// `CaptionInfo.sec` 第三通道。
   Future<Map<String, dynamic>> castRelayStart({
     required String url,
     String backupUrl = '',
@@ -103,18 +105,20 @@ class AquaApi implements AquaImageFetcher, MangaPageFetcher {
     String referer = '',
     String format = '',
     String subtitleUrl = '',
+    String quality = '',
   }) async {
     final r = await _client.call('castRelayStart', [
-      jsonEncode({
-        'url': url,
-        'backup_url': backupUrl,
-        'dec_key': decKey,
-        'audio_url': audioUrl,
-        'user_agent': userAgent,
-        'referer': referer,
-        'format': format,
-        'subtitle_url': subtitleUrl,
-      }),
+      jsonEncode(castRelayStartPayload(
+        url: url,
+        backupUrl: backupUrl,
+        decKey: decKey,
+        audioUrl: audioUrl,
+        userAgent: userAgent,
+        referer: referer,
+        format: format,
+        subtitleUrl: subtitleUrl,
+        quality: quality,
+      )),
     ]);
     return _map(r);
   }
@@ -400,3 +404,31 @@ class NoOfficialTrackException implements Exception {
   @override
   String toString() => '这本书没有官方音轨（非番茄书），已改用本地朗读';
 }
+
+/// castRelayStart 通道载荷（拍平的 options，与 Go `relayOptions` JSON 标签
+/// 一一对应）。
+///
+/// 独立成纯函数：[AquaApi.castRelayStart] 只是 jsonEncode 它，单测据此
+/// 断言透传字段（R2 画质档位等）而不必起 FFI。字段语义见该方法文档。
+Map<String, dynamic> castRelayStartPayload({
+  required String url,
+  String backupUrl = '',
+  String decKey = '',
+  String audioUrl = '',
+  String userAgent = '',
+  String referer = '',
+  String format = '',
+  String subtitleUrl = '',
+  String quality = '',
+}) =>
+    <String, dynamic>{
+      'url': url,
+      'backup_url': backupUrl,
+      'dec_key': decKey,
+      'audio_url': audioUrl,
+      'user_agent': userAgent,
+      'referer': referer,
+      'format': format,
+      'subtitle_url': subtitleUrl,
+      'quality': quality,
+    };

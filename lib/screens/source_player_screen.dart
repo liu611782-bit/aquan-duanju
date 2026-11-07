@@ -749,6 +749,8 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
             audioUrl: resolved.audioUrl ?? '',
             userAgent: headerOf(h, 'user-agent') ?? '',
             referer: headerOf(h, 'referer') ?? '',
+            // R2：画质三档随设置透传（Go 侧空/未知值缺省回 balanced）。
+            quality: scope.settings.castRelayQuality,
           );
           _castRelayApi = scope.api;
           _castRelaySession = relay['session'] as String?;
@@ -847,6 +849,7 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
         referer: headerOf(m.headers, 'referer') ?? '',
         format: relayFormat ?? '',
         subtitleUrl: relaySubtitleUrl?.toString() ?? '',
+        quality: scope.settings.castRelayQuality,
       );
       _castRelayApi = scope.api;
       _castRelaySession = relay['session'] as String?;

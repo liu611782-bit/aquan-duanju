@@ -2348,12 +2348,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       // M3：加密分集走本机中继（ffmpeg 解密转 HLS）。
       // scope 在 await 前捕获：不摸 await 之后的 context（M4-1 约定）。
       final api = AppScope.read(context).api;
+      // R2：画质三档随设置透传（Go 侧空/未知值缺省回 balanced）。
+      final relayQuality = AppScope.read(context).settings.castRelayQuality;
       try {
         final relay = await api.castRelayStart(
           url: stream.url,
           backupUrl: stream.backupUrl,
           decKey: playback.contentKey!.key,
           audioUrl: playback.playback.audioUrl,
+          quality: relayQuality,
         );
         _relaySession = relay['session'] as String?;
         _relayApi = api;
@@ -2429,6 +2432,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         referer: headerOf(m.headers, 'referer') ?? '',
         format: relayFormat ?? '',
         subtitleUrl: relaySubtitleUrl?.toString() ?? '',
+        quality: castScope.settings.castRelayQuality,
       );
       _relaySession = relay['session'] as String?;
       _relayApi = castScope.api;
@@ -2478,6 +2482,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             backupUrl: stream.backupUrl,
             decKey: pb.contentKey!.key,
             audioUrl: pb.playback.audioUrl,
+            quality: castScope.settings.castRelayQuality,
           );
           _relaySession = relay['session'] as String?;
           _relayApi = castScope.api;

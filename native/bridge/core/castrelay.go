@@ -37,6 +37,7 @@ type relayOptions struct {
 	Referer     string `json:"referer"`
 	AudioURL    string `json:"audio_url"`    // DASH 双轨上游（可选）
 	Format      string `json:"format"`       // 输出档位（R2）：""/"hls"（默认）| "ts"；未知值一律按 hls
+	Quality     string `json:"quality"`      // 画质档位（R2）：high|balanced|compact；空/未知 = balanced（现状）
 	SubtitleURL string `json:"subtitle_url"` // 会话字幕地址（R3）：非空时媒体响应带 CaptionInfo.sec
 }
 
@@ -363,9 +364,11 @@ func startSweeper() {
 //
 //   - hls（默认/空/未知值）：libx264+aac 转 HLS（guoappxxx 验证参数，
 //     **字节级保持现状**——hls 分支的任何改动都会影响已调通的设备）；
+//     x264 重编码参数按画质档位（R2）取 [x264VideoParams]，balanced 档
+//     与现状逐字节一致；
 //   - ts：Sink 只认 TS 容器时 remux（-c copy 不重编码，WMP 族不认 HLS
 //     清单，TS 直流才是它们的母语；-muxdelay 0 / -muxpreload 0 降起播
-//     延迟），产物单文件 stream.ts。
+//     延迟），产物单文件 stream.ts。画质档位不影响本分支（无重编码）。
 func buildFFmpegArgs(ffmpeg string, opts relayOptions, dir string, decKey string) []string {
 	input := opts.URL
 	if decKey != "" {
@@ -396,9 +399,9 @@ func buildFFmpegArgs(ffmpeg string, opts relayOptions, dir string, decKey string
 		return args
 	}
 	// 备用地址：主地址 ffmpeg 自己会失败退出 → 上层重试时换备用。
+	args = append(args, "-i", input)
+	args = append(args, x264VideoParams(opts.Quality)...)
 	args = append(args,
-		"-i", input,
-		"-c:v", "libx264", "-preset", "veryfast", "-crf", "25", "-pix_fmt", "yuv420p",
 		"-c:a", "aac", "-b:a", "96k", "-ac", "2",
 		"-f", "hls",
 		"-hls_time", "3",
@@ -408,6 +411,35 @@ func buildFFmpegArgs(ffmpeg string, opts relayOptions, dir string, decKey string
 		filepath.Join(dir, "index.m3u8"),
 	)
 	return args
+}
+
+// x264VideoParams 按画质档位返回 x264 重编码参数（R2 画质三档）：
+//
+//   - high：crf 20 + preset fast（画质优先，CPU 占用更高）；
+//   - balanced（含空/未知值）：crf 25 + preset veryfast —— **现状参数逐字节
+//     不动**，旧调用方（未传 quality）零回归；
+//   - compact：crf 30 + preset veryfast + maxrate 2M / bufsize 4M（省流档，
+//     给低配发送机与窄带宽）。
+//
+// 仅影响 x264 重编码分支；`-c copy` 的 TS 档不受影响。前四段
+// （-c:v/-preset/-crf/-pix_fmt）三档形状一致，便于测试与 diff。
+func x264VideoParams(quality string) []string {
+	switch quality {
+	case "high":
+		return []string{
+			"-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
+		}
+	case "compact":
+		return []string{
+			"-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-pix_fmt", "yuv420p",
+			"-maxrate", "2M", "-bufsize", "4M",
+		}
+	default:
+		// balanced / 空 / 未知值：现状参数（字节级保持，证据缺失回落现状）。
+		return []string{
+			"-c:v", "libx264", "-preset", "veryfast", "-crf", "25", "-pix_fmt", "yuv420p",
+		}
+	}
 }
 
 // findFFmpeg 按优先级定位可执行的 ffmpeg。

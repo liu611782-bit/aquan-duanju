@@ -341,6 +341,33 @@ class SettingsStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 中继转码画质档位（R2 画质三档）：high（高清）/ balanced（均衡，现状
+  /// 参数）/ compact（省流）。全局记忆，随备份走；非法值回落 balanced
+  /// （与 Go 侧空/未知值缺省口径一致）。
+  static const List<String> castRelayQualityValues = [
+    'high',
+    'balanced',
+    'compact',
+  ];
+
+  /// 面板三选的固定文案（下标与 [castRelayQualityValues] 对齐）。
+  static const Map<String, String> castRelayQualityLabels = {
+    'high': '高清',
+    'balanced': '均衡',
+    'compact': '省流',
+  };
+
+  String get castRelayQuality {
+    final v = _prefs.getString('cast.relayQuality') ?? 'balanced';
+    return castRelayQualityValues.contains(v) ? v : 'balanced';
+  }
+
+  set castRelayQuality(String v) {
+    _prefs.setString('cast.relayQuality',
+        castRelayQualityValues.contains(v) ? v : 'balanced');
+    notifyListeners();
+  }
+
   // ---------- 播放器高级设置（带白名单 / 范围校验） ----------
 
   /// 默认硬解方式：拷回（copy）路径。
@@ -557,6 +584,8 @@ class SettingsStore extends ChangeNotifier {
         'sources.detailSwitch': detailSourceSwitch,
         'update.urls': updateUrls,
         'update.autoCheck': autoCheckUpdate,
+        // 投屏中继画质三档（R2）：随备份走，换设备后行为一致。
+        'cast.relayQuality': castRelayQuality,
       };
 
   /// 从备份恢复设置：未知键忽略、非法值回落默认，返回实际写入的键数。
@@ -685,6 +714,12 @@ class SettingsStore extends ChangeNotifier {
     apply('update.autoCheck', () {
       final v = data['update.autoCheck'];
       if (v is bool) autoCheckUpdate = v;
+    });
+    apply('cast.relayQuality', () {
+      final v = data['cast.relayQuality'];
+      if (v is String && castRelayQualityValues.contains(v)) {
+        castRelayQuality = v;
+      }
     });
     return applied;
   }

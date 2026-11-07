@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,75 @@ func TestBuildFFmpegArgsFormatFallback(t *testing.T) {
 		if strings.Contains(joined, "mpegts") {
 			t.Fatalf("format=%q 不应走 ts 分支: %v", format, args)
 		}
+	}
+}
+
+// TestBuildFFmpegArgsQuality：画质三档参数组（R2）——high/balanced/compact
+// 各自的 x264 参数 + 空/未知值缺省回 balanced；balanced 与现状参数逐字节
+// 一致（旧行为零回归）。
+func TestBuildFFmpegArgsQuality(t *testing.T) {
+	balanced := []string{
+		"-c:v", "libx264", "-preset", "veryfast", "-crf", "25", "-pix_fmt", "yuv420p",
+	}
+	high := []string{
+		"-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
+	}
+	compact := []string{
+		"-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-pix_fmt", "yuv420p",
+		"-maxrate", "2M", "-bufsize", "4M",
+	}
+
+	// 三档显式取值。
+	if got := x264VideoParams("balanced"); !reflect.DeepEqual(got, balanced) {
+		t.Fatalf("balanced 参数不符: %v", got)
+	}
+	if got := x264VideoParams("high"); !reflect.DeepEqual(got, high) {
+		t.Fatalf("high 参数不符: %v", got)
+	}
+	if got := x264VideoParams("compact"); !reflect.DeepEqual(got, compact) {
+		t.Fatalf("compact 参数不符: %v", got)
+	}
+
+	// 空/未知值缺省回 balanced（旧调用方未传 quality 的现状路径）。
+	for _, q := range []string{"", "unknown", "HIGH"} {
+		if got := x264VideoParams(q); !reflect.DeepEqual(got, balanced) {
+			t.Fatalf("quality=%q 应回落 balanced: %v", q, got)
+		}
+	}
+
+	// 端到端：buildFFmpegArgs 产物携带档位参数（hls 分支），ts 分支不受影响。
+	dir := t.TempDir()
+	hlsArgs := buildFFmpegArgs("ffmpeg", relayOptions{
+		URL:     "http://up/1.m3u8",
+		Quality: "compact",
+	}, dir, "")
+	hlsJoined := strings.Join(hlsArgs, " ")
+	if !strings.Contains(hlsJoined, "-crf 30 -pix_fmt yuv420p -maxrate 2M -bufsize 4M") {
+		t.Fatalf("hls 分支应携带 compact 档参数: %v", hlsArgs)
+	}
+	tsArgs := buildFFmpegArgs("ffmpeg", relayOptions{
+		URL:     "http://up/1.mkv",
+		Format:  "ts",
+		Quality: "high",
+	}, dir, "")
+	tsJoined := strings.Join(tsArgs, " ")
+	if strings.Contains(tsJoined, "libx264") || strings.Contains(tsJoined, "crf") ||
+		strings.Contains(tsJoined, "maxrate") {
+		t.Fatalf("ts 档不应受画质档位影响（-c copy 不重编码）: %v", tsArgs)
+	}
+
+	// balanced 档完整 hls 命令与改动前逐字节一致（现状锁定）。
+	want := "ffmpeg -hide_banner -loglevel error -i http://up/1.m3u8 " +
+		"-c:v libx264 -preset veryfast -crf 25 -pix_fmt yuv420p " +
+		"-c:a aac -b:a 96k -ac 2 -f hls -hls_time 3 " +
+		"-hls_playlist_type event -hls_flags independent_segments " +
+		"-hls_segment_filename " + filepath.Join(dir, "seg_%05d.ts") + " " +
+		filepath.Join(dir, "index.m3u8")
+	gotArgs := buildFFmpegArgs("ffmpeg", relayOptions{
+		URL: "http://up/1.m3u8",
+	}, dir, "")
+	if strings.Join(gotArgs, " ") != want {
+		t.Fatalf("balanced 档与现状参数不一致:\n got: %v\nwant: %s", gotArgs, want)
 	}
 }
 
