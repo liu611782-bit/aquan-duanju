@@ -1,4 +1,6 @@
 import 'cast_controller.dart';
+import 'cast_profile.dart';
+import 'cast_recipe.dart';
 import 'cast_target.dart';
 
 /// 投屏全局单例：控制器跨页面存活（迷你窗/详情页切换不掉会话），
@@ -9,6 +11,17 @@ class CastService {
   static final CastService instance = CastService._();
 
   final CastController controller = CastController();
+
+  /// M3-4：把 CastStore 的配方/画像表接到控制器（修复配方持久化未接线，
+  /// AC-14 跨启动命中依赖这里）。bootstrap 加载完 CastStore 后调用一次；
+  /// 未调用时控制器用内存表（不落盘）。
+  void attachStores({
+    required CastRecipeStore recipes,
+    CastProfileStore? profiles,
+  }) {
+    controller.recipes = recipes;
+    controller.profiles = profiles;
+  }
 
   /// 设备排序：钉选 > 最近使用 > 在线 > 名称（协议无关，按 target id）。
   List<CastTarget> sortDevices(

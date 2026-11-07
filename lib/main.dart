@@ -20,6 +20,7 @@ import 'core/reader/reader_speech_controller.dart';
 import 'core/reader/speech/listen_media_bridge.dart';
 import 'core/aqua_client.dart';
 import 'core/aqua_error.dart';
+import 'core/cast/cast_service.dart';
 import 'core/download_service.dart';
 import 'core/error_log.dart';
 import 'models/models.dart';
@@ -402,6 +403,10 @@ class _AquaAppState extends State<AquaApp> {
       await playbackHealth.ensureLoaded();
       await cast.ensureLoaded();
       await lives.ensureLoaded();
+      // M3-4：配方/画像持久化接线（修复 recipeStore 未注入，AC-14
+      // 跨启动命中依赖这里）。
+      CastService.instance
+          .attachStores(recipes: cast.recipes, profiles: cast.profiles);
       await readerSettings.ensureLoaded();
       // 本地导入的阅读字体：重启后按记录过的路径重新注册。
       await ReaderFontRegistrar.ensureRegistered(

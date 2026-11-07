@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
@@ -8,6 +10,7 @@ import 'package:aquan_duanju/core/cast/cast_target.dart';
 import 'package:aquan_duanju/core/cast/didl.dart';
 import 'package:aquan_duanju/core/cast/dlna_device.dart';
 import 'package:aquan_duanju/core/cast/soap_client.dart';
+import 'package:aquan_duanju/store/stores.dart';
 
 DlnaDevice _device(String udn) => DlnaDevice(
       udn: udn,
@@ -66,13 +69,20 @@ CastMedia _media() =>
 
 CastTarget _target(String udn) => CastTarget.dlna(_device(udn));
 
-/// 兼容层假 transport：捕获 CastLoadRequest（M1-2/M1-8 接线断言用）。
+/// 兼容层假 transport：捕获 CastLoadRequest（M1-2/M1-8/M3 接线断言用）。
 class CapturingCompatTransport implements CastTransport, CastCompatTransport {
   CapturingCompatTransport();
 
   final List<String> calls = <String>[];
   CastLoadRequest? lastRequest;
   Set<String> sinkAnswer = <String>{'http-get:*:video/mp4:*'};
+
+  /// load 成功时返回的配方（可注入以模拟某台设备只吃 compact+bare）。
+  CastRecipe hitRecipe = const CastRecipe(didl: DidlVariant.full);
+
+  /// 轮询结果（连播测试切 STOPPED 触发播完连投）。
+  CastPoll pollResult =
+      const CastPoll(transportState: 'PLAYING', position: Duration.zero);
 
   @override
   Future<Set<String>> preflight() async => sinkAnswer;
@@ -81,7 +91,7 @@ class CapturingCompatTransport implements CastTransport, CastCompatTransport {
   Future<CastRecipe?> load(CastLoadRequest request) async {
     lastRequest = request;
     calls.add('load');
-    return const CastRecipe(didl: DidlVariant.full);
+    return hitRecipe;
   }
 
   @override
@@ -103,8 +113,7 @@ class CapturingCompatTransport implements CastTransport, CastCompatTransport {
   @override
   Future<void> setMute(bool muted) async {}
   @override
-  Future<CastPoll> poll() async =>
-      const CastPoll(transportState: 'PLAYING', position: Duration.zero);
+  Future<CastPoll> poll() async => pollResult;
   @override
   void close() {}
 }
@@ -288,6 +297,148 @@ void main() {
         ),
       );
       expect(compat.lastRequest!.didl.mimeType, 'application/x-mpegurl');
+      controller.dispose();
+    });
+  });
+
+  group('M3 配方/画像持久化（AC-14）', () {
+    Future<Directory> tempDir(String prefix) async {
+      final dir = await Directory.systemTemp.createTemp(prefix);
+      addTearDown(() => dir.delete(recursive: true));
+      return dir;
+    }
+
+    File castFile(Directory dir) =>
+        File('${dir.path}${Platform.pathSeparator}aquan_cast.json');
+
+    test('落盘 → 新建 controller（模拟重启）→ 直接命中配方不再跑全梯度',
+        () async {
+      final dir = await tempDir('cast_controller_ac14');
+      final store = CastStore(testDirectory: dir);
+      await store.ensureLoaded();
+
+      // 第一次投屏：设备只吃 compact+bare（模拟梯度扫描后命中）。
+      const hit = CastRecipe(
+          didl: DidlVariant.compact,
+          protocolInfoTemplate: DidlProtocolInfoTemplate.bare);
+      final compat1 = CapturingCompatTransport()..hitRecipe = hit;
+      final controller1 = CastController(
+        transportFactory: (_) => compat1,
+        recipeStore: store.recipes,
+        profileStore: store.profiles,
+      );
+      await controller1.castTo(_target('d1'), _media());
+      controller1.dispose();
+
+      // 落盘断言：v4 文件里有 udn 精确键 + 设备画像。
+      final json =
+          jsonDecode(castFile(dir).readAsStringSync()) as Map<String, dynamic>;
+      expect(json['version'], 4);
+      final recipes = json['recipes'] as Map<String, dynamic>;
+      expect(recipes.keys, contains('udn:d1'));
+      expect(
+        CastRecipe.fromJson(recipes['udn:d1'] as Map<String, dynamic>).didl,
+        DidlVariant.compact,
+      );
+      final profiles = json['profiles'] as Map<String, dynamic>;
+      expect(profiles.keys, contains('udn:d1'));
+      final profile = profiles['udn:d1'] as Map<String, dynamic>;
+      expect(profile['profileId'], 'generic');
+      expect(
+        (profile['sinkProtocols'] as List).cast<String>(),
+        contains('http-get:*:video/mp4:*'),
+      );
+      expect(
+        (profile['capabilities'] as List).cast<String>(),
+        contains('getProtocolInfo'),
+        reason: '预检成功且 Sink 非空',
+      );
+
+      // 模拟重启：新 store + 新 controller（ CapturingCompatTransport 会把
+      // 收到的配方链原样透传给断言）。
+      final store2 = CastStore(testDirectory: dir);
+      await store2.ensureLoaded();
+      final compat2 = CapturingCompatTransport()..hitRecipe = hit;
+      final controller2 = CastController(
+        transportFactory: (_) => compat2,
+        recipeStore: store2.recipes,
+        profileStore: store2.profiles,
+      );
+      await controller2.castTo(_target('d1'), _media());
+
+      // 链首 = 记忆的配方（不再从 full+standard 梯度首项扫起）。
+      expect(compat2.lastRequest, isNotNull);
+      expect(compat2.lastRequest!.recipes.first.didl, DidlVariant.compact);
+      expect(compat2.lastRequest!.recipes.first.protocolInfoTemplate,
+          DidlProtocolInfoTemplate.bare);
+      // 梯度首项紧随其后（命中失败仍可逐级降级）。
+      expect(compat2.lastRequest!.recipes[1].didl, DidlVariant.full);
+      controller2.dispose();
+    });
+
+    test('画像/配方写入时序：投屏成功 remember(recipe) 后 profiles 同步落盘',
+        () async {
+      final dir = await tempDir('cast_controller_profile');
+      final store = CastStore(testDirectory: dir);
+      await store.ensureLoaded();
+      final compat = CapturingCompatTransport();
+      final controller = CastController(
+        transportFactory: (_) => compat,
+        recipeStore: store.recipes,
+        profileStore: store.profiles,
+      );
+      await controller.castTo(_target('d1'), _media());
+
+      // castTo 返回时（remember 之后）两个表都已落盘。
+      final json =
+          jsonDecode(castFile(dir).readAsStringSync()) as Map<String, dynamic>;
+      expect((json['recipes'] as Map).keys, contains('udn:d1'));
+      expect((json['profiles'] as Map).keys, contains('udn:d1'));
+      // 控制器内存表与 store 同源（CastService.attachStores 接的就是它）。
+      expect(store.recipes.lookup(_target('d1')), isNotNull);
+      expect(store.profiles.lookup('d1'), isNotNull);
+      controller.dispose();
+    });
+
+    test('连播换集走 compat.load：full 变体 duration 恢复、不再用旧 setUri',
+        () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      var advanced = false;
+      controller.onNextEpisode = () async {
+        if (advanced) return null;
+        advanced = true;
+        return const CastMedia(
+          url: 'http://192.168.1.10/2.mp4',
+          title: '测试 · 第2集',
+          duration: Duration(minutes: 2, seconds: 3),
+        );
+      };
+      await controller.castTo(_target('d1'), _media());
+      expect(compat.calls.where((c) => c == 'load').length, 1);
+
+      // 电视播完当前集（STOPPED 且位置在结尾）→ 触发连投。
+      compat.pollResult = const CastPoll(
+        transportState: 'STOPPED',
+        position: Duration(minutes: 2, seconds: 10),
+        duration: Duration(minutes: 2, seconds: 10),
+      );
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (compat.calls.where((c) => c == 'load').length < 2 &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+
+      expect(compat.calls.where((c) => c == 'load').length, 2,
+          reason: '首投 + 连播各一次 compat.load');
+      expect(compat.calls.any((c) => c.startsWith('setUri')), isFalse,
+          reason: 'M3-5：连播不再走旧 transport.setUri 三件套');
+      // 连播请求携带下一集的真实 duration（M2 遗留问题收口，AC-27）。
+      expect(compat.lastRequest!.title, '测试 · 第2集');
+      expect(compat.lastRequest!.duration, '0:02:03');
+      expect(compat.lastRequest!.didl.duration,
+          const Duration(minutes: 2, seconds: 3));
+      expect(controller.currentMedia?.title, '测试 · 第2集');
       controller.dispose();
     });
   });

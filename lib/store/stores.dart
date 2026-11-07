@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/cast/cast_profile.dart';
 import '../core/cast/cast_recipe.dart';
 import '../core/cast/cast_target.dart';
 import '../core/reader/reader_settings.dart';
@@ -3530,22 +3531,35 @@ class MarketSitesStore extends _JsonFileStore {
   }
 }
 
-/// 投屏设备记忆（`aquan_cast.json`）：最近设备 + 钉选设备 + 设备成功配方（v3）。
+/// 投屏设备记忆（`aquan_cast.json`）：最近设备 + 钉选设备 + 设备成功配方 +
+/// 设备画像（v4）。
+///
+/// v4 配方为双层键：`udn:<udn>` 精确 + `model:<model|manufacturer>:<sinkHash>`
+/// 共享；`profiles` 按设备记录能力画像。v1/v2/v3 旧文件读入兼容：
+/// 旧三段式配方键与新查找语义不同，按设计视为空表并升 v4 回写
+/// （`lastDevice` / `pinned` 原样保留；备份白名单仍只有 `cast` 键）。
 class CastStore extends _JsonFileStore {
   CastStore({super.testDirectory}) : super('aquan_cast.json') {
     _recipes = CastRecipeStore(onChanged: _persistRecipes);
+    _profiles = CastProfileStore(onChanged: _persistProfiles);
   }
+
+  static const int formatVersion = 4;
 
   CastTarget? _lastDevice;
   final List<CastTarget> _pinned = [];
   late final CastRecipeStore _recipes;
+  late final CastProfileStore _profiles;
 
   CastTarget? get lastDevice => _lastDevice;
   List<CastTarget> get pinned => List.of(_pinned);
   Set<String> get pinnedIds => _pinned.map((d) => d.id).toSet();
 
-  /// 设备型号 → 成功配方（供 `CastController.recipes` 注入，跨启动生效）。
+  /// 设备 → 成功配方（供 `CastController.recipes` 注入，跨启动生效）。
   CastRecipeStore get recipes => _recipes;
+
+  /// 设备画像（供 `CastController.profiles` 注入；投屏成功后同步更新）。
+  CastProfileStore get profiles => _profiles;
 
   /// 投到某设备时刷新「最近使用」。
   Future<void> touchLast(CastTarget device) async {
@@ -3576,17 +3590,28 @@ class CastStore extends _JsonFileStore {
     final existing = await _readJson();
     await _writeJson(<String, dynamic>{
       ...existing,
-      'version': 3,
+      'version': formatVersion,
       'recipes': _recipes.toJson(),
     });
     notifyListeners();
   }
 
-  /// v3 写入：`...existing` 保留未知字段与旧备份带回来的键；
-  /// 版本号升到 3，v1/v2 读侧完全兼容。
+  /// 只更新 `profiles` 字段（投屏成功后画像同步落盘，与配方写入互不覆盖）。
+  Future<void> _persistProfiles() async {
+    final existing = await _readJson();
+    await _writeJson(<String, dynamic>{
+      ...existing,
+      'version': formatVersion,
+      'profiles': _profiles.toJson(),
+    });
+    notifyListeners();
+  }
+
+  /// v4 写入：`...existing` 保留未知字段与旧备份带回来的键；
+  /// 版本号升到 4，v1/v2/v3 读侧完全兼容。
   Future<void> _flush() async {
     final existing = await _readJson();
-    final next = <String, dynamic>{...existing, 'version': 3};
+    final next = <String, dynamic>{...existing, 'version': formatVersion};
     if (_lastDevice != null) {
       next['lastDevice'] = _lastDevice!.toPersistJson();
     } else {
@@ -3594,6 +3619,7 @@ class CastStore extends _JsonFileStore {
     }
     next['pinned'] = [for (final d in _pinned) d.toPersistJson()];
     next['recipes'] = _recipes.toJson();
+    next['profiles'] = _profiles.toJson();
     await _writeJson(next);
     notifyListeners();
   }
@@ -3615,14 +3641,27 @@ class CastStore extends _JsonFileStore {
         if (t != null) _pinned.add(t);
       }
     }
-    // v1/v2 没有 recipes 字段 → 空表；缺字段不是坏数据。
+    // v4 读侧：recipes/profiles 只认 `udn:` / `model:` 前缀键。
+    // v1/v2/v3（含缺 version 的更早文件）旧配方按设计视为空表——旧键与新
+    // 查找语义不同，且旧版配方表从未接线落盘；读入后升 v4 回写。
+    final version = json['version'] is int ? json['version'] as int : 0;
+    final legacy = version < formatVersion;
     final recipes = json['recipes'];
-    if (recipes is Map) {
+    if (!legacy && recipes is Map) {
       _recipes.replaceAll(recipes.cast<String, dynamic>());
     } else {
       _recipes.clear();
     }
+    final profiles = json['profiles'];
+    if (!legacy && profiles is Map) {
+      _profiles.replaceAll(profiles.cast<String, dynamic>());
+    } else {
+      _profiles.clear();
+    }
     _loaded = true;
+    if (legacy) {
+      await _flush();
+    }
     notifyListeners();
   }
 
@@ -3648,11 +3687,16 @@ class CastStore extends _JsonFileStore {
         merged++;
       }
     }
-    // 备份导入：只补本机没有的配方，不覆盖已验证的成功策略；
+    // 备份导入：只补本机没有的配方/画像，不覆盖已验证的成功策略；
+    // 非 v4 前缀键（旧版三段式键）在 absorb 内被忽略。
     // 不并入 merged（它统计的是设备条目数，改变口径会破坏既有备份断言）。
     final recipes = incoming['recipes'];
     if (recipes is Map) {
       _recipes.absorb(recipes.cast<String, dynamic>());
+    }
+    final profiles = incoming['profiles'];
+    if (profiles is Map) {
+      _profiles.absorb(profiles.cast<String, dynamic>());
     }
     await _flush();
     return merged;

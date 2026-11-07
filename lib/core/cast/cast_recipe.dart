@@ -1,3 +1,4 @@
+import 'cast_profile.dart';
 import 'cast_target.dart';
 import 'didl.dart';
 
@@ -215,11 +216,61 @@ class CastRecipe {
   String toString() => 'CastRecipe(${toJson()})';
 }
 
-/// 设备指纹 → 成功配方表。
+/// Sink 清单短哈希（8 位 FNV-1a 截断；File2TV `caps_key = (kind, tuple(sink),
+/// manufacturer)` 思路）。
 ///
-/// 键 = 归一化 `modelName|manufacturer|friendlyName`（小写、去空白，空用 `-`）。
-/// 持久化由 `CastStore` 落到 `aquan_cast.json` 的 `recipes` 字段，
-/// 本类只负责内存表 + JSON 编解码；[onChanged] 是可选的写盘回调。
+/// `model:` 层配方键掺 Sink 摘要——同型号不同固件（Sink 宣告不同）天然分开，
+/// 避免配方互相污染。空清单返回 `nosink`。
+String castSinkHash(Iterable<String> sink) {
+  final items = sink
+      .map((s) => s.trim())
+      .where((s) => s.isNotEmpty)
+      .toList()
+    ..sort();
+  if (items.isEmpty) return 'nosink';
+  var h = 0x811C9DC5;
+  void byte(int b) {
+    h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF;
+  }
+
+  for (final item in items) {
+    for (final cu in item.codeUnits) {
+      byte(cu & 0xFF);
+      byte((cu >> 8) & 0xFF);
+    }
+    byte(0x0A); // 条目分隔符，避免 "ab"+"c" 与 "a"+"bc" 同哈希。
+  }
+  return h.toRadixString(16).padLeft(8, '0');
+}
+
+/// 画像预设配方（design §4.5 配方链第 3 层）：由 [CastDeviceProfile.profileId]
+/// 决定的内置起点。
+///
+/// - `generic`：梯度首项（现状默认 full + standard）；
+/// - `strictTitle`：full + standard——v2 起 DIDL 恒含 `dc:title`，此预设
+///   主要是记录「曾因缺 title 被拒」的历史，行为与现状默认一致；
+/// - `hlsByUrl`：URL 回退裸形态（Sink 宣告了 HLS 却拒过 `.m3u8` URL）；
+/// - `pnRequired`：full + withPn（Sink 条目全带 DLNA.ORG_PN，按 PN 匹配）；
+/// - 未知 id：无预设（null，直接走梯度）。
+CastRecipe? profilePreset(String? profileId) => switch (profileId) {
+      kProfileStrictTitle => const CastRecipe(didl: DidlVariant.full),
+      kProfileHlsByUrl =>
+        const CastRecipe(urlSuffixMode: CastUrlSuffixMode.bare),
+      kProfilePnRequired => const CastRecipe(
+          didl: DidlVariant.full,
+          protocolInfoTemplate: DidlProtocolInfoTemplate.withPn),
+      kProfileGeneric => const CastRecipe(),
+      _ => null,
+    };
+
+/// 设备配方表（v4 双层键）。
+///
+/// - 精确层 `udn:<udn>`：这台设备的已验证配方；
+/// - 共享层 `model:<model|manufacturer>:<sinkHash>`：同型号同固件（Sink 一致）
+///   的设备共享，首投免跑全梯度。
+/// 持久化由 `CastStore` 落到 `aquan_cast.json` v4 的 `recipes` 字段
+/// （v1/v2/v3 旧三段式键视为空表），本类只负责内存表 + JSON 编解码；
+/// [onChanged] 是可选的写盘回调。
 class CastRecipeStore {
   CastRecipeStore({this.onChanged});
 
@@ -232,8 +283,32 @@ class CastRecipeStore {
     return v.isEmpty ? '-' : v;
   }
 
-  static String keyOf(CastTarget d) =>
-      '${_norm(d.modelName)}|${_norm(d.manufacturer)}|${_norm(d.name)}';
+  /// 精确层键：`udn:<udn>`（DLNA = UDN；Chromecast = `cast:host:port`）。
+  static String udnKeyOf(CastTarget d) => 'udn:${d.id.trim().isEmpty ? '-' : d.id.trim()}';
+
+  /// 共享层键：`model:<model|manufacturer>:<sinkHash>`。
+  ///
+  /// model 与 manufacturer 全空时不生成共享键（返回 null）——避免一堆匿名
+  /// 设备互相污染。
+  static String? modelKeyOf(CastTarget d, {List<String> sink = const []}) {
+    final model = _norm(d.modelName);
+    final maker = _norm(d.manufacturer);
+    if (model == '-' && maker == '-') return null;
+    return 'model:$model|$maker:${castSinkHash(sink)}';
+  }
+
+  /// 共享层键前缀（forget 时按前缀清掉该型号所有 Sink 变体）。
+  static String? _modelKeyPrefix(CastTarget d) {
+    final model = _norm(d.modelName);
+    final maker = _norm(d.manufacturer);
+    if (model == '-' && maker == '-') return null;
+    return 'model:$model|$maker:';
+  }
+
+  /// v4 键只认 `udn:` / `model:` 前缀（v1/v2/v3 旧三段式键直接丢弃——
+  /// 旧键与新查找语义不同，且旧版配方表从未接线落盘）。
+  static bool _isValidKey(String key) =>
+      key.startsWith('udn:') || key.startsWith('model:');
 
   /// 首次投屏的降级梯度（design §4.5，精选子集而非全组合）。
   ///
@@ -258,31 +333,73 @@ class CastRecipeStore {
         protocolInfoTemplate: DidlProtocolInfoTemplate.wildcard),
   ];
 
-  CastRecipe? lookup(CastTarget d) => _byKey[keyOf(d)];
+  /// 命中优先级：udn 精确 → model 共享（含 sinkHash）。
+  ///
+  /// sink 未知时共享层只能命中 `nosink` 键（连接前查 URL 形态旋钮的
+  /// 尽力而为；预检后按真实 Sink 查询必然命中已记忆的共享键）。
+  CastRecipe? lookup(CastTarget d, {List<String> sink = const []}) {
+    final byUdn = _byKey[udnKeyOf(d)];
+    if (byUdn != null) return byUdn;
+    final mk = modelKeyOf(d, sink: sink);
+    return mk == null ? null : _byKey[mk];
+  }
 
-  Future<void> remember(CastTarget d, CastRecipe r) async {
-    final key = keyOf(d);
-    _byKey[key] =
-        r.copyWith(successCount: (_byKey[key]?.successCount ?? 0) + 1);
+  /// 记住成功配方：写入 udn 精确层 + model 共享层（同型号同固件下次免扫）。
+  Future<void> remember(
+    CastTarget d,
+    CastRecipe r, {
+    List<String> sink = const [],
+  }) async {
+    void upsert(String key) {
+      _byKey[key] =
+          r.copyWith(successCount: (_byKey[key]?.successCount ?? 0) + 1);
+    }
+
+    upsert(udnKeyOf(d));
+    final mk = modelKeyOf(d, sink: sink);
+    if (mk != null) upsert(mk);
     await _notify();
   }
 
+  /// 配方失败一次即清空：删 udn 精确层 + 该型号的全部共享层变体
+  /// （失败时未必知道当时的 Sink，按前缀清理；其他设备的 udn 精确层
+  /// 不受影响，下次投屏重回梯度扫描）。
   Future<void> forget(CastTarget d) async {
-    if (_byKey.remove(keyOf(d)) == null) return;
-    await _notify();
+    var removed = _byKey.remove(udnKeyOf(d)) != null;
+    final prefix = _modelKeyPrefix(d);
+    if (prefix != null) {
+      _byKey.removeWhere((k, _) => k.startsWith(prefix));
+    }
+    if (removed) await _notify();
   }
 
-  /// 命中配方优先，其后按梯度（跳过与命中项语义相同的条目）。
+  /// 配方链（design §4.5）：udn 精确 → model 共享（+sinkHash）→ 画像预设
+  /// （profileId 决定）→ 通用梯度；语义重复项只保留首个。
   ///
   /// 语义比较忽略 successCount（记忆项的成功计数会累加，不影响去重）。
-  List<CastRecipe> fallbackChain(CastTarget d) {
-    final hit = lookup(d);
-    if (hit == null) return List<CastRecipe>.of(gradient);
-    final normalized = hit.copyWith(successCount: 0);
-    return <CastRecipe>[
-      hit,
-      ...gradient.where((r) => r.copyWith(successCount: 0) != normalized),
-    ];
+  List<CastRecipe> fallbackChain(
+    CastTarget d, {
+    List<String> sink = const [],
+    CastDeviceProfile? profile,
+  }) {
+    final chain = <CastRecipe>[];
+    void add(CastRecipe? r) {
+      if (r == null) return;
+      final normalized = r.copyWith(successCount: 0);
+      for (final existing in chain) {
+        if (existing.copyWith(successCount: 0) == normalized) return;
+      }
+      chain.add(r);
+    }
+
+    add(_byKey[udnKeyOf(d)]);
+    final mk = modelKeyOf(d, sink: sink);
+    if (mk != null) add(_byKey[mk]);
+    add(profilePreset(profile?.profileId));
+    for (final r in gradient) {
+      add(r);
+    }
+    return chain;
   }
 
   // ---------- 与 CastStore 的持久化接口 ----------
@@ -297,10 +414,11 @@ class CastRecipeStore {
     absorb(json);
   }
 
-  /// 备份导入：只补当前没有的键，不覆盖本机已验证的成功配方。
+  /// 备份导入：只补当前没有的键，不覆盖本机已验证的成功配方；
+  /// 非法前缀键（旧版三段式键）忽略。
   void absorb(Map<String, dynamic> json) {
     for (final e in json.entries) {
-      if (e.key.isEmpty) continue;
+      if (!_isValidKey(e.key)) continue;
       final v = e.value;
       if (v is! Map) continue;
       if (_byKey.containsKey(e.key)) continue;

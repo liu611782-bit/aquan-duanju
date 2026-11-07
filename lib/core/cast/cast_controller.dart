@@ -6,6 +6,7 @@ import '../error_log.dart';
 import 'cast_diagnostics.dart';
 import 'cast_media_proxy.dart';
 import 'cast_media_type.dart';
+import 'cast_profile.dart';
 import 'cast_recipe.dart';
 import 'cast_target.dart';
 import 'didl.dart';
@@ -171,14 +172,21 @@ class CastController extends ChangeNotifier {
     this.mdnsDiscover,
     this.proxyResolver,
     CastRecipeStore? recipeStore,
+    CastProfileStore? profileStore,
   })  : _transportFactory = transportFactory ?? defaultTransportFactory,
-        recipes = recipeStore ?? CastRecipeStore();
+        recipes = recipeStore ?? CastRecipeStore(),
+        profiles = profileStore;
 
   final CastTransport Function(CastTarget) _transportFactory;
 
-  /// 设备型号 → 成功配方。默认是一张不落盘的内存表；集成时把
-  /// `CastStore.recipes`（v3 持久化）注入这里即可跨启动记住配方。
+  /// 设备 → 成功配方（v4 双层键）。默认是一张不落盘的内存表；集成时把
+  /// `CastStore.recipes`（v4 持久化）注入这里即可跨启动记住配方
+  /// （`CastService.attachStores`，M3-4）。
   CastRecipeStore recipes;
+
+  /// 设备画像（可选）：非 null 时投屏成功/会话收尾同步更新画像并落盘。
+  /// 未接线（测试/独立使用）时为 null，不影响任何投屏行为。
+  CastProfileStore? profiles;
 
   /// mDNS 发现挂点（Chromecast）注入点；null = 用默认 [MdnsDiscovery]。
   final Stream<CastDeviceInfo> Function()? mdnsDiscover;
@@ -247,6 +255,11 @@ class CastController extends ChangeNotifier {
 
   /// 诊断时间线去重：只记录电视状态变化（M0 纯采集）。
   String _lastTimelineState = '';
+
+  /// 本会话预检到的 Sink 清单与预检结果（画像构建用，M3）。
+  /// 连播期间沿用会话内的 Sink 记忆（预检失败也不阻断连播）。
+  Set<String> _sessionSink = const <String>{};
+  bool _sessionPreflightOk = false;
 
   // ---------- 扫描 ----------
 
@@ -403,6 +416,8 @@ class CastController extends ChangeNotifier {
     _userStopping = false;
     _state = CastSessionState.connecting;
     _lastTimelineState = '';
+    _sessionSink = const <String>{};
+    _sessionPreflightOk = false;
     // 诊断会话（M0）：重置会话级采集，保留发现阶段证据。纯采集，不影响链路。
     CastDiagnostics.instance.beginSession(
       deviceName: target.name,
@@ -413,6 +428,8 @@ class CastController extends ChangeNotifier {
     notifyListeners();
 
     // URL 形态旋钮（M1 / 回滚点 R1）：命中配方里的 urlSuffixMode。
+    // 此时预检未跑（Sink 未知），共享层只能命中 nosink 键——尽力而为；
+    // 预检后的配方链按真实 Sink 查询（udn 精确层命中则与 Sink 无关）。
     final suffixMode =
         recipes.lookup(target)?.urlSuffixMode ?? CastUrlSuffixMode.withExtension;
 
@@ -464,11 +481,14 @@ class CastController extends ChangeNotifier {
     final compat =
         transport is CastCompatTransport ? transport as CastCompatTransport : null;
     final remembered = recipes.lookup(target);
+    // Sink 提升到 try 外：失败路径的配方清空也要按同一口径（M3 双层键）。
+    var sink = const <String>{};
     try {
-      Set<String> sink = const <String>{};
       if (compat != null) {
         try {
           sink = await compat.preflight().timeout(const Duration(seconds: 2));
+          _sessionSink = sink;
+          _sessionPreflightOk = true;
           CastDiagnostics.instance.recordSinks(sink);
           CastDiagnostics.instance
               .recordTimeline('能力预检完成：Sink ${sink.length} 条');
@@ -511,7 +531,12 @@ class CastController extends ChangeNotifier {
                 : Uri.tryParse(media.subtitleUrl),
             headers: media.headers,
           ),
-          recipes: recipes.fallbackChain(target),
+          // M3 配方链（design §4.5）：udn → model(+sinkHash) → 画像预设 → 梯度。
+          recipes: recipes.fallbackChain(
+            target,
+            sink: sink.toList(),
+            profile: profiles?.lookup(target.id),
+          ),
           protocolInfo: sink,
         ));
       } else {
@@ -535,7 +560,7 @@ class CastController extends ChangeNotifier {
           await transport.play();
         }
       }
-      if (succeeded != null) await _rememberRecipe(target, succeeded);
+      if (succeeded != null) await _rememberRecipe(target, succeeded, sink: sink);
       _state = CastSessionState.casting;
       CastDiagnostics.instance.recordTimeline(
           'casting（投屏命令已接受${succeeded == null ? '' : '，配方 ${succeeded.didl.name}'}）');
@@ -576,11 +601,40 @@ class CastController extends ChangeNotifier {
   }
 
   /// 配方记忆是尽力而为：写盘失败只进日志，绝不让已成功的投屏失败。
-  Future<void> _rememberRecipe(CastTarget target, CastRecipe recipe) async {
+  /// 成功后同步更新设备画像并落盘（M3 时序：remember(recipe) → profiles）。
+  Future<void> _rememberRecipe(
+    CastTarget target,
+    CastRecipe recipe, {
+    Set<String> sink = const <String>{},
+  }) async {
     try {
-      await recipes.remember(target, recipe);
+      await recipes.remember(target, recipe, sink: sink.toList());
     } on Exception catch (e) {
       ErrorLog.instance.record('投屏配方记忆', e, StackTrace.current);
+    }
+    await _rememberProfile(target);
+  }
+
+  /// 设备画像同步（尽力而为）：按本会话观测构建画像并落盘。
+  ///
+  /// 投屏成功时立即记一次（serviceType/Sink/预检证据）；电视取流记录随
+  /// 会话推进变全，会话收尾（[CastDiagnostics] 数据仍在）再刷一次
+  /// fetchedStream / rangeSupport。
+  Future<void> _rememberProfile(CastTarget target) async {
+    final store = profiles;
+    final dlna = target.dlna;
+    if (store == null || dlna == null) return;
+    try {
+      final diag = CastDiagnostics.instance;
+      await store.remember(buildProfile(
+        dlna,
+        sink: _sessionSink.toList(),
+        preflightOk: _sessionPreflightOk,
+        mediaRequests: diag.mediaRequests,
+        soapTraces: diag.soapTraces,
+      ));
+    } on Exception catch (e) {
+      ErrorLog.instance.record('投屏画像记忆', e, StackTrace.current);
     }
   }
 
@@ -594,6 +648,11 @@ class CastController extends ChangeNotifier {
 
   /// 尝试在当前会话上连投下一集（不回 idle，避免状态闪烁）。
   /// 失败（无下一集/推送出错）返回 false，由调用方走 onRemoteStopped。
+  ///
+  /// M3-5：DLNA 连播换集走 `compat.load()`（预检 → 配方链 → setUri →
+  /// Play 门控），不再用旧 `transport.setUri()` 三件套——恢复 full 变体、
+  /// 真实 duration 写入 DIDL 与空 metadata 门控（M2 遗留问题收口，
+  /// AC-27/AC-11 在连播路径同样成立）。
   Future<bool> _tryAdvance() async {
     final provider = onNextEpisode;
     final device = _currentDevice;
@@ -607,29 +666,87 @@ class CastController extends ChangeNotifier {
       // 超时直接抛 TimeoutException，由下面的 catch 归一为「连投失败」。
       final next = await provider().timeout(const Duration(seconds: 10));
       if (next == null) return false;
+      // URL 形态旋钮沿用会话配方（连播与首投同形态）。
+      final suffixMode =
+          recipes.lookup(device)?.urlSuffixMode ?? CastUrlSuffixMode.withExtension;
       var playUrl = next.url;
       if (next.isLocalFile) {
-        final served =
-            await _mediaServer.urlFor(next.localPath, targetHost: device.host);
+        final served = await _mediaServer.urlFor(next.localPath,
+            targetHost: device.host, urlSuffixMode: suffixMode);
         if (served == null) return false;
         playUrl = served;
       } else if (next.headers.isNotEmpty) {
         final proxied = await _proxyResolve(next.url, next.headers,
-            targetHost: device.host);
+            targetHost: device.host,
+            hintMime: next.mimeHint,
+            urlSuffixMode: suffixMode);
         if (proxied != null) playUrl = proxied;
       }
-      final subtitleUri = await _prepareSubtitle(device, next);
+      final subtitleUri = await _prepareSubtitle(device, next,
+          urlSuffixMode: suffixMode);
       // 连播换集：诊断目标只换 URL（IP/端口仍是本会话的服务）。
       CastDiagnostics.instance.setTarget(mediaUrl: playUrl);
       CastDiagnostics.instance.recordTimeline('连播下一集：${next.title}');
-      await transport.setUri(
-        Uri.parse(playUrl),
-        title: next.title,
-        duration:
-            next.duration == null ? null : formatUpnpTime(next.duration!),
-        subtitleUrl: subtitleUri,
-      );
-      await transport.play();
+      final compat =
+          transport is CastCompatTransport ? transport as CastCompatTransport : null;
+      if (compat != null) {
+        // 预检刷新 Sink（失败沿用会话内记忆，不阻断连播）。
+        var sink = _sessionSink;
+        try {
+          final probed =
+              await compat.preflight().timeout(const Duration(seconds: 2));
+          if (probed.isNotEmpty) {
+            sink = probed;
+            _sessionSink = probed;
+          }
+        } on Exception {
+          // 预检失败不阻断连播。
+        }
+        final mediaType = await resolveCastMediaType(
+          url: Uri.parse(playUrl),
+          hintMime: next.mimeHint,
+          sinkMimes: sink,
+          sniffHead: defaultSniffHead,
+        );
+        CastDiagnostics.instance.recordTimeline(
+            '连播媒体类型：${mediaType.mime}（${mediaType.fileName}）');
+        final succeeded = await compat.load(CastLoadRequest(
+          url: Uri.parse(playUrl),
+          title: next.title,
+          duration:
+              next.duration == null ? null : formatUpnpTime(next.duration!),
+          subtitleUrl: subtitleUri,
+          position: next.position,
+          didl: DidlRequest(
+            uri: Uri.parse(playUrl),
+            title: next.title,
+            mimeType: mediaType.mime,
+            duration: next.duration,
+            live: mediaType.live,
+            subtitleUri: subtitleUri,
+            headers: next.headers,
+          ),
+          recipes: recipes.fallbackChain(
+            device,
+            sink: sink.toList(),
+            profile: profiles?.lookup(device.id),
+          ),
+          protocolInfo: sink,
+        ));
+        if (succeeded != null) {
+          await _rememberRecipe(device, succeeded, sink: sink);
+        }
+      } else {
+        // 非 compat transport（Chromecast / 测试假件）：保持既有标准序列。
+        await transport.setUri(
+          Uri.parse(playUrl),
+          title: next.title,
+          duration:
+              next.duration == null ? null : formatUpnpTime(next.duration!),
+          subtitleUrl: subtitleUri,
+        );
+        await transport.play();
+      }
       _currentMedia = CastMedia(
         url: playUrl,
         title: next.title,
@@ -806,10 +923,14 @@ class CastController extends ChangeNotifier {
   Future<void> _finishSession() async {
     _pollTimer?.cancel();
     _pollTimer = null;
+    final finishedDevice = _currentDevice;
     _transport?.close();
     _transport = null;
     final wasLocal = _currentMedia?.isLocalFile ?? false;
     final wasMirror = _currentMedia?.isMirror ?? false;
+    // 会话收尾画像刷新：此时电视取流记录最全（fetchedStream/rangeSupport）。
+    // 尽力而为，绝不让画像写入拖垮会话清理。
+    if (finishedDevice != null) await _rememberProfile(finishedDevice);
     _currentDevice = null;
     _currentMedia = null;
     // 本地文件投屏结束后关掉 HTTP 服务，别让端口一直开着。

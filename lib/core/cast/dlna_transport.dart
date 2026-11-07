@@ -3,6 +3,7 @@ import 'dart:io' show SocketException;
 
 import 'cast_controller.dart';
 import 'cast_diagnostics.dart';
+import 'cast_profile.dart';
 import 'cast_recipe.dart';
 import 'didl.dart';
 import 'dlna_device.dart';
@@ -270,7 +271,7 @@ class DlnaTransport implements CastTransport, CastCompatTransport {
 
     // withPn 模板只对「Sink 条目全部带 DLNA.ORG_PN」的设备有意义
     // （design §3.2 pnRequired）；其余设备跳过该变体，省一次必败往返。
-    final pnRequired = _sinkRequiresPn(sink);
+    final pnRequired = sinkRequiresPn(sink);
     if (!pnRequired) {
       chain.removeWhere((r) =>
           r.protocolInfoTemplate == DidlProtocolInfoTemplate.withPn);
@@ -477,23 +478,6 @@ bool _sinkHasCategory(Set<String> sink, String wanted) {
     if (mime.startsWith('$category/')) return true;
   }
   return false;
-}
-
-/// Sink 是否显示「按 PN 匹配」（design §3.2 pnRequired：条目全部带
-/// DLNA.ORG_PN）。空 Sink / 无可解析条目返回 false。
-bool _sinkRequiresPn(Set<String> sink) {
-  if (sink.isEmpty) return false;
-  var counted = 0;
-  for (final entry in sink) {
-    final parts = entry.split(':');
-    if (parts.length < 3) continue;
-    final mime = parts[2].trim().toLowerCase();
-    if (mime.isEmpty || mime == '*/*') continue;
-    counted++;
-    final fourth = parts.length >= 4 ? parts.sublist(3).join(':') : '';
-    if (!fourth.contains('DLNA.ORG_PN')) return false;
-  }
-  return counted > 0;
 }
 
 DateTime _earlier(DateTime a, DateTime b) => a.isBefore(b) ? a : b;
