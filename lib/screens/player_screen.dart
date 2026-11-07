@@ -29,6 +29,7 @@ import '../core/playback_failure.dart';
 import '../core/playback_fallback.dart';
 import '../core/playback_recovery.dart';
 import '../core/playback_utils.dart';
+import '../core/sources/resolved_playback.dart' show headerOf;
 import '../core/player_gestures.dart';
 import '../core/player_layout.dart';
 import '../core/player_volume.dart';
@@ -2322,6 +2323,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     // 用户可在「直投原 URL」（M1-6 / AC-21）与「镜像屏幕」之间选择——
     // 镜像走 MediaProjection，不依赖 ffmpeg。
     var needsMirror = false;
+    // 加密分集中继成功时产物带 viaRelay（M5-0）：兼容模式选路对中继产物
+    // 恒直投，不会把已解密的 HLS 再送进转码。
+    var viaRelay = false;
     if (playback.contentKey != null) {
       // M3：加密分集走本机中继（ffmpeg 解密转 HLS）。
       // scope 在 await 前捕获：不摸 await 之后的 context（M4-1 约定）。
@@ -2339,7 +2343,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (relaySession != null) {
           CastRelayProbe.instance.watch(api.castRelayStatus, relaySession);
         }
-        castUrl = relay['url'] as String? ?? castUrl;
+        final relayUrl = relay['url'] as String?;
+        if (relayUrl != null && relayUrl.isNotEmpty) {
+          castUrl = relayUrl;
+          viaRelay = true;
+        }
         _showToast('已启动本机解密中继');
       } on AquaException catch (e) {
         ErrorLog.instance.record('投屏', '中继启动失败：${e.friendlyText}',
@@ -2372,11 +2380,41 @@ class _PlayerScreenState extends State<PlayerScreen>
       episodeCount: widget.episodes.length,
       // 播放器手里有真实时长才传（AC-27）；未知/直播不写 DIDL duration。
       duration: _duration > Duration.zero ? _duration : null,
+      // M5-0：加密分集已由本机中继产出 HLS → 选路恒直投；编码提示供
+      // auto 选路把 HEVC/AV1 分集路由到本机转码。
+      viaRelay: viaRelay,
+      codecHint: stream.codec,
+      // M5-2 字幕接线点：红果源目前不提供外挂字幕 URL，源无字幕就不传
+      // （DIDL 不写字幕标签、不制造噪声）；源补齐外挂字幕数据后在此
+      // 传入 CastMedia.subtitleUrl 即全链路生效。
     );
     // 连播：电视端播完自动解析并投下一集（本地缓存集投本地文件；加密分集
     // 停旧中继、起新中继）。scope 在发起时捕获，避免异步后摸 context。
     final castScope = AppScope.read(context);
     final castIndex = _index;
+    // M5-0：兼容模式选路的本机转码执行体（Go castRelayStart 适配器）。
+    // 中继会话沿用 _relaySession 生命周期（停旧 → 起新 → 断开/收尾回收）。
+    castController.transcodeResolver = (m) async {
+      final oldSession = _relaySession;
+      _relaySession = null;
+      if (oldSession != null) {
+        try {
+          await castScope.api.castRelayStop(oldSession);
+        } catch (_) {}
+      }
+      final relay = await castScope.api.castRelayStart(
+        url: m.url,
+        userAgent: headerOf(m.headers, 'user-agent') ?? '',
+        referer: headerOf(m.headers, 'referer') ?? '',
+      );
+      _relaySession = relay['session'] as String?;
+      // M0-5：跟随中继取流日志进诊断（探针在会话回收时自停）。
+      final relaySession = _relaySession;
+      if (relaySession != null) {
+        CastRelayProbe.instance.watch(castScope.api.castRelayStatus, relaySession);
+      }
+      return relay['url'] as String?;
+    };
     castController.onNextEpisode = () async {
       final n = castIndex + 1;
       if (n >= widget.episodes.length) return null;
@@ -2398,6 +2436,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (pb.playback.streams.isEmpty) return null;
       final stream = _selectStream(pb.playback, _quality);
       var nextUrl = stream.url;
+      var nextViaRelay = false;
       if (pb.contentKey != null) {
         // 换集：停旧中继 → 起新中继（会话随 provider 闭包管理）。
         final oldSession = _relaySession;
@@ -2422,6 +2461,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 .watch(castScope.api.castRelayStatus, relaySession);
           }
           nextUrl = relay['url'] as String? ?? stream.url;
+          nextViaRelay = true;
         } catch (_) {
           return null; // 中继起不来：本轮连播终止，走远端停止路径。
         }
@@ -2431,6 +2471,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         title: '${widget.series.title} · ${nep.title.isEmpty ? '第${nep.number}集' : nep.title}',
         episodeIndex: nep.number,
         episodeCount: widget.episodes.length,
+        // M5-0：连播加密分集的产物已是本机中继 HLS，选路恒直投。
+        viaRelay: nextViaRelay,
       );
     };
     final result = await showCastSheet(

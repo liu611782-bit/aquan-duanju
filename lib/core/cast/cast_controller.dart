@@ -8,6 +8,7 @@ import 'cast_media_proxy.dart';
 import 'cast_media_type.dart';
 import 'cast_profile.dart';
 import 'cast_recipe.dart';
+import 'cast_route.dart';
 import 'cast_target.dart';
 import 'didl.dart';
 import 'gena_subscriber.dart';
@@ -21,6 +22,18 @@ import 'ssdp_discovery.dart';
 
 /// 投屏会话状态。
 enum CastSessionState { idle, discovering, connecting, casting, stopping }
+
+/// 本机转码（Go castrelay，ffmpeg 管道）产物的 mime 提示：输出恒为 HLS
+/// （cast_media_fallback.relayMimeHint 同值，产物 URL 已是 .m3u8）。
+const String kRelayProductMimeHint = 'application/vnd.apple.mpegurl';
+
+/// 兼容模式选路结果（M5-0）：最终投屏 URL + 已判定的源媒体类型
+/// （复用避免二次嗅探）+ 是否经本机转码（产物恒 HLS）。
+typedef _PreparedPlayUrl = ({
+  String url,
+  CastMediaType? sourceType,
+  bool viaRelay,
+});
 
 /// 要投出去的媒体（URL 必须是电视可达的局域网/公网直链，绝不能是 127.0.0.1）。
 class CastMedia {
@@ -37,6 +50,8 @@ class CastMedia {
     this.isMirror = false,
     this.mimeHint = '',
     this.duration,
+    this.viaRelay = false,
+    this.codecHint = '',
   });
 
   final String url;
@@ -69,6 +84,15 @@ class CastMedia {
   /// 真实时长（播放器手里有时长就传）。null/≤0 = 未知或直播——
   /// DIDL `<res duration>` 只在真实值时写（写错比不写更糟，AC-27）。
   final Duration? duration;
+
+  /// 该 URL 已是本机中继（Go castrelay）产物。兼容模式选路（M5-0）对它恒
+  /// 直投，不会再套一层转码：加密分集与 resolvePlay 源在调用方完成中继后
+  /// 置位；屏幕镜像（[isMirror]）同理不受选路影响。
+  final bool viaRelay;
+
+  /// 视频编码提示（如 `hevc` / `h265` / `av1`，红果 VideoStream.codec）。
+  /// 兼容模式 auto 选路据此把 HEVC/AV1 分集路由到本机转码（统一转 H.264）。
+  final String codecHint;
 
   bool get isLocalFile => localPath.isNotEmpty;
 }
@@ -195,6 +219,13 @@ class CastController extends ChangeNotifier {
   /// null 时用控制器自带的 [CastMediaProxy]。
   final Future<String?> Function(String url, Map<String, String> headers)?
       proxyResolver;
+
+  /// 兼容模式（本机转码）挂点（M5-0）：选路判定为「走中继」时由控制器调用，
+  /// UI 层在发起投屏时注入 Go `castRelayStart` 适配器（闭包内停旧会话、挂
+  /// 取流探针，与 [onNextEpisode] 同一注入模式；断开/收尾由 [_finishSession]
+  /// 清引用）。返回中继产物 URL；null = 中继不可用（选路回退直投/代理）。
+  /// 未注入 = 本机转码路由不可用，auto/always 一律回退。
+  Future<String?> Function(CastMedia media)? transcodeResolver;
 
   CastSessionState _state = CastSessionState.idle;
   final List<CastTarget> _devices = [];
@@ -353,6 +384,8 @@ class CastController extends ChangeNotifier {
   /// 路由源 IP（M0.5 per-device IP）；注入的 [proxyResolver] 不感知目标
   /// 设备（测试/替代实现），行为保持不变。
   /// [urlSuffixMode] 是目标设备配方里的 URL 形态旋钮（M1，默认带扩展名）。
+  /// [subtitleUrl] 是已登记的字幕地址（M5-1）：代理媒体响应借此附加
+  /// `CaptionInfo.sec` 第三通道。
   Future<String?> _proxyResolve(
     String url,
     Map<String, String> headers, {
@@ -360,6 +393,7 @@ class CastController extends ChangeNotifier {
     String? hintMime,
     bool live = false,
     CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension,
+    String? subtitleUrl,
   }) =>
       proxyResolver != null
           ? proxyResolver!(url, headers)
@@ -370,23 +404,153 @@ class CastController extends ChangeNotifier {
               hintMime: hintMime,
               live: live,
               urlSuffixMode: urlSuffixMode,
+              subtitleUrl: subtitleUrl,
             );
 
-  /// 字幕投送前的准备：带源站头的字幕必须经代理；Chromecast 的 SRT 转 VTT。
+  /// 兼容模式选路（M5-0/M5-3，design §4.10 判定表）：按配方三态 +
+  /// 媒体类型三级判定 + 预检 Sink 决定「直投 / 本机代理 / 本机转码」。
+  /// 首投（[_castWith]）与连播（[_tryAdvance]）共用同一段选路代码。
+  ///
+  /// - 本地文件：恒走 [LocalMediaServer]（选路不涉及）；
+  /// - 镜像流 / Chromecast：保持现状（镜像已是本机产物；Chromecast 播放
+  ///   路径按 P0 契约不动，只允许字幕转换开关影响它）；
+  /// - 转码执行体是 [transcodeResolver]（UI 注入的 Go `castRelayStart`
+  ///   适配器，中继会话生命周期由闭包管理）；未注入或启动失败回退
+  ///   代理/直投，不让转码失败堵死投屏（M1-6 / AC-21 同语义）。
+  Future<_PreparedPlayUrl> _preparePlayUrl(
+    CastTarget target,
+    CastMedia media, {
+    required Set<String> sink,
+    required CastTranscodeMode transcodeMode,
+    required CastUrlSuffixMode urlSuffixMode,
+    Uri? subtitleUrl,
+  }) async {
+    if (media.isLocalFile) {
+      // M0.5：按目标设备取路由源 IP 生成对外 URL（电视拉得到流的地址）。
+      final served = await _mediaServer.urlFor(media.localPath,
+          targetHost: target.host,
+          urlSuffixMode: urlSuffixMode,
+          subtitleUrl: subtitleUrl?.toString());
+      if (served == null) {
+        throw CastException('本地媒体服务启动失败（检查是否在局域网内）');
+      }
+      return (url: served, sourceType: null, viaRelay: false);
+    }
+    if (target.protocol != CastProtocol.dlna || media.isMirror) {
+      return _proxyOrDirect(
+        media,
+        target: target,
+        urlSuffixMode: urlSuffixMode,
+        hintMime: media.mimeHint,
+      );
+    }
+    // 源媒体类型三级判定（显式 hint → URL 扩展名 → 内容嗅探；嗅探到
+    // HTML/JSON 抛 CastException，把「错误页不喂电视」前移到投屏前）。
+    final sourceType = await resolveCastMediaType(
+      url: Uri.parse(media.url),
+      hintMime: media.mimeHint,
+      sinkMimes: sink,
+      sniffHead: defaultSniffHead,
+    );
+    final route = resolveCastRoute(
+      mode: transcodeMode,
+      mediaType: sourceType,
+      sinkMimes: sink,
+      viaRelay: media.viaRelay,
+      needsProxy: media.headers.isNotEmpty,
+      codecHint: media.codecHint,
+    );
+    CastDiagnostics.instance.recordTimeline(
+        '选路：${_routeLabel(route)}（模式 ${transcodeMode.name}，${sourceType.mime}）');
+    switch (route) {
+      case CastRoute.relay:
+        final relayed = await _transcodeResolve(media);
+        if (relayed != null && relayed.isNotEmpty) {
+          return (url: relayed, sourceType: sourceType, viaRelay: true);
+        }
+        // 中继不可用：回退代理/直投（记时间线，不算投屏失败）。
+        CastDiagnostics.instance.recordTimeline(
+            '本机转码不可用，回退${media.headers.isNotEmpty ? '代理' : '直投'}');
+        return _proxyOrDirect(
+          media,
+          target: target,
+          urlSuffixMode: urlSuffixMode,
+          sourceType: sourceType,
+          subtitleUrl: subtitleUrl,
+        );
+      case CastRoute.proxy:
+        return _proxyOrDirect(
+          media,
+          target: target,
+          urlSuffixMode: urlSuffixMode,
+          sourceType: sourceType,
+          subtitleUrl: subtitleUrl,
+        );
+      case CastRoute.direct:
+        return (url: media.url, sourceType: sourceType, viaRelay: false);
+    }
+  }
+
+  /// 防盗链直链经本机代理中转（电视无法自带 Referer/UA）；代理不可用回退
+  /// 直投。[sourceType] 给定时作登记 hint，上游不再重复嗅探。
+  Future<_PreparedPlayUrl> _proxyOrDirect(
+    CastMedia media, {
+    required CastTarget target,
+    required CastUrlSuffixMode urlSuffixMode,
+    CastMediaType? sourceType,
+    Uri? subtitleUrl,
+    String? hintMime,
+  }) async {
+    final proxied = media.headers.isEmpty
+        ? null
+        : await _proxyResolve(
+            media.url,
+            media.headers,
+            targetHost: target.host,
+            hintMime: sourceType?.mime ?? hintMime,
+            urlSuffixMode: urlSuffixMode,
+            subtitleUrl: subtitleUrl?.toString(),
+          );
+    return (url: proxied ?? media.url, sourceType: sourceType, viaRelay: false);
+  }
+
+  /// 调用本机转码挂点（M5-0）。任何失败只进 ErrorLog 并返回 null——
+  /// 转码失败走选路回退，不算投屏失败（原始异常不与用户见面）。
+  Future<String?> _transcodeResolve(CastMedia media) async {
+    final resolver = transcodeResolver;
+    if (resolver == null) return null;
+    try {
+      return await resolver(media);
+    } on Exception catch (e, stack) {
+      ErrorLog.instance.record('投屏兼容模式转码', e, stack);
+      return null;
+    }
+  }
+
+  String _routeLabel(CastRoute route) => switch (route) {
+        CastRoute.direct => '直投',
+        CastRoute.proxy => '本机代理',
+        CastRoute.relay => '本机转码',
+      };
+
+  /// 字幕投送前的准备：带源站头的字幕必须经代理；SRT 是否转 VTT 按协议
+  /// 分流（M5-1）——DLNA 保持 SRT 原样（修正「转 VTT 却在 DIDL 声明
+  /// text/srt」的错配），Chromecast 转 VTT（Chromecast 只认 VTT）。
   Future<Uri?> _prepareSubtitle(CastTarget target, CastMedia media,
       {CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension}) async {
     final raw = media.subtitleUrl;
     if (raw.isEmpty) return null;
     final uri = Uri.tryParse(raw);
     if (uri == null) return null;
+    final isChromecast = target.protocol == CastProtocol.chromecast;
     final needsProxy = media.headers.isNotEmpty ||
-        (target.protocol == CastProtocol.chromecast &&
-            raw.toLowerCase().endsWith('.srt'));
+        (isChromecast && raw.toLowerCase().endsWith('.srt'));
     if (!needsProxy) return uri;
     final proxied = await _castProxy.registerSubtitle(raw,
         headers: media.headers,
         targetHost: target.host,
-        urlSuffixMode: urlSuffixMode);
+        urlSuffixMode: urlSuffixMode,
+        convertToVtt: isChromecast);
     return proxied == null ? uri : Uri.tryParse(proxied);
   }
 
@@ -427,60 +591,22 @@ class CastController extends ChangeNotifier {
         .recordTimeline('connecting → ${target.name}（${target.host}）');
     notifyListeners();
 
-    // URL 形态旋钮（M1 / 回滚点 R1）：命中配方里的 urlSuffixMode。
-    // 此时预检未跑（Sink 未知），共享层只能命中 nosink 键——尽力而为；
-    // 预检后的配方链按真实 Sink 查询（udn 精确层命中则与 Sink 无关）。
+    final remembered = recipes.lookup(target);
+    // URL 形态旋钮（M1 / 回滚点 R1）与兼容模式三态（M5-0 / AC-22）：都来自
+    // 按 UDN 记忆的配方。此时预检未跑（Sink 未知），共享层只能命中 nosink
+    // 键——尽力而为；预检后的配方链按真实 Sink 查询（udn 精确层命中则与
+    // Sink 无关）。
     final suffixMode =
-        recipes.lookup(target)?.urlSuffixMode ?? CastUrlSuffixMode.withExtension;
+        remembered?.urlSuffixMode ?? CastUrlSuffixMode.withExtension;
+    final transcodeMode = remembered?.transcodeMode ?? CastTranscodeMode.auto;
 
-    var playUrl = media.url;
-    if (media.isLocalFile) {
-      // M0.5：按目标设备取路由源 IP 生成对外 URL（电视拉得到流的地址）。
-      final served = await _mediaServer.urlFor(media.localPath,
-          targetHost: target.host, urlSuffixMode: suffixMode);
-      if (served == null) {
-        _state = CastSessionState.idle;
-        _currentDevice = null;
-        notifyListeners();
-        throw CastException('本地媒体服务启动失败（检查是否在局域网内）');
-      }
-      playUrl = served;
-    } else if (media.headers.isNotEmpty) {
-      // 带源站头的直链：经本机代理中转（电视无法自带 Referer/UA）。
-      final proxied = await _proxyResolve(
-        media.url,
-        media.headers,
-        targetHost: target.host,
-        hintMime: media.mimeHint,
-        urlSuffixMode: suffixMode,
-      );
-      if (proxied != null) playUrl = proxied;
-    }
-    final subtitleUri =
-        await _prepareSubtitle(target, media, urlSuffixMode: suffixMode);
-    media = CastMedia(
-      url: playUrl,
-      title: media.title,
-      coverUrl: media.coverUrl,
-      position: media.position,
-      episodeIndex: media.episodeIndex,
-      episodeCount: media.episodeCount,
-      localPath: media.localPath,
-      headers: media.headers,
-      subtitleUrl: subtitleUri?.toString() ?? '',
-      isMirror: media.isMirror,
-      mimeHint: media.mimeHint,
-      duration: media.duration,
-    );
-    _currentMedia = media;
-    _traceTarget(media);
-
+    // transport 与能力预检提前（M5-0）：兼容模式选路（直投/代理/本机转码）
+    // 依赖设备 Sink 的 HLS 支持判定，必须在媒体准备之前完成。
     final transport = _transport = _transportFactory(target);
     // DLNA 走兼容层（预检 → 配方链 → setUri → Play 门控 → Seek 容错）；
     // Chromecast 与所有不实现该能力的 transport 保持既有标准序列。
     final compat =
         transport is CastCompatTransport ? transport as CastCompatTransport : null;
-    final remembered = recipes.lookup(target);
     // Sink 提升到 try 外：失败路径的配方清空也要按同一口径（M3 双层键）。
     var sink = const <String>{};
     try {
@@ -496,16 +622,61 @@ class CastController extends ChangeNotifier {
           ErrorLog.instance.record('投屏能力预检', e, StackTrace.current);
         }
       }
+
+      // 字幕先于媒体登记准备（M5-1）：代理/本地服务的媒体响应要靠登记好的
+      // 字幕 URL 补 CaptionInfo.sec 第三通道。
+      final subtitleUri =
+          await _prepareSubtitle(target, media, urlSuffixMode: suffixMode);
+
+      // M5-0/M5-3 兼容模式选路（直投 / 本机代理 / 本机转码）。
+      // 本地文件、镜像流与 Chromecast 路径不受选路影响。
+      final prepared = await _preparePlayUrl(
+        target,
+        media,
+        sink: sink,
+        transcodeMode: transcodeMode,
+        urlSuffixMode: suffixMode,
+        subtitleUrl: subtitleUri,
+      );
+      final playUrl = prepared.url;
+      media = CastMedia(
+        url: playUrl,
+        title: media.title,
+        coverUrl: media.coverUrl,
+        position: media.position,
+        episodeIndex: media.episodeIndex,
+        episodeCount: media.episodeCount,
+        localPath: media.localPath,
+        headers: media.headers,
+        subtitleUrl: subtitleUri?.toString() ?? '',
+        isMirror: media.isMirror,
+        mimeHint: media.mimeHint,
+        duration: media.duration,
+        viaRelay: prepared.viaRelay,
+        codecHint: media.codecHint,
+      );
+      _currentMedia = media;
+      _traceTarget(media);
+
       // M1-1：媒体类型三级判定（显式 hint → URL 扩展名 → 内容嗅探），
       // 替代旧 `_mimeForCast`（.m3u8 判 video/mp2t、无扩展名兜底 video/mp4）。
       // 设备 Sink 只参与「拼写选择」，绝不用它覆盖判定结果（AC-13）。
       // 嗅探到 HTML/JSON 会抛 CastException：投屏前就报「这个地址不是视频」。
-      final mediaType = await resolveCastMediaType(
-        url: Uri.parse(playUrl),
-        hintMime: media.mimeHint,
-        sinkMimes: sink,
-        sniffHead: defaultSniffHead,
-      );
+      // 选路阶段已判定源类型时直接复用（直投同 URL、代理不改 mime）；
+      // 本机转码产物恒为 HLS，按产物 URL + HLS hint 判定。
+      final mediaType = prepared.viaRelay
+          ? await resolveCastMediaType(
+              url: Uri.parse(playUrl),
+              hintMime: kRelayProductMimeHint,
+              sinkMimes: sink,
+            )
+          : prepared.sourceType ??
+              await resolveCastMediaType(
+                url: Uri.parse(playUrl),
+                hintMime: media.mimeHint,
+                sinkMimes: sink,
+                sniffHead: defaultSniffHead,
+              );
       CastDiagnostics.instance
           .recordTimeline('媒体类型：${mediaType.mime}（${mediaType.fileName}）');
       final durationText =
@@ -572,6 +743,8 @@ class CastController extends ChangeNotifier {
       if (remembered != null) await _forgetRecipe(target);
       CastDiagnostics.instance.recordTimeline('投屏失败：$e');
       _state = CastSessionState.idle;
+      // transport 已提前创建（M5-0）：失败路径同样要释放底层连接。
+      _transport?.close();
       _transport = null;
       _currentDevice = null;
       notifyListeners();
@@ -602,13 +775,21 @@ class CastController extends ChangeNotifier {
 
   /// 配方记忆是尽力而为：写盘失败只进日志，绝不让已成功的投屏失败。
   /// 成功后同步更新设备画像并落盘（M3 时序：remember(recipe) → profiles）。
+  ///
+  /// 兼容模式三态是用户显式偏好（AC-22）：成功配方若来自梯度/共享层
+  /// （默认 auto），记忆时沿用设备已有配方里的三态，避免把用户设置的
+  /// always/never 冲掉；成功配方本身带非 auto 三态时以它为准。
   Future<void> _rememberRecipe(
     CastTarget target,
     CastRecipe recipe, {
     Set<String> sink = const <String>{},
   }) async {
+    final mode = recipe.transcodeMode != CastTranscodeMode.auto
+        ? recipe.transcodeMode
+        : recipes.lookup(target)?.transcodeMode ?? CastTranscodeMode.auto;
     try {
-      await recipes.remember(target, recipe, sink: sink.toList());
+      await recipes.remember(
+          target, recipe.copyWith(transcodeMode: mode), sink: sink.toList());
     } on Exception catch (e) {
       ErrorLog.instance.record('投屏配方记忆', e, StackTrace.current);
     }
@@ -666,32 +847,17 @@ class CastController extends ChangeNotifier {
       // 超时直接抛 TimeoutException，由下面的 catch 归一为「连投失败」。
       final next = await provider().timeout(const Duration(seconds: 10));
       if (next == null) return false;
-      // URL 形态旋钮沿用会话配方（连播与首投同形态）。
+      // URL 形态旋钮与兼容模式三态沿用会话配方（连播与首投同选路）。
+      final remembered = recipes.lookup(device);
       final suffixMode =
-          recipes.lookup(device)?.urlSuffixMode ?? CastUrlSuffixMode.withExtension;
-      var playUrl = next.url;
-      if (next.isLocalFile) {
-        final served = await _mediaServer.urlFor(next.localPath,
-            targetHost: device.host, urlSuffixMode: suffixMode);
-        if (served == null) return false;
-        playUrl = served;
-      } else if (next.headers.isNotEmpty) {
-        final proxied = await _proxyResolve(next.url, next.headers,
-            targetHost: device.host,
-            hintMime: next.mimeHint,
-            urlSuffixMode: suffixMode);
-        if (proxied != null) playUrl = proxied;
-      }
-      final subtitleUri = await _prepareSubtitle(device, next,
-          urlSuffixMode: suffixMode);
-      // 连播换集：诊断目标只换 URL（IP/端口仍是本会话的服务）。
-      CastDiagnostics.instance.setTarget(mediaUrl: playUrl);
-      CastDiagnostics.instance.recordTimeline('连播下一集：${next.title}');
+          remembered?.urlSuffixMode ?? CastUrlSuffixMode.withExtension;
+      final transcodeMode = remembered?.transcodeMode ?? CastTranscodeMode.auto;
       final compat =
           transport is CastCompatTransport ? transport as CastCompatTransport : null;
+      // 预检刷新 Sink（失败沿用会话内记忆，不阻断连播）；提前到媒体准备
+      // 之前——兼容模式选路依赖 Sink 判定（M5-3）。
+      var sink = _sessionSink;
       if (compat != null) {
-        // 预检刷新 Sink（失败沿用会话内记忆，不阻断连播）。
-        var sink = _sessionSink;
         try {
           final probed =
               await compat.preflight().timeout(const Duration(seconds: 2));
@@ -702,12 +868,38 @@ class CastController extends ChangeNotifier {
         } on Exception {
           // 预检失败不阻断连播。
         }
-        final mediaType = await resolveCastMediaType(
-          url: Uri.parse(playUrl),
-          hintMime: next.mimeHint,
-          sinkMimes: sink,
-          sniffHead: defaultSniffHead,
-        );
+      }
+      final subtitleUri = await _prepareSubtitle(device, next,
+          urlSuffixMode: suffixMode);
+      // 连播与首投共用同一段选路代码（M5-0/M5-3）。
+      final prepared = await _preparePlayUrl(
+        device,
+        next,
+        sink: sink,
+        transcodeMode: transcodeMode,
+        urlSuffixMode: suffixMode,
+        subtitleUrl: subtitleUri,
+      );
+      final playUrl = prepared.url;
+      // 连播换集：诊断目标只换 URL（IP/端口仍是本会话的服务）。
+      CastDiagnostics.instance.setTarget(mediaUrl: playUrl);
+      CastDiagnostics.instance.recordTimeline('连播下一集：${next.title}');
+      if (compat != null) {
+        // 媒体类型判定：选路已判定源类型时复用；本机转码产物按 HLS hint
+        // 判定（与首投同口径）。
+        final mediaType = prepared.viaRelay
+            ? await resolveCastMediaType(
+                url: Uri.parse(playUrl),
+                hintMime: kRelayProductMimeHint,
+                sinkMimes: sink,
+              )
+            : prepared.sourceType ??
+                await resolveCastMediaType(
+                  url: Uri.parse(playUrl),
+                  hintMime: next.mimeHint,
+                  sinkMimes: sink,
+                  sniffHead: defaultSniffHead,
+                );
         CastDiagnostics.instance.recordTimeline(
             '连播媒体类型：${mediaType.mime}（${mediaType.fileName}）');
         final succeeded = await compat.load(CastLoadRequest(
@@ -759,6 +951,8 @@ class CastController extends ChangeNotifier {
         isMirror: next.isMirror,
         mimeHint: next.mimeHint,
         duration: next.duration,
+        viaRelay: prepared.viaRelay,
+        codecHint: next.codecHint,
       );
       _lastPosition = Duration.zero;
       _lastDuration = Duration.zero;
@@ -954,6 +1148,7 @@ class CastController extends ChangeNotifier {
     _pollFailures = 0;
     _userStopping = false;
     onNextEpisode = null;
+    transcodeResolver = null;
     _state = CastSessionState.idle;
     notifyListeners();
   }

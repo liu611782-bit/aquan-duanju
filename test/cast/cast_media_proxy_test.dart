@@ -529,4 +529,55 @@ void main() {
     expect(res.statusCode, 404, reason: '最旧条目应被 LRU 淘汰');
     client.close();
   });
+
+  test('M5-1 DLNA 路径：SRT 不被转 VTT（响应体与输入一致，Content-Type text/srt）',
+      () async {
+    const srtBody = '1\n00:00:01,000 --> 00:00:03,000\n你好世界\n';
+    final proxied = await proxy.registerSubtitle(
+      'http://127.0.0.1:${upstream.port}/sub.srt',
+      headers: {'Referer': 'http://origin/'},
+      convertToVtt: false,
+    );
+    expect(Uri.parse(proxied!).pathSegments.last, 'subtitle.srt',
+        reason: 'DLNA 字幕 URL 带 .srt 扩展名段');
+    final client = HttpClient();
+    final res = await client.getUrl(localOf(proxied)).then((r) => r.close());
+    expect(res.headers.contentType?.mimeType, 'text/srt',
+        reason: '与 DIDL 三件套声明的 text/srt 一致');
+    final text = await res.transform(utf8.decoder).join();
+    expect(text, srtBody, reason: 'SRT 原样伺服，不做 SRT→VTT 转换');
+    expect(text.startsWith('WEBVTT'), isFalse);
+    // 字幕仍走 Interactive 且不带 contentFeatures（M1-9 条件化规则）。
+    expect(res.headers.value('transferMode.dlna.org'), 'Interactive');
+    expect(res.headers.value('contentFeatures.dlna.org'), isNull);
+    client.close();
+  });
+
+  test('M5-1 字幕第三通道：登记字幕的媒体响应带 CaptionInfo.sec', () async {
+    const caption = 'http://192.168.1.5:18280/p/subtoken/subtitle.srt';
+    // 直链条目。
+    final stream = await proxy.register(
+      'http://127.0.0.1:${upstream.port}/seg1.ts',
+      subtitleUrl: caption,
+    );
+    final client = HttpClient();
+    final res = await client.getUrl(localOf(stream!)).then((r) => r.close());
+    expect(res.headers.value('captioninfo.sec'), caption);
+
+    // HLS 清单条目（清单也是媒体响应）。
+    final playlist = await proxy.register(
+      'http://127.0.0.1:${upstream.port}/list.m3u8',
+      subtitleUrl: caption,
+    );
+    final res2 = await client.getUrl(localOf(playlist!)).then((r) => r.close());
+    expect(res2.headers.value('captioninfo.sec'), caption);
+
+    // 未登记字幕的条目不产生噪声。
+    final plain = await proxy.register(
+      'http://127.0.0.1:${upstream.port}/seg1.ts',
+    );
+    final res3 = await client.getUrl(localOf(plain!)).then((r) => r.close());
+    expect(res3.headers.value('captioninfo.sec'), isNull);
+    client.close();
+  });
 }

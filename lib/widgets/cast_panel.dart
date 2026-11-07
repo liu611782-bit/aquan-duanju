@@ -8,6 +8,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 
 import '../core/cast/cast_controller.dart';
 import '../core/cast/cast_diagnostics.dart';
+import '../core/cast/cast_recipe.dart';
 import '../core/cast/cast_target.dart';
 import '../core/cast/web_cast.dart';
 import '../core/cast/mirror/mirror_controller.dart';
@@ -150,6 +151,10 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
   bool _webCastSuggested = false;
   String? _error;
 
+  /// 兼容模式（本机转码后投屏）三态（M5-0 / AC-22）：初始值取最近使用
+  /// 设备按 UDN 记忆的配方；连接时写入目标设备配方（跨启动生效）。
+  CastTranscodeMode _transcodeMode = CastTranscodeMode.auto;
+
   /// R5：连接开始时的设备顺序快照与固定 lastId（连接期间不重排）。
   List<CastTarget>? _frozenDevices;
   String? _connectingLastId;
@@ -163,6 +168,11 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
   void initState() {
     super.initState();
     _mirrorMode = widget.initialMirrorMode;
+    final last = widget.scope.cast.lastDevice;
+    if (last != null) {
+      _transcodeMode = widget.scope.cast.recipes.lookup(last)?.transcodeMode ??
+          CastTranscodeMode.auto;
+    }
   }
 
   @override
@@ -255,6 +265,27 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
                   style: theme.textTheme.bodySmall
                       ?.copyWith(color: theme.colorScheme.primary)),
             ],
+            const SizedBox(height: 8),
+            // 兼容模式（本机转码后投屏）三态开关（M5-0 / AC-22）：电视投
+            // 不出或画面花屏时的第一动作是「始终」；选中状态按 UDN 写入
+            // 配方记忆，跨启动生效。
+            Row(
+              children: [
+                Expanded(
+                  child: Text('兼容模式（本机转码后投屏）',
+                      style: theme.textTheme.bodySmall),
+                ),
+                _transcodeChip(context, '自动', CastTranscodeMode.auto),
+                const SizedBox(width: 4),
+                _transcodeChip(context, '始终', CastTranscodeMode.always),
+                const SizedBox(width: 4),
+                _transcodeChip(context, '从不', CastTranscodeMode.never),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text('对本次连接的设备生效并按设备记忆；MKV/HLS 投不出或画面花屏时选「始终」',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.outline)),
             const SizedBox(height: 12),
             Flexible(
               child: ListView.builder(
@@ -378,6 +409,37 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
     );
   }
 
+  /// 兼容模式三态切换（M5-0 / AC-22）：面板即时写入最近使用设备的配方
+  /// （尽力而为，写盘失败不阻断面板）；连接目标设备时再写一次（见
+  /// [_connect]），保证「对哪台设备选的模式就记在哪台设备上」。
+  Widget _transcodeChip(
+      BuildContext context, String label, CastTranscodeMode mode) {
+    return Semantics(
+      button: true,
+      selected: _transcodeMode == mode,
+      label: '兼容模式$label',
+      child: TvFocusable(
+        enabled: TvScope.isTvOf(context),
+        onTap: () => _setTranscodeMode(mode),
+        child: ChoiceChip(
+          selected: _transcodeMode == mode,
+          label: Text(label, style: const TextStyle(fontSize: 12)),
+          visualDensity: VisualDensity.compact,
+          onSelected: (_) => _setTranscodeMode(mode),
+        ),
+      ),
+    );
+  }
+
+  void _setTranscodeMode(CastTranscodeMode mode) {
+    setState(() => _transcodeMode = mode);
+    final target = widget.scope.cast.lastDevice;
+    if (target == null) return;
+    widget.scope.cast.recipes
+        .setTranscodeMode(target, mode)
+        .catchError((Object _) {});
+  }
+
   Future<void> _connect(CastTarget device) async {
     if (_connecting) return;
     setState(() {
@@ -393,6 +455,11 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
       );
       _connectingLastId = widget.scope.cast.lastDevice?.id;
     });
+    // AC-22：兼容模式按 UDN 写入目标设备配方（投屏前生效；成功后 remember
+    // 沿用该三态，写盘失败不阻断投屏）。
+    try {
+      await widget.scope.cast.recipes.setTranscodeMode(device, _transcodeMode);
+    } catch (_) {}
     try {
       var effectiveMedia = widget.media;
       if (_mirrorMode) {

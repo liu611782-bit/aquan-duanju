@@ -84,6 +84,9 @@ class LocalMediaServer {
 
   ServerSocket? _socket;
   final Map<String, String> _tokens = <String, String>{};
+
+  /// token → 已登记的外挂字幕地址（M5-1 字幕第三通道）。
+  final Map<String, String> _captions = <String, String>{};
   final List<String> _order = <String>[];
 
   bool get running => _socket != null;
@@ -125,6 +128,7 @@ class LocalMediaServer {
     _socket = null;
     _localAddress = null;
     _tokens.clear();
+    _captions.clear();
     _order.clear();
     await socket?.close();
   }
@@ -141,15 +145,24 @@ class LocalMediaServer {
   /// URL 形态（M1-4）：`/m/<token>/<fileName>`，fileName 来自
   /// [resolveCastMediaType]（按文件扩展名映射，如 ep1.mp4 → video.mp4，
   /// 不暴露真实文件名）；[urlSuffixMode] = bare 时退回旧形态 `/m/<token>`。
+  ///
+  /// [subtitleUrl] 是该文件已登记的外挂字幕地址（M5-1 字幕第三通道）：
+  /// 非空时该 token 的媒体响应头附加 `CaptionInfo.sec: <字幕URL>`。
   Future<String?> urlFor(
     String filePath, {
     String? targetHost,
     CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension,
+    String? subtitleUrl,
   }) async {
     if (!await start()) return null;
     final token = _register(filePath);
     final server = _socket;
     if (server == null) return null;
+    if (subtitleUrl != null && subtitleUrl.isNotEmpty) {
+      _captions[token] = subtitleUrl;
+    } else {
+      _captions.remove(token);
+    }
     String? host;
     if (targetHost != null && targetHost.isNotEmpty) {
       host = await resolveRouteSourceIp(targetHost);
@@ -296,6 +309,7 @@ class LocalMediaServer {
       return;
     }
     trace(range.partial ? 206 : 200, range.length);
+    final caption = _captions[segments[1]];
     final head = StringBuffer()
       ..write(range.partial ? 'HTTP/1.1 206 Partial Content\r\n' : 'HTTP/1.1 200 OK\r\n')
       ..write('Content-Type: $mime\r\n')
@@ -305,7 +319,11 @@ class LocalMediaServer {
         media: true,
         contentFeaturesRequested: contentFeaturesRequested,
         acceptRanges: true,
-      ));
+      ))
+      // 字幕第三通道（M5-1）：登记了外挂字幕才附加，不制造噪声。
+      ..write(caption == null || caption.isEmpty
+          ? ''
+          : 'CaptionInfo.sec: $caption\r\n');
     if (range.partial) {
       head.write('Content-Range: bytes ${range.start}-${range.end - 1}/$total\r\n');
     }

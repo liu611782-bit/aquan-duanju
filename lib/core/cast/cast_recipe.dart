@@ -361,6 +361,16 @@ class CastRecipeStore {
     await _notify();
   }
 
+  /// 只更新某设备的兼容模式三态（M5-0 面板开关，AC-22）：写 udn 精确层并
+  /// 落盘；不当作一次成功（successCount 不变），设备已有配方时保留其余字段。
+  Future<void> setTranscodeMode(CastTarget d, CastTranscodeMode mode) async {
+    final key = udnKeyOf(d);
+    final existing = _byKey[key];
+    _byKey[key] =
+        (existing ?? const CastRecipe()).copyWith(transcodeMode: mode);
+    await _notify();
+  }
+
   /// 配方失败一次即清空：删 udn 精确层 + 该型号的全部共享层变体
   /// （失败时未必知道当时的 Sink，按前缀清理；其他设备的 udn 精确层
   /// 不受影响，下次投屏重回梯度扫描）。

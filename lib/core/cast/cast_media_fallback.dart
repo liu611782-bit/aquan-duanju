@@ -12,6 +12,9 @@ import 'cast_controller.dart';
 ///
 /// mime 提示：中继产物恒为 HLS（[relayMimeHint]）；回退直投的原始 URL
 /// 不携带中继的提示，交给三级判定的扩展名/嗅探证据。
+///
+/// 中继成功时产物带 `viaRelay: true`（M5-0）：兼容模式选路对本机中继产物
+/// 恒直投，不会再套一层转码。
 Future<(CastMedia, bool)?> castMediaViaRelayOrDirect({
   required String title,
   required String directUrl,
@@ -44,6 +47,7 @@ Future<(CastMedia, bool)?> castMediaViaRelayOrDirect({
       headers: headers,
       mimeHint: viaRelay ? relayMimeHint : '',
       duration: duration,
+      viaRelay: viaRelay,
     ),
     viaRelay,
   );

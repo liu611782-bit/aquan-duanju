@@ -239,5 +239,19 @@ void main() {
       expect(res.headers.value('transferMode.dlna.org'), 'Streaming');
       expect(res.headers.value('accept-ranges'), 'bytes');
     });
+
+    test('M5-1 字幕第三通道：登记字幕的本地文件响应带 CaptionInfo.sec', () async {
+      const caption = 'http://192.168.1.5:18280/p/subtoken/subtitle.srt';
+      final url = await server.urlFor(mp4.path, subtitleUrl: caption);
+      final res =
+          await HttpClient().getUrl(Uri.parse(url!)).then((r) => r.close());
+      expect(res.headers.value('captioninfo.sec'), caption);
+
+      // 未登记字幕不产生噪声。
+      final plain = await server.urlFor(m3u8.path);
+      final res2 =
+          await HttpClient().getUrl(Uri.parse(plain!)).then((r) => r.close());
+      expect(res2.headers.value('captioninfo.sec'), isNull);
+    });
   });
 }

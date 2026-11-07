@@ -470,4 +470,43 @@ void main() {
       expect(store.profiles.lookup('uuid:other')?.profileId, kProfilePnRequired);
     });
   });
+
+  group('setTranscodeMode（M5-0 / AC-22 面板开关写配方）', () {
+    test('只更新三态：其余字段与 successCount 保留', () async {
+      final store = CastRecipeStore();
+      final d = target();
+      const existing = CastRecipe(didl: DidlVariant.compact);
+      await store.remember(d, existing, sink: const <String>[]);
+      // remember 自带一次成功计数（0 → 1）；setTranscodeMode 不应再加。
+      final before = store.lookup(d)!;
+      expect(before.successCount, 1);
+
+      await store.setTranscodeMode(d, CastTranscodeMode.always);
+      final r = store.lookup(d)!;
+      expect(r.transcodeMode, CastTranscodeMode.always);
+      expect(r.didl, DidlVariant.compact, reason: '其余字段保留');
+      expect(r.successCount, 1, reason: '不当作一次成功（不再 +1）');
+    });
+
+    test('无既有配方时写入仅含三态的配方；三态三档往返', () async {
+      final store = CastRecipeStore();
+      final d = target();
+      await store.setTranscodeMode(d, CastTranscodeMode.never);
+      expect(store.lookup(d)!.transcodeMode, CastTranscodeMode.never);
+      expect(store.lookup(d)!.successCount, 0);
+      expect(store.lookup(d)!.didl, DidlVariant.full, reason: '其余字段为默认');
+
+      for (final mode in CastTranscodeMode.values) {
+        await store.setTranscodeMode(d, mode);
+        expect(store.lookup(d)!.transcodeMode, mode);
+      }
+    });
+
+    test('写盘回调触发（CastStore 持久化挂点）', () async {
+      var persisted = 0;
+      final store = CastRecipeStore(onChanged: () async => persisted++);
+      await store.setTranscodeMode(target(), CastTranscodeMode.always);
+      expect(persisted, 1);
+    });
+  });
 }

@@ -442,4 +442,317 @@ void main() {
       controller.dispose();
     });
   });
+
+  group('M5 兼容模式选路（M5-0 / M5-3 / G5）', () {
+    /// 注入记录型转码挂点，返回调用记录列表；[fail] = 模拟中继起不来。
+    List<String> hook(CastController controller, {bool fail = false}) {
+      final hooked = <String>[];
+      controller.transcodeResolver = (m) async {
+        hooked.add(m.url);
+        return fail ? null : 'http://192.168.1.9:18280/relay/index.m3u8';
+      };
+      return hooked;
+    }
+
+    test('auto + MKV → 本机转码；DIDL 按转码产物 HLS 判定', () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      final hooked = hook(controller);
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(url: 'http://192.168.1.10/1.mkv', title: 't'),
+      );
+      expect(hooked, ['http://192.168.1.10/1.mkv'], reason: 'MKV 默认走中继');
+      expect(compat.lastRequest!.url.toString(),
+          'http://192.168.1.9:18280/relay/index.m3u8');
+      expect(compat.lastRequest!.didl.uri.toString(),
+          'http://192.168.1.9:18280/relay/index.m3u8');
+      expect(compat.lastRequest!.didl.mimeType, 'application/vnd.apple.mpegurl',
+          reason: '转码产物恒为 HLS');
+      controller.dispose();
+    });
+
+    test('auto + HEVC 提示（MP4 容器）→ 本机转码', () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      final hooked = hook(controller);
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(
+            url: 'http://192.168.1.10/1.mp4', title: 't', codecHint: 'hevc'),
+      );
+      expect(hooked, hasLength(1), reason: 'HEVC/AV1 默认走中继转 H.264');
+      expect(compat.lastRequest!.didl.mimeType, 'application/vnd.apple.mpegurl');
+      controller.dispose();
+    });
+
+    test('auto + MP4（无编码提示）→ 直投，不触发转码挂点', () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      final hooked = hook(controller);
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(url: 'http://192.168.1.10/1.mp4', title: 't'),
+      );
+      expect(hooked, isEmpty);
+      expect(compat.lastRequest!.url, Uri.parse('http://192.168.1.10/1.mp4'));
+      expect(compat.lastRequest!.didl.mimeType, 'video/mp4');
+      controller.dispose();
+    });
+
+    test('auto + HLS + Sink 含 HLS → 直投；Sink 不含 → 本机转码', () async {
+      final supported = CapturingCompatTransport()
+        ..sinkAnswer = <String>{'http-get:*:application/vnd.apple.mpegurl:*'};
+      final controller1 = CastController(transportFactory: (_) => supported);
+      final hooked1 = hook(controller1);
+      await controller1.castTo(_target('d1'), _media());
+      expect(hooked1, isEmpty, reason: 'Sink 支持 HLS 时直投');
+      expect(supported.lastRequest!.url, Uri.parse('http://192.168.1.10/1.m3u8'));
+      controller1.dispose();
+
+      final unsupported = CapturingCompatTransport()
+        ..sinkAnswer = <String>{'http-get:*:video/mp4:*'};
+      final controller2 = CastController(transportFactory: (_) => unsupported);
+      final hooked2 = hook(controller2);
+      await controller2.castTo(_target('d1'), _media());
+      expect(hooked2, hasLength(1), reason: 'Sink 无 HLS mime → 走中继');
+      expect(unsupported.lastRequest!.didl.mimeType,
+          'application/vnd.apple.mpegurl');
+      controller2.dispose();
+    });
+
+    test('never：MKV / HLS-无-Sink 都按现状直投，不触发转码挂点', () async {
+      final compat = CapturingCompatTransport()
+        ..sinkAnswer = <String>{'http-get:*:video/mp4:*'};
+      final controller = CastController(transportFactory: (_) => compat);
+      await controller.recipes
+          .setTranscodeMode(_target('d1'), CastTranscodeMode.never);
+      final hooked = hook(controller);
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(url: 'http://192.168.1.10/1.mkv', title: 't'),
+      );
+      expect(hooked, isEmpty, reason: '用户显式关闭转码');
+      expect(compat.lastRequest!.url, Uri.parse('http://192.168.1.10/1.mkv'));
+      expect(compat.lastRequest!.didl.mimeType, 'video/x-matroska');
+      controller.dispose();
+    });
+
+    test('always：MP4 也走本机转码', () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      await controller.recipes
+          .setTranscodeMode(_target('d1'), CastTranscodeMode.always);
+      final hooked = hook(controller);
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(url: 'http://192.168.1.10/1.mp4', title: 't'),
+      );
+      expect(hooked, hasLength(1));
+      expect(compat.lastRequest!.didl.mimeType, 'application/vnd.apple.mpegurl');
+      controller.dispose();
+    });
+
+    test('转码挂点失败（返回 null）→ 回退直投，不算投屏失败', () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      final hooked = hook(controller, fail: true);
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(url: 'http://192.168.1.10/1.mkv', title: 't'),
+      );
+      expect(hooked, hasLength(1));
+      expect(compat.lastRequest!.url, Uri.parse('http://192.168.1.10/1.mkv'),
+          reason: '回退直投原始 URL');
+      expect(compat.lastRequest!.didl.mimeType, 'video/x-matroska');
+      expect(controller.state, CastSessionState.casting);
+      controller.dispose();
+    });
+
+    test('viaRelay（URL 已是中继产物，如加密分集）→ 恒直投，不再二次转码',
+        () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      await controller.recipes
+          .setTranscodeMode(_target('d1'), CastTranscodeMode.always);
+      final hooked = hook(controller);
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(
+          url: 'http://127.0.0.1:18280/relay/index.m3u8',
+          title: 't',
+          viaRelay: true,
+        ),
+      );
+      expect(hooked, isEmpty, reason: '中继产物不再套一层转码');
+      expect(compat.lastRequest!.didl.mimeType, 'application/vnd.apple.mpegurl');
+      controller.dispose();
+    });
+
+    test('Chromecast 播放路径不受选路影响（P0 契约：always 也不挂钩点）', () async {
+      final transport = FakeTransport();
+      final controller = CastController(transportFactory: (_) => transport);
+      final target =
+          CastTarget.chromecast(const CastDeviceInfo(host: '127.0.0.1', name: 'CC'));
+      await controller.recipes.setTranscodeMode(target, CastTranscodeMode.always);
+      final hooked = hook(controller);
+      await controller.castTo(
+        target,
+        const CastMedia(url: 'http://192.168.1.10/1.mkv', title: 't'),
+      );
+      expect(hooked, isEmpty);
+      expect(
+        transport.calls.first,
+        startsWith('setUri:http://192.168.1.10/1.mkv'),
+      );
+      controller.dispose();
+    });
+  });
+
+  group('M5-1 字幕（DLNA 不转 VTT / 第三通道）', () {
+    test('DLNA 字幕走代理且 SRT 不被转 VTT；媒体响应带 CaptionInfo.sec',
+        () async {
+      final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      const srtBody = '1\n00:00:01,000 --> 00:00:03,000\n你好世界\n';
+      final serverSub = upstream.listen((req) async {
+        if (req.uri.path == '/sub.srt') {
+          req.response.headers.contentType =
+              ContentType('application', 'x-subrip', charset: 'utf-8');
+          req.response.write(srtBody);
+          await req.response.close();
+          return;
+        }
+        req.response.headers.contentType =
+            ContentType('application', 'octet-stream');
+        req.response.add(const <int>[1, 2, 3, 4, 5, 6, 7, 8]);
+        await req.response.close();
+      });
+      addTearDown(() async {
+        await serverSub.cancel();
+        await upstream.close();
+      });
+
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      await controller.castTo(
+        _target('d1'),
+        CastMedia(
+          // 媒体也指到本地上游：代理取流要真实可达（不可达 → 502 无第三通道头）。
+          url: 'http://127.0.0.1:${upstream.port}/1.mp4',
+          title: 't',
+          headers: const {'Referer': 'http://origin/'},
+          subtitleUrl: 'http://127.0.0.1:${upstream.port}/sub.srt',
+        ),
+      );
+
+      // DIDL 三件套里的字幕 URL：代理路径 + .srt 扩展名。
+      final sub = compat.lastRequest!.didl.subtitleUri!;
+      expect(sub.host, '127.0.0.1', reason: '对外 URL host = 目标设备路由源 IP');
+      expect(sub.path.endsWith('.srt'), isTrue, reason: 'DLNA 字幕 URL 带 .srt');
+      final client = HttpClient();
+      final res = await client.getUrl(sub).then((r) => r.close());
+      expect(res.headers.contentType?.mimeType, 'text/srt',
+          reason: '与 DIDL 声明的 text/srt 一致（修正转 VTT 却声明 srt 的错配）');
+      expect(await res.transform(utf8.decoder).join(), srtBody,
+          reason: 'SRT 响应体与输入一致（不转 VTT）');
+
+      // 字幕第三通道：媒体响应头带 CaptionInfo.sec = 字幕 URL。
+      final mediaRes =
+          await client.getUrl(compat.lastRequest!.url).then((r) => r.close());
+      expect(mediaRes.headers.value('captioninfo.sec'), sub.toString());
+      client.close();
+      controller.dispose();
+    });
+  });
+
+  group('M5-0 AC-22：兼容模式三态按 UDN 记忆', () {
+    Future<Directory> tempDir(String prefix) async {
+      final dir = await Directory.systemTemp.createTemp(prefix);
+      addTearDown(() => dir.delete(recursive: true));
+      return dir;
+    }
+
+    File castFile(Directory dir) =>
+        File('${dir.path}${Platform.pathSeparator}aquan_cast.json');
+
+    test('写配方 → 落盘 → 重启读回（setTranscodeMode）', () async {
+      final dir = await tempDir('cast_controller_ac22');
+      final store = CastStore(testDirectory: dir);
+      await store.ensureLoaded();
+
+      await store.recipes.setTranscodeMode(_target('d1'), CastTranscodeMode.always);
+      // 立即读回。
+      expect(store.recipes.lookup(_target('d1'))!.transcodeMode,
+          CastTranscodeMode.always);
+      // 落盘断言。
+      final json =
+          jsonDecode(castFile(dir).readAsStringSync()) as Map<String, dynamic>;
+      expect(
+        CastRecipe.fromJson(
+            ((json['recipes'] as Map<String, dynamic>)['udn:d1'])
+                as Map<String, dynamic>)
+            .transcodeMode,
+        CastTranscodeMode.always,
+      );
+
+      // 模拟重启。
+      final store2 = CastStore(testDirectory: dir);
+      await store2.ensureLoaded();
+      expect(store2.recipes.lookup(_target('d1'))!.transcodeMode,
+          CastTranscodeMode.always);
+    });
+
+    test('用户设置的三态在梯度配方命中后不被冲掉（remember 沿用）', () async {
+      final dir = await tempDir('cast_controller_ac22_keep');
+      final store = CastStore(testDirectory: dir);
+      await store.ensureLoaded();
+      await store.recipes.setTranscodeMode(_target('d1'), CastTranscodeMode.never);
+
+      // 梯度扫描命中 compact（返回的配方本身 mode=auto）。
+      const hit = CastRecipe(didl: DidlVariant.compact);
+      final compat = CapturingCompatTransport()..hitRecipe = hit;
+      final controller = CastController(
+        transportFactory: (_) => compat,
+        recipeStore: store.recipes,
+        profileStore: store.profiles,
+      );
+      await controller.castTo(_target('d1'), _media());
+
+      final saved = store.recipes.lookup(_target('d1'))!;
+      expect(saved.didl, DidlVariant.compact, reason: '命中配方正常记忆');
+      expect(saved.transcodeMode, CastTranscodeMode.never,
+          reason: '用户显式设置的从不不被 auto 冲掉');
+      controller.dispose();
+    });
+  });
+
+  // 注意：本组必须在文件最后——ensureInitialized 的测试绑定会接管
+  // HttpClient，污染同 isolate 里后续测试的原始网络请求（registerSubtitle
+  // 会被打断）。镜像测试需要绑定（MirrorController 的 MethodChannel）。
+  group('M5 镜像路径不受选路影响（文件末尾：需要测试绑定）', () {
+    test('always 也不挂钩点，镜像流按现状直投', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final transport = FakeTransport();
+      final controller = CastController(transportFactory: (_) => transport);
+      await controller.recipes
+          .setTranscodeMode(_target('d1'), CastTranscodeMode.always);
+      final hooked = <String>[];
+      controller.transcodeResolver = (m) async {
+        hooked.add(m.url);
+        return 'http://127.0.0.1:18280/relay/index.m3u8';
+      };
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(
+            url: 'http://127.0.0.1:18080/stream.ts', title: '屏幕镜像', isMirror: true),
+      );
+      expect(hooked, isEmpty);
+      expect(
+        transport.calls.first,
+        startsWith('setUri:http://127.0.0.1:18080/stream.ts'),
+      );
+      await controller.disconnect();
+      controller.dispose();
+    });
+  });
 }

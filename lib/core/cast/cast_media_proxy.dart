@@ -110,6 +110,10 @@ class CastMediaProxy {
   /// 提供时对外 URL 的 host 用「到该设备的路由源 IP」（电视拉得到流的
   /// 地址），探测失败回退全局本机地址。同一媒体投两台设备 = 两个 token
   /// （上游缓存可共享，不影响正确性）。
+  ///
+  /// [subtitleUrl] 是该条目已登记的外挂字幕地址（M5-1 字幕第三通道）：
+  /// 非空时媒体响应头附加 `CaptionInfo.sec: <字幕URL>`（File2TV server.py
+  /// 思路，Samsung 除 DIDL 标签外的又一条识别通道）。
   Future<String?> register(
     String url, {
     Map<String, String> headers = const {},
@@ -117,6 +121,7 @@ class CastMediaProxy {
     String? hintMime,
     bool live = false,
     CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension,
+    String? subtitleUrl,
   }) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme) return null;
@@ -140,16 +145,21 @@ class CastMediaProxy {
       mediaType: mediaType,
       advertisedHost: _hostOfAuthority(authority),
       urlSuffixMode: urlSuffixMode,
+      captionUrl: subtitleUrl,
     ));
     return _entryUrl(authority, token, mediaType.fileName, urlSuffixMode);
   }
 
-  /// 登记字幕：SRT 拉取转 VTT 静态伺服（URL 带 `subtitle.vtt` 文件名段）；
-  /// VTT/其他走 [register] 直通。
+  /// 登记字幕：[convertToVtt] 为 true（Chromecast 路径，默认）时 SRT 拉取
+  /// 转 VTT 静态伺服（URL 带 `subtitle.vtt` 文件名段）；为 false（DLNA
+  /// 路径，M5-1）时 **SRT 原样伺服**——DIDL 三件套声明 `text/srt`，响应
+  /// Content-Type 与之保持一致（修正「转 VTT 却声明 text/srt」的错配），
+  /// URL 带 `subtitle.srt` 扩展名段。VTT/其他格式走 [register] 直通。
   Future<String?> registerSubtitle(String url,
       {Map<String, String> headers = const {},
       String? targetHost,
-      CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension}) async {
+      CastUrlSuffixMode urlSuffixMode = CastUrlSuffixMode.withExtension,
+      bool convertToVtt = true}) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme) return null;
     final isSrt = uri.path.toLowerCase().endsWith('.srt');
@@ -164,20 +174,22 @@ class CastMediaProxy {
     if (authority == null) return null;
     try {
       final body = await _fetchText(uri, headers, null);
-      final vtt = utf8.encode(srtToVtt(body));
+      final bytes = convertToVtt ? utf8.encode(srtToVtt(body)) : utf8.encode(body);
+      final contentType = convertToVtt ? 'text/vtt' : 'text/srt';
+      final fileName = convertToVtt ? 'subtitle.vtt' : 'subtitle.srt';
       final token = _addToken(_ProxyEntry(
         kind: _ProxyKind.static,
-        bytes: vtt,
-        contentType: 'text/vtt',
-        mediaType: const CastMediaType(
-          mime: 'text/vtt',
-          fileName: 'subtitle.vtt',
+        bytes: bytes,
+        contentType: contentType,
+        mediaType: CastMediaType(
+          mime: contentType,
+          fileName: fileName,
           kind: CastMediaKind.unknown,
         ),
         advertisedHost: _hostOfAuthority(authority),
         urlSuffixMode: urlSuffixMode,
       ));
-      return _entryUrl(authority, token, 'subtitle.vtt', urlSuffixMode);
+      return _entryUrl(authority, token, fileName, urlSuffixMode);
     } catch (_) {
       return null;
     }
@@ -327,7 +339,8 @@ class CastMediaProxy {
     }
   }
 
-  /// 静态字节（转换后的 VTT 字幕）；返回 (状态码, 发给电视的字节数) 供埋点。
+  /// 静态字节（字幕：转换后的 VTT 或原样 SRT）；返回 (状态码, 发给电视的
+  /// 字节数) 供埋点。
   ///
   /// 字幕是 text/*：transferMode 走 Interactive 且不给 contentFeatures
   /// （M1-9 playbridge 条件化规则）。
@@ -370,6 +383,7 @@ class CastMediaProxy {
         contentFeaturesRequested: contentFeaturesRequested,
         acceptRanges: false,
       ))
+      ..write(_captionHeader(entry))
       ..write('Connection: close\r\n\r\n');
     socket.add(utf8.encode(head.toString()));
     if (method != 'HEAD') socket.add(bytes);
@@ -424,6 +438,7 @@ class CastMediaProxy {
     if (contentLength != null) head.write('Content-Length: $contentLength\r\n');
     final contentRange = res.headers.value('content-range');
     if (contentRange != null) head.write('Content-Range: $contentRange\r\n');
+    head.write(_captionHeader(entry));
     head.write('Connection: close\r\n\r\n');
 
     if (method == 'HEAD') {
@@ -606,6 +621,14 @@ class CastMediaProxy {
   // 工具
   // ---------------------------------------------------------------------------
 
+  /// 字幕第三通道响应头（M5-1，File2TV server.py 思路）：该条目登记了
+  /// 外挂字幕时附加 `CaptionInfo.sec: <字幕URL>`；未登记不产生噪声。
+  static String _captionHeader(_ProxyEntry entry) {
+    final caption = entry.captionUrl;
+    if (caption == null || caption.isEmpty) return '';
+    return 'CaptionInfo.sec: $caption\r\n';
+  }
+
   String _addToken(_ProxyEntry entry) {
     // 随机 token（SecureRandom 24B base64Url）：旧「时间戳+序号」在局域网
     // 内可预测枚举，任何设备都能拉走登记过的受保护流。
@@ -707,6 +730,7 @@ class _ProxyEntry {
     this.mediaType = CastMediaType.unknown,
     this.advertisedHost,
     this.urlSuffixMode = CastUrlSuffixMode.withExtension,
+    this.captionUrl,
   });
 
   final _ProxyKind kind;
@@ -726,4 +750,8 @@ class _ProxyEntry {
 
   /// URL 形态（M1-3）：清单改写的子 URL 继承父条目（bare 父 → bare 子）。
   final CastUrlSuffixMode urlSuffixMode;
+
+  /// 已登记的外挂字幕地址（M5-1 字幕第三通道）：非空时媒体响应头附加
+  /// `CaptionInfo.sec`（仅顶层登记条目携带，清单子 URL 不带）。
+  final String? captionUrl;
 }

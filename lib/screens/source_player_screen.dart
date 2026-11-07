@@ -788,6 +788,9 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
       mimeHint: playback.mimeType,
       duration:
           index == _index && _duration > Duration.zero ? _duration : null,
+      // M5-2 字幕接线点：CMS/spider 源目前不提供外挂字幕 URL，源无字幕就
+      // 不传（DIDL 不写字幕标签、不制造噪声）；源补齐外挂字幕数据后在此
+      // 传入 CastMedia.subtitleUrl 即全链路生效。
     );
   }
 
@@ -816,6 +819,30 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
     }
     // 连播：电视端播完自动投下一集（捕获发起时的集数下标）。
     final castIndex = _index;
+    // M5-0：兼容模式选路的本机转码执行体（Go castRelayStart 适配器）。
+    // 中继会话沿用 _castRelaySession 生命周期（停旧 → 起新 → 断开回收）。
+    castController.transcodeResolver = (m) async {
+      final oldSession = _castRelaySession;
+      _castRelaySession = null;
+      if (oldSession != null) {
+        try {
+          await scope.api.castRelayStop(oldSession);
+        } catch (_) {}
+      }
+      final relay = await scope.api.castRelayStart(
+        url: m.url,
+        userAgent: headerOf(m.headers, 'user-agent') ?? '',
+        referer: headerOf(m.headers, 'referer') ?? '',
+      );
+      _castRelayApi = scope.api;
+      _castRelaySession = relay['session'] as String?;
+      // M0-5：跟随中继取流日志进诊断（探针在会话回收时自停）。
+      final session = _castRelaySession;
+      if (session != null) {
+        CastRelayProbe.instance.watch(scope.api.castRelayStatus, session);
+      }
+      return relay['url'] as String?;
+    };
     castController.onNextEpisode = () async {
       final n = castIndex + 1;
       if (n >= _line.episodes.length) return null;
