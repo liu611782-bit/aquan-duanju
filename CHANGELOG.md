@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 1.7.4 (2026-11-08)
+
+投屏第三方互操作冒烟（设计 §9.2 承诺项落地）。
+
+- 新增环境门控集成测试：以独立第三方接收端（windows-dlna-receiver，go-dlna 栈 + mpv
+  真实播放）验证发送端全链——发现 / 设备描述解析 / 投送受理 / PLAYING / seek / stop；
+  设 `AQUAN_INTEROP=1` 运行（默认跳过）
+- 手动 IP 直连候选补 `/rootDesc.xml`（UPnP 生态最常用描述文件名，go-dlna 等实现采用）——
+  直连这类接收端不再失败
+- 真实发现并复核：mpv 系接收端在 PLAYING 初段 seek 会瞬态失败（mpv IPC 限制，
+  接收端回 fault），生产链路对 Seek 失败本就按「吞掉」处理，无需变更
+
 ## 1.7.3 (2026-11-07)
 
 全 Store 写竞态迁移：修复全部 Store 的并发写丢键风险。

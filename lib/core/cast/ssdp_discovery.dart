@@ -453,7 +453,15 @@ class SsdpDiscovery {
     Duration totalBudget = const Duration(seconds: 6),
     int concurrency = 8,
   }) async {
-    const paths = ['/description.xml', '/DeviceDescription.xml', '/dd.xml', '/'];
+    // rootDesc.xml 是 UPnP 生态最常用的设备描述文件名（go-dlna 等）；
+    // '/' 兜底部分接收端的状态页返回 XML 描述。
+    const paths = [
+      '/description.xml',
+      '/rootDesc.xml',
+      '/DeviceDescription.xml',
+      '/dd.xml',
+      '/',
+    ];
     final extra = candidatePorts ??
         <int>[
           ...commonPorts,
