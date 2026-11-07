@@ -20,7 +20,6 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import android.view.Surface
-import android.view.Display
 import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
 import java.net.Inet4Address
@@ -34,10 +33,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * 屏幕镜像前台服务（蓝本 DlnaCast capture/encoder/stream 全链 + scrcpy 系统音频采集）。
  *
- * MediaProjection → VirtualDisplay → MediaCodec(surface 输入, H264 Baseline CBR 1080p30 8Mbps,
+ * MediaProjection → 采集通道 → MediaCodec(surface 输入, H264 Baseline CBR 1080p30 8Mbps,
  * I 帧间隔 1s) → [＋API 29+ 系统音频 AudioPlaybackCapture → AAC-LC 44.1k 128k] →
  * MirrorTsMuxer → 本机 HTTP `/stream.ts`（尾环缓冲，晚连电视先回放再实时）。
  * Dart 侧用既有 DLNA 发送端把该 URL SetAVTransportURI 给电视。
+ *
+ * 采集通道（R4.1，见 MirrorCaptureChannel）：默认 surface 直连（零拷贝，P1e 行为）；
+ * MIUI 兼容备选 imageReader 通道只在多级恢复第 4 级互切后启用。
+ * 多级恢复（R4.3 / design §5-3）：软恢复 → 降分辨率重建（保留会话）→ 热重启 → 通道互切。
+ * MTK 兼容（R4.2）：MANUFACTURER 命中且特性开关开启时，输出 PTS 单调化 + 异常帧丢弃。
  */
 class MirrorService : Service() {
 
@@ -53,6 +57,35 @@ class MirrorService : Service() {
 
         // 尾环缓冲上限（4MB ≈ 4s@8Mbps）：晚连的电视先回放再追实时。
         private const val TAIL_LIMIT_BYTES = 4 * 1024 * 1024
+
+        // --- 分辨率档位（P1e 现状）：0=屏幕实际(≤1080p/8Mbps)，1=720p/4Mbps ---
+        private const val RESOLUTION_TIER_MAX = 1
+
+        // --- 多级恢复档位（R4.3 / design §5-3）：一次无输出 episode 内按同一时间轴逐级升级，
+        // 每级只触发一次，任意一帧到达即复位到第 0 级：
+        // 第 1 级 3s 软恢复（P1e 现状）→ 第 2 级 6s 降分辨率重建（保留采集通道会话）→
+        // 第 3 级 9s 热重启（P1e 现状 6s 链路实现）→ 第 4 级 12s 采集通道互切（R4.1）→
+        // 之后回到既有热重启节奏（连续 2 次无效自毁，P1e 链路不变）。
+        private const val RECOVERY_NONE = 0
+        private const val RECOVERY_SOFT_DONE = 1
+        private const val RECOVERY_RES_REBUILT = 2
+        private const val RECOVERY_HOT_RESTARTED = 3
+        private const val RECOVERY_CHANNEL = 4
+        private const val SOFT_RECOVER_MS = 3_000L
+        private const val RES_REBUILD_MS = 6_000L
+        private const val HOT_RESTART_MS = 9_000L
+        private const val CHANNEL_SWITCH_MS = 12_000L
+        private const val POST_LADDER_STEP_MS = 3_000L
+        // 采集通道互切次数上限（R4.1：失败互切有上限，超过后走既有热重启/自毁链）
+        private const val MAX_CHANNEL_SWITCHES = 4
+
+        // --- MTK SurfaceBridge 规避（R4.2 / design §5-2）---
+        // 总开关：真机出问题时置 false 一键回退，所有设备行为与 P1e 完全一致。
+        private const val MTK_COMPAT_ENABLED = true
+        // PTS 大幅回退（>500ms）视为时间轴损坏 → 整帧丢弃；
+        // 轻微回退/重复 → 钳制为上一帧 + 步进（约 1/3 帧间隔，不显著拖慢时间轴）。
+        private const val MTK_PTS_DROP_THRESHOLD_US = 500_000L
+        private const val MTK_PTS_STEP_US = 11_000L
 
         @Volatile
         var projectionData: Intent? = null
@@ -127,7 +160,13 @@ class MirrorService : Service() {
     private val stopEventSent = AtomicBoolean(false)
 
     private var projection: MediaProjection? = null
-    private var virtualDisplay: android.hardware.display.VirtualDisplay? = null
+
+    // --- 采集通道（R4.1 / design §5-1）---
+    // 默认 surface 直连 = P1e 行为不变；仅在多级恢复第 4 级互切后才启用 imageReader 备选。
+    private var channel: MirrorCaptureChannel? = null
+    private var useImageReaderChannel = false
+    private var channelSwitches = 0
+    private var captureDpi = 160
     private var videoCodec: MediaCodec? = null
     private var inputSurface: Surface? = null
     private var audioCodec: MediaCodec? = null
@@ -142,9 +181,25 @@ class MirrorService : Service() {
     private var serviceVideoHeight = 1080
 
     // --- 编码器韧性（移植 DlnaCast VideoEncoder 恢复机制） ---
-    // 分辨率层级：0=屏幕实际(≤1080p/8Mbps) → 1=720p/4Mbps。热重启逐级下降。
+    // 分辨率层级：0=屏幕实际(≤1080p/8Mbps) → 1=720p/4Mbps。恢复档位逐级下降。
     private var resolutionTier = 0
     private var stallRecoveryAttempts = 0
+
+    // 多级恢复档位（R4.3）：一次无输出 episode 内逐级升级，有输出复位。
+    private var recoveryStage = RECOVERY_NONE
+
+    // --- MTK 兼容（R4.2）：送 muxer 的上一帧 PTS 与异常帧丢弃计数 ---
+    private var lastMuxedPtsUs = 0L
+    private var mtkDropCount = 0
+
+    /** R4.2 MTK 判定：总开关 + MANUFACTURER 含 mtk/mediatek（覆盖 MediaTek/Mtk 拼写变体）。 */
+    private val mtkCompat = MTK_COMPAT_ENABLED && isMtkDevice()
+
+    private fun isMtkDevice(): Boolean {
+        val maker = Build.MANUFACTURER ?: return false
+        val lower = maker.lowercase()
+        return lower.contains("mtk") || lower.contains("mediatek")
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -306,8 +361,27 @@ class MirrorService : Service() {
         return Triple(1280, 720, 4_000_000)
     }
 
-    /** 构建编码器 + 输入 Surface + VirtualDisplay（初建/热重启共用） */
+    /** 构建编码器 + 输入 Surface + 采集通道（初建/热重启共用） */
     private fun buildVideoEncoder(densityDpi: Int) {
+        captureDpi = densityDpi
+        buildVideoCodec()
+        // 采集通道按当前模式重建（R4.1）：默认 surface 直连 = P1e 行为不变；
+        // 只有互切过的会话才以 imageReader 通道重建（把画面回灌进新编码器 Surface）。
+        channel?.stop()
+        channel = createCaptureChannel()
+        if (!startChannel(channel!!) && useImageReaderChannel) {
+            // 备选通道建不起来（如 ImageReader 资源不足）：回退默认 surface 通道。
+            // 普通设备永远走 surface 通道，不经过这个分支。
+            Log.w(TAG, "capture channel ${channel?.name} start failed, fallback to surface channel")
+            useImageReaderChannel = false
+            channel = createCaptureChannel()
+            startChannel(channel!!)
+        }
+        requestSyncFrame()
+    }
+
+    /** 构建编码器与输入 Surface（分辨率/码率按当前档位；不含采集通道） */
+    private fun buildVideoCodec() {
         val (width, height, bitrate) = tierSpec()
         val format = MediaFormat.createVideoFormat(VIDEO_MIME, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
@@ -335,20 +409,43 @@ class MirrorService : Service() {
             inputSurface = createInputSurface()
             start()
         }
-        virtualDisplay?.release()
-        virtualDisplay = null
-        virtualDisplay = projection?.createVirtualDisplay(
-            "aquan-mirror", width, height, densityDpi,
-            Display.FLAG_PRESENTATION, inputSurface, null, null,
-        )
-        requestSyncFrame()
+    }
+
+    /** 按当前模式构建采集通道（R4.1：普通设备恒走 surface 直连） */
+    private fun createCaptureChannel(): MirrorCaptureChannel {
+        val (width, height, _) = tierSpec()
+        return if (useImageReaderChannel) {
+            ImageReaderCaptureChannel(projection, width, height, captureDpi)
+        } else {
+            SurfaceCaptureChannel(projection, width, height, captureDpi)
+        }
+    }
+
+    private fun startChannel(ch: MirrorCaptureChannel): Boolean = try {
+        ch.start(inputSurface ?: return false)
+    } catch (e: Exception) {
+        Log.e(TAG, "capture channel ${ch.name} start failed", e)
+        false
+    }
+
+    /** 安全释放编码器与输入 Surface（不动采集通道；通道由调用方决定 stop 还是 reattach） */
+    private fun releaseVideoCodec() {
+        try { videoCodec?.stop() } catch (_: Exception) {}
+        try { videoCodec?.release() } catch (_: Exception) {}
+        videoCodec = null
+        try { inputSurface?.release() } catch (_: Exception) {}
+        inputSurface = null
     }
 
     /**
-     * 视频编码循环 + 多级恢复（DlnaCast VideoEncoder 语义）：
-     * 3s 无输出 → 软恢复（同步帧 + 码率微扰）；3s 窗口帧率 <3fps → 主动软恢复；
-     * 6s 死锁 → 热重启（降层级重建编码器 + 重连 VirtualDisplay）；
-     * 连续 2 次热重启无效 → 抛错自毁（Dart 收 mirrorStopped）。
+     * 视频编码循环 + 多级恢复（P1e 恢复链 + design §5-3 档位语义 + R4.1 通道互切）：
+     * 一次无输出 episode 内按同一时间轴逐级升级，每级只触发一次，任意一帧到达即复位：
+     * 第 1 级 3s  软恢复（同步帧 + 码率微扰，P1e 现状行为）；
+     * 第 2 级 6s  降分辨率重建编码器（保留采集通道会话，不重走 MediaProjection 授权）；
+     * 第 3 级 9s  热重启（P1e 现状 6s 链路的重建+重连实现；连续 2 次无效自毁）；
+     * 第 4 级 12s 采集通道互切（surface ↔ imageReader，R4.1 MIUI 兼容，次数有上限）；
+     * 第 4 级之后回到既有热重启节奏，直至自毁（现状链路）。
+     * 每级原因写 Log.w（现有日志通道）；mirrorStopped 事件与 reason 保持不变。
      */
     private fun videoLoop() {
         val info = MediaCodec.BufferInfo()
@@ -374,6 +471,7 @@ class MirrorService : Service() {
                 index >= 0 -> {
                     lastFrameWall = System.currentTimeMillis()
                     stallRecoveryAttempts = 0
+                    recoveryStage = RECOVERY_NONE // 有输出 → 档位复位（互切启用的通道保持运行）
                     // 滑动窗口帧率监测（3s 窗口）。
                     frameTimestamps.addLast(lastFrameWall)
                     while (frameTimestamps.isNotEmpty() &&
@@ -388,7 +486,12 @@ class MirrorService : Service() {
                         buffer.get(data2, 0, info.size)
                         val isKey = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0 ||
                             (data2.size > 4 && (data2[4].toInt() and 0x1F) == 5)
-                        publish(muxer.writeVideo(addStartCode(data2), isKey, info.presentationTimeUs))
+                        // MTK 兼容（R4.2）：PTS 单调化 + 异常帧丢弃；返回 -1 表示整帧丢弃。
+                        val ptsUs = if (mtkCompat) mtkGuardPts(data2, info.presentationTimeUs)
+                        else info.presentationTimeUs
+                        if (ptsUs >= 0) {
+                            publish(muxer.writeVideo(addStartCode(data2), isKey, ptsUs))
+                        }
                     }
                     codec.releaseOutputBuffer(index, false)
                 }
@@ -396,32 +499,73 @@ class MirrorService : Service() {
                     val nowMs = System.currentTimeMillis()
                     val elapsed = nowMs - lastFrameWall
                     when {
-                        // 级别 3：6s 死锁 → 热重启（连续 2 次无效则自毁）。
-                        elapsed >= 6_000 -> {
+                        // 第 4 级之后：回到既有热重启节奏（连续 2 次无效 → 自毁，P1e 链路）。
+                        recoveryStage >= RECOVERY_CHANNEL && elapsed >= POST_LADDER_STEP_MS -> {
                             stallRecoveryAttempts++
-                            Log.w(TAG, "encoder stalled ${elapsed}ms, hot restart #$stallRecoveryAttempts")
+                            Log.w(TAG, "encoder stalled ${elapsed}ms after full ladder, " +
+                                "hot restart #$stallRecoveryAttempts")
                             if (stallRecoveryAttempts >= 2) {
                                 throw IllegalStateException("video encoder unrecoverable after hot restarts")
                             }
-                            if (resolutionTier == 0) resolutionTier = 1
-                            try { codec.stop() } catch (_: Exception) {}
-                            try { codec.release() } catch (_: Exception) {}
-                            try { inputSurface?.release() } catch (_: Exception) {}
-                            inputSurface = null
-                            videoCodec = null
-                            buildVideoEncoder(resources.displayMetrics.densityDpi)
+                            hotRestartEncoder()
                             spsPpsSent = false
                             frameTimestamps.clear()
-                            Thread.sleep(300)
                             lastFrameWall = System.currentTimeMillis()
                         }
-                        // 级别 2：3s 无输出 → 软恢复。
-                        elapsed >= 3_000 -> {
-                            Log.w(TAG, "encoder quiet ${elapsed}ms, soft recovery")
-                            attemptSoftRecovery(codec)
+                        // 第 4 级：采集通道互切（R4.1 MIUI 兼容）。不重建编码器、不断流：
+                        // SPS/PPS 与 TS 序列保持连续。互切超过上限后降级为热重启节奏。
+                        elapsed >= CHANNEL_SWITCH_MS && recoveryStage == RECOVERY_HOT_RESTARTED -> {
+                            if (channelSwitches < MAX_CHANNEL_SWITCHES) {
+                                switchCaptureChannel()
+                            } else {
+                                Log.w(TAG, "channel switch cap reached ($channelSwitches), " +
+                                    "degrade to hot restart cadence")
+                            }
+                            recoveryStage = RECOVERY_CHANNEL
+                            // 互切后重置节奏基准：新通道需要首帧/首输出的启动时间，
+                            // 不重置会让「第 4 级之后的热重启」立即触发。
                             lastFrameWall = nowMs
                         }
-                        // 级别 1：帧率异常低 → 主动软恢复。
+                        // 第 3 级：热重启（P1e 现状 6s 链路的重建+重连实现）。
+                        elapsed >= HOT_RESTART_MS && recoveryStage == RECOVERY_RES_REBUILT -> {
+                            stallRecoveryAttempts++
+                            Log.w(TAG, "encoder stalled ${elapsed}ms, " +
+                                "hot restart #$stallRecoveryAttempts (recovery level 3)")
+                            if (stallRecoveryAttempts >= 2) {
+                                throw IllegalStateException("video encoder unrecoverable after hot restarts")
+                            }
+                            hotRestartEncoder()
+                            recoveryStage = RECOVERY_HOT_RESTARTED
+                            spsPpsSent = false
+                            frameTimestamps.clear()
+                            lastFrameWall = System.currentTimeMillis()
+                        }
+                        // 第 2 级：降分辨率重建编码器（保留采集通道会话，不重走授权）。
+                        elapsed >= RES_REBUILD_MS && recoveryStage == RECOVERY_SOFT_DONE -> {
+                            if (rebuildEncoderKeepDisplay()) {
+                                recoveryStage = RECOVERY_RES_REBUILT
+                                Thread.sleep(300) // 新编码器缓冲预热（对齐 P1e 热重启节奏）
+                            } else {
+                                Log.w(TAG, "recovery level 2 failed, escalate to level 3 hot restart")
+                                stallRecoveryAttempts++
+                                if (stallRecoveryAttempts >= 2) {
+                                    throw IllegalStateException("video encoder unrecoverable after hot restarts")
+                                }
+                                hotRestartEncoder()
+                                recoveryStage = RECOVERY_HOT_RESTARTED
+                            }
+                            spsPpsSent = false
+                            frameTimestamps.clear()
+                            lastFrameWall = System.currentTimeMillis()
+                        }
+                        // 第 1 级：3s 无输出 → 软恢复（现状行为：同步帧 + 码率微扰）。
+                        elapsed >= SOFT_RECOVER_MS && recoveryStage == RECOVERY_NONE -> {
+                            Log.w(TAG, "encoder quiet ${elapsed}ms, soft recovery (recovery level 1)")
+                            attemptSoftRecovery(codec)
+                            recoveryStage = RECOVERY_SOFT_DONE
+                        }
+                        // 级别 0：帧率异常低 → 主动软恢复（P1e 现状行为保留；
+                        // stallRecoveryAttempts=1 沿用 P1e 语义：低帧率事件后下一次热重启不再宽限）。
                         frameTimestamps.size >= 3 &&
                             frameTimestamps.size * 1000f / 3_000f < 3f -> {
                             Log.w(TAG, "low fps ${frameTimestamps.size * 1000f / 3_000f}, proactive recovery")
@@ -433,6 +577,123 @@ class MirrorService : Service() {
                 }
             }
         }
+    }
+
+    /**
+     * 第 2 级恢复：按下一档分辨率重建编码器，但保留采集通道会话——
+     * surface 通道经 VirtualDisplay.setSurface 换绑（不释放 MediaProjection、
+     * 不重走授权弹窗，这是与第 3 级热重启的本质区别）；imageReader 通道只切换回灌目标。
+     * 返回 false 表示重建/换绑失败，调用方升级第 3 级热重启。
+     */
+    private fun rebuildEncoderKeepDisplay(): Boolean {
+        if (resolutionTier < RESOLUTION_TIER_MAX) resolutionTier++
+        val spec = tierSpec()
+        Log.w(
+            TAG, "recovery level 2: rebuild encoder at tier $resolutionTier " +
+                "(${spec.first}x${spec.second}), keeping capture channel session",
+        )
+        releaseVideoCodec()
+        // MTK 单调化基准随编码器重建复位：新编码器 PTS 从 0 重新起步，
+        // 不复位的话旧基准会把所有新帧钳制成固定步进（A/V 漂移）。
+        // 复位后的 PTS 跳变与非 MTK 路径热重启的现状行为一致。
+        lastMuxedPtsUs = 0L
+        return try {
+            buildVideoCodec()
+            val rebound = channel?.reattach(inputSurface ?: return false) ?: false
+            if (rebound) requestSyncFrame()
+            rebound
+        } catch (e: Exception) {
+            Log.e(TAG, "recovery level 2 rebuild failed", e)
+            false
+        }
+    }
+
+    /**
+     * 第 3 级恢复：热重启（P1e 现状 6s 链路的实现）——释放编码器与采集通道后全量重建
+     * （surface 通道重建 VirtualDisplay / imageReader 通道重建 ImageReader+VirtualDisplay）。
+     * 与第 2 级的区别：不保留会话，采集通道整个重来。
+     */
+    private fun hotRestartEncoder() {
+        releaseVideoCodec()
+        lastMuxedPtsUs = 0L // MTK 单调化基准随编码器重建复位（同第 2 级，见彼处注释）
+        channel?.stop()
+        buildVideoEncoder(resources.displayMetrics.densityDpi)
+        Thread.sleep(300)
+    }
+
+    /**
+     * 第 4 级恢复：采集通道互切（R4.1 MIUI 兼容）。不重建编码器、不断流，
+     * 只把 VirtualDisplay 的消费端换掉（surface ↔ imageReader）：
+     * - surface → imageReader：默认直连链路无帧（DlnaCast 佐证的 MIUI Qinput=0 形态），
+     *   重建 VirtualDisplay 到 ImageReader 上并起泵回灌编码器；
+     * - imageReader → surface：泵有帧但编码器仍无输出（采集不是瓶颈）或泵也无帧，
+     *   换回直连通道继续观察。
+     * 互切次数有上限（MAX_CHANNEL_SWITCHES），超过后由调用方降级走既有热重启/自毁链。
+     */
+    private fun switchCaptureChannel(): Boolean {
+        val surface = inputSurface ?: return false
+        val oldName = channel?.name ?: "none"
+        val oldFrames = channel?.frameCount ?: -1L
+        channel?.stop()
+        channel = null
+        useImageReaderChannel = !useImageReaderChannel
+        channelSwitches++
+        val fresh = createCaptureChannel()
+        val ok = try {
+            fresh.start(surface)
+        } catch (e: Exception) {
+            Log.e(TAG, "capture channel switch failed", e)
+            false
+        }
+        if (ok) {
+            channel = fresh
+            Log.w(
+                TAG, "recovery level 4: capture channel switched " +
+                    "$oldName(frames=$oldFrames) -> ${fresh.name} (#$channelSwitches)",
+            )
+        } else {
+            // 互切失败：模式标记回滚，之后的热重启按原模式重建通道。
+            useImageReaderChannel = !useImageReaderChannel
+            Log.e(TAG, "recovery level 4: switch to ${fresh.name} failed, keep $oldName for next rebuild")
+        }
+        return ok
+    }
+
+    /**
+     * MTK 编码器输出守卫（R4.2 / design §5-2，特性开关 mtkCompat 可一键关）：
+     * 时间戳单调化 + 偶发异常帧丢弃。
+     *
+     * 为什么落在这里：MTK Surface 输入编码器在负载抖动/换档后偶发输出 PTS 回绕或
+     * 重复的帧，PTS 倒退直接进 TS 会让接收端解码器卡死（DlnaCast MtkSurfaceBridge
+     * 思路的本工程落法）。本链路编码输出走 releaseOutputBuffer(render=false)，
+     * 时间戳只在 muxer 边界消费，因此单调化作用在送 muxer 的 PTS 上。
+     *
+     * 规则：PTS 正常前进 → 原样放行；轻微回退/重复（≤500ms）→ 钳制为上一帧+步进，
+     * 保帧不断流；大幅回退（>500ms，时间轴已损坏无法补值）或 NAL 不足 5 字节
+     * （装不下 NAL 头）→ 整帧丢弃并请求同步帧（偶发丢帧规避）。
+     * 返回 -1 表示调用方丢弃该帧。
+     */
+    private fun mtkGuardPts(nal: ByteArray, rawPtsUs: Long): Long {
+        if (nal.size < 5) {
+            mtkDropCount++
+            Log.w(TAG, "mtk: drop undersized frame (${nal.size}B) #$mtkDropCount")
+            requestSyncFrame()
+            return -1L
+        }
+        val last = lastMuxedPtsUs
+        if (rawPtsUs > last) {
+            lastMuxedPtsUs = rawPtsUs
+            return rawPtsUs
+        }
+        if (last - rawPtsUs > MTK_PTS_DROP_THRESHOLD_US) {
+            mtkDropCount++
+            Log.w(TAG, "mtk: drop frame with regressed pts=$rawPtsUs (last=$last) #$mtkDropCount")
+            requestSyncFrame()
+            return -1L
+        }
+        val clamped = last + MTK_PTS_STEP_US
+        lastMuxedPtsUs = clamped
+        return clamped
     }
 
     /** 软恢复：同步帧请求 + 极小码率微扰（±100bps，MTK 速率控制器兼容） */
@@ -701,8 +962,9 @@ class MirrorService : Service() {
         sinks.clear()
         try { httpServer?.close() } catch (_: Exception) {}
         httpServer = null
-        try { virtualDisplay?.release() } catch (_: Exception) {}
-        virtualDisplay = null
+        // 采集通道统一释放（surface=VirtualDisplay / imageReader=VirtualDisplay+ImageReader+泵）
+        try { channel?.stop() } catch (_: Exception) {}
+        channel = null
         try { inputSurface?.release() } catch (_: Exception) {}
         inputSurface = null
         try { videoCodec?.stop() } catch (_: Exception) {}
