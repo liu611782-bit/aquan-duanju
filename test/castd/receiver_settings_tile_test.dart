@@ -112,7 +112,7 @@ void main() {
           supported: true,
           admissionMode: 'anyone',
           onAdmissionModeChanged: modes.add,
-          onAdmissionListsChanged: (_, __) => listsChanged++,
+          onAdmissionListsChanged: (_, _) => listsChanged++,
         ),
       ),
     ));

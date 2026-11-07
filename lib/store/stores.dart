@@ -3648,14 +3648,19 @@ class MarketSitesStore extends _JsonFileStore {
 }
 
 /// 投屏设备记忆（`aquan_cast.json`）：最近设备 + 钉选设备 + 设备成功配方 +
-/// 设备画像（v4）。
+/// 设备画像（v4）+ 会话恢复记录（`lastSession`，v4 加键）。
 ///
 /// v4 配方为双层键：`udn:<udn>` 精确 + `model:<model|manufacturer>:<sinkHash>`
 /// 共享；`profiles` 按设备记录能力画像。v1/v2/v3 旧文件读入兼容：
 /// 旧三段式配方键与新查找语义不同，按设计视为空表并升 v4 回写
 /// （`lastDevice` / `pinned` 原样保留；备份白名单仍只有 `cast` 键）。
-class CastStore extends _JsonFileStore {
-  CastStore({super.testDirectory}) : super('aquan_cast.json') {
+/// `lastSession` 是设备相关的本机会话（代理 token / 路由源 IP 换机即失效），
+/// **不进备份导出**（[exportData] 剥离该键）。
+class CastStore extends _JsonFileStore implements CastSessionRecorder {
+  CastStore({
+    super.testDirectory,
+    this.sessionPositionThrottle = const Duration(seconds: 10),
+  }) : super('aquan_cast.json') {
     _recipes = CastRecipeStore(onChanged: _persistRecipes);
     _profiles = CastProfileStore(onChanged: _persistProfiles);
   }
@@ -3668,9 +3673,120 @@ class CastStore extends _JsonFileStore {
   late final CastProfileStore _profiles;
   String? _receiverUdn;
 
+  /// 会话恢复记录（R1）：控制器在投送成功/轮询/会话收尾写入；
+  /// 损坏记录在 [loadFromDisk] 里静默清理。
+  CastSessionRecord? _lastSession;
+
+  /// 进度节流时钟：全量记录时重置，10s 窗口内的进度更新直接忽略。
+  DateTime? _lastPositionWriteAt;
+
+  /// 轮询进度落盘的最小间隔（R1.1：10s 节流）；测试可注入短窗口。
+  final Duration sessionPositionThrottle;
+
   CastTarget? get lastDevice => _lastDevice;
   List<CastTarget> get pinned => List.of(_pinned);
   Set<String> get pinnedIds => _pinned.map((d) => d.id).toSet();
+
+  /// 最近一次可恢复投屏会话（`aquan_cast.json` 的 `lastSession` 键）。
+  /// null = 无记录或已清理（损坏/手动断开不删，只有清理才删）。
+  @override
+  CastSessionRecord? get lastSession => _lastSession;
+
+  /// 投送成功：写全量恢复记录（镜像/本地文件会话由控制器排除）。
+  /// [now] 仅供测试注入时钟。
+  @override
+  Future<void> recordSession({
+    required CastTarget target,
+    required String title,
+    required String mediaUrl,
+    int positionMs = 0,
+    DateTime? now,
+  }) async {
+    await ensureLoaded();
+    final at = now ?? DateTime.now();
+    _lastSession = CastSessionRecord(
+      targetPersistJson: target.toPersistJson(),
+      title: title,
+      mediaUrl: mediaUrl,
+      positionMs: positionMs,
+      endedAt: at,
+    );
+    _lastPositionWriteAt = at;
+    await _persistLastSession();
+  }
+
+  /// 轮询进度：10s 节流（窗口内直接忽略），只改 positionMs 不动 endedAt
+  /// （R1.1：endedAt 只在会话收尾更新）。无记录时 no-op。
+  /// [now] 仅供测试注入时钟。
+  @override
+  Future<void> updateSessionPosition(int positionMs, {DateTime? now}) async {
+    final record = _lastSession;
+    if (record == null) return;
+    final at = now ?? DateTime.now();
+    final last = _lastPositionWriteAt;
+    if (last != null && at.difference(last) < sessionPositionThrottle) return;
+    _lastPositionWriteAt = at;
+    _lastSession = CastSessionRecord(
+      targetPersistJson: record.targetPersistJson,
+      title: record.title,
+      mediaUrl: record.mediaUrl,
+      positionMs: positionMs,
+      endedAt: record.endedAt,
+    );
+    await _persistLastSession();
+  }
+
+  /// 会话结束（手动断开/电视端停止）：只更新 endedAt，不删记录——重启后
+  /// 仍可一键恢复（R1.2）。无记录时 no-op。镜像会话不会到达这里（控制器
+  /// 按会话是否记录过守卫，不会误改上一条记录）。[now] 仅供测试注入时钟。
+  @override
+  Future<void> markSessionEnded({DateTime? now}) async {
+    final record = _lastSession;
+    if (record == null) return;
+    _lastSession = CastSessionRecord(
+      targetPersistJson: record.targetPersistJson,
+      title: record.title,
+      mediaUrl: record.mediaUrl,
+      positionMs: record.positionMs,
+      endedAt: now ?? DateTime.now(),
+    );
+    await _persistLastSession();
+  }
+
+  /// 静默清理（记录损坏时面板/载入侧调用）：删内存 + 落盘键；无键不写盘。
+  @override
+  Future<void> clearLastSession() async {
+    _lastSession = null;
+    _lastPositionWriteAt = null;
+    final existing = await _readJson();
+    if (!existing.containsKey('lastSession')) return;
+    final next = <String, dynamic>{...existing, 'version': formatVersion};
+    next.remove('lastSession');
+    await _writeJson(next);
+    notifyListeners();
+  }
+
+  /// 只更新 `lastSession` 字段：保留文件里的其它键（含未知字段），
+  /// 不触碰设备记忆，也不要求先 `loadFromDisk()`。
+  Future<void> _persistLastSession() async {
+    final existing = await _readJson();
+    await _writeJson(<String, dynamic>{
+      ...existing,
+      'version': formatVersion,
+      'lastSession': _lastSession?.toJson(),
+    });
+    notifyListeners();
+  }
+
+  /// 备份导出剥离 `lastSession`（R1 约束：设备相关，恢复只在本机有意义）。
+  /// 白名单现状是 `cast` 键导出整个 `aquan_cast.json` 裸内容，所以在这里
+  /// 剥键；导入侧 [importData] 本来就不读该键，双向都不出本机。
+  @override
+  Future<Map<String, dynamic>> exportData() async {
+    final data = await super.exportData();
+    data.remove('lastSession');
+    return data;
+  }
 
   /// 设备 → 成功配方（供 `CastController.recipes` 注入，跨启动生效）。
   CastRecipeStore get recipes => _recipes;
@@ -3771,6 +3887,20 @@ class CastStore extends _JsonFileStore {
   @override
   Future<void> loadFromDisk() async {
     final json = await _readJson();
+    // 会话恢复记录（R1.4）：结构损坏 / 目标无法重建（旧 JSON/未知形态）→
+    // 内存置空并静默清理落盘键（卡片不显示）。正常记录原样读回。
+    var sessionKeyBroken = false;
+    final sessionJson = json['lastSession'];
+    if (sessionJson == null) {
+      _lastSession = null;
+    } else if (sessionJson is Map<String, dynamic>) {
+      final record = CastSessionRecord.tryFromJson(sessionJson);
+      _lastSession = record?.resolveTarget() != null ? record : null;
+      if (_lastSession == null) sessionKeyBroken = true;
+    } else {
+      _lastSession = null;
+      sessionKeyBroken = true;
+    }
     _pinned.clear();
     final last = json['lastDevice'];
     if (last is Map<String, dynamic>) {
@@ -3810,6 +3940,11 @@ class CastStore extends _JsonFileStore {
     _loaded = true;
     if (legacy) {
       await _flush();
+    }
+    // 损坏键清理放在 legacy 回写之后：_flush 的 `...existing` 会把坏键带回
+    // 文件，这里再定向删除，保证最终落盘状态干净。
+    if (sessionKeyBroken) {
+      await clearLastSession();
     }
     notifyListeners();
   }

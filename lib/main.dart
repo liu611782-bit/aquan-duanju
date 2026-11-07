@@ -455,9 +455,13 @@ class _AquaAppState extends State<AquaApp> {
       await cast.ensureLoaded();
       await lives.ensureLoaded();
       // M3-4：配方/画像持久化接线（修复 recipeStore 未注入，AC-14
-      // 跨启动命中依赖这里）。
-      CastService.instance
-          .attachStores(recipes: cast.recipes, profiles: cast.profiles);
+      // 跨启动命中依赖这里）。R1：CastStore 兼任会话恢复记录器
+      // （lastSession 持久化 + 一键恢复，cast_session_resume）。
+      CastService.instance.attachStores(
+        recipes: cast.recipes,
+        profiles: cast.profiles,
+        sessionRecorder: cast,
+      );
       // DLNA 接收端（Phase B）：UDN 持久化 + 来投页路由；设置里开着则
       // 直接拉起（失败只进 ErrorLog，不阻断启动）。
       _configureReceiver(cast);

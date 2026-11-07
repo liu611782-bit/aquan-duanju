@@ -225,6 +225,7 @@ class CastController extends ChangeNotifier {
     this.proxyResolver,
     CastRecipeStore? recipeStore,
     CastProfileStore? profileStore,
+    this.sessionRecorder,
   })  : _transportFactory = transportFactory ?? defaultTransportFactory,
         recipes = recipeStore ?? CastRecipeStore(),
         profiles = profileStore;
@@ -239,6 +240,15 @@ class CastController extends ChangeNotifier {
   /// 设备画像（可选）：非 null 时投屏成功/会话收尾同步更新画像并落盘。
   /// 未接线（测试/独立使用）时为 null，不影响任何投屏行为。
   CastProfileStore? profiles;
+
+  /// 会话恢复记录挂点（R1，[CastStore] 实现，bootstrap 注入）：投送成功
+  /// 写全量、轮询进度 10s 节流更新、会话收尾更新 endedAt。null = 不记录，
+  /// [resumeLastSession] 相应返回 false。
+  CastSessionRecorder? sessionRecorder;
+
+  /// 当前会话是否已写入恢复记录：轮询进度与会话收尾只在已记录会话上生效，
+  /// 防止镜像/本地文件会话把上一条记录的进度与时间戳改掉。
+  bool _sessionRecorded = false;
 
   /// mDNS 发现挂点（Chromecast）注入点；null = 用默认 [MdnsDiscovery]。
   final Stream<CastDeviceInfo> Function()? mdnsDiscover;
@@ -672,6 +682,12 @@ class CastController extends ChangeNotifier {
   }
 
   Future<void> _castWith(CastTarget target, CastMedia media) async {
+    // 会话恢复记录取选路前的源 URL（R1.1）：media 在下方会被改写成代理/
+    // 中继产物地址，token 重启后失效，记录必须留可重投的原始地址。
+    final sessionSourceUrl = media.url;
+    final sessionIsMirror = media.isMirror;
+    final sessionIsLocalFile = media.isLocalFile;
+    _sessionRecorded = false;
     _pollTimer?.cancel();
     _currentDevice = target;
     _userStopping = false;
@@ -838,6 +854,15 @@ class CastController extends ChangeNotifier {
       notifyListeners();
       _startPolling();
       unawaited(_startGena(target));
+      // 会话恢复记录（R1.1）：投送成功写全量。尽力而为，失败只进日志，
+      // 绝不让记录写入拖垮已成功的投屏。
+      await _recordSessionStart(
+        target,
+        media,
+        sourceUrl: sessionSourceUrl,
+        isMirror: sessionIsMirror,
+        isLocalFile: sessionIsLocalFile,
+      );
     } on Exception catch (e) {
       // 命中配方失败一次即清空，下次投屏重回梯度扫描。
       if (remembered != null) await _forgetRecipe(target);
@@ -932,6 +957,70 @@ class CastController extends ChangeNotifier {
     } on Exception catch (e) {
       ErrorLog.instance.record('投屏配方重置', e, StackTrace.current);
     }
+  }
+
+  /// 投送成功 → 写会话恢复记录（R1.1）。镜像（无 URL 可恢复）与本地文件
+  /// （记录结构不含路径，恢复不了）会话跳过；[sourceUrl] 是选路前的源
+  /// URL。失败只进 ErrorLog，绝不让记录拖垮投屏成功路径。
+  Future<void> _recordSessionStart(
+    CastTarget target,
+    CastMedia media, {
+    required String sourceUrl,
+    required bool isMirror,
+    required bool isLocalFile,
+  }) async {
+    final recorder = sessionRecorder;
+    if (recorder == null || isMirror || isLocalFile || sourceUrl.isEmpty) {
+      return;
+    }
+    try {
+      await recorder.recordSession(
+        target: target,
+        title: media.title,
+        mediaUrl: sourceUrl,
+        positionMs: media.position.inMilliseconds,
+      );
+      _sessionRecorded = true;
+    } on Exception catch (e, stack) {
+      ErrorLog.instance.record('投屏会话记录', e, stack);
+    }
+  }
+
+  /// 轮询进度 → 恢复记录（R1.1）：10s 节流在 recorder 实现内（CastStore），
+  /// 控制器只透传；失败只进日志。仅已记录会话调用（[_sessionRecorded] 守卫）。
+  Future<void> _recordSessionPosition(Duration position) async {
+    final recorder = sessionRecorder;
+    if (recorder == null) return;
+    try {
+      await recorder.updateSessionPosition(position.inMilliseconds);
+    } on Exception catch (e, stack) {
+      ErrorLog.instance.record('投屏会话进度记录', e, stack);
+    }
+  }
+
+  /// 恢复上次投屏会话（R1.2）：读记录 → 重建 CastTarget → 复用 [castTo]
+  /// 的标准投屏序列（选路/配方/同 IP 降级链照常，不新加报文）→ 记录位置
+  /// >3s 时既有序列自动 seek（DLNA compat.load 与标准三件套都带 position）。
+  ///
+  /// 返回 false = 无可恢复记录（未注入 recorder / 无记录 / 记录或目标
+  /// 损坏）——调用方应静默清理记录并隐藏恢复入口。恢复尝试失败时异常
+  /// 原样上抛（与 [castTo] 同语义；UI 显示固定文案「恢复失败，请重新投屏」，
+  /// 原始异常只进 ErrorLog）。
+  Future<bool> resumeLastSession() async {
+    final record = sessionRecorder?.lastSession;
+    if (record == null) return false;
+    final target = record.resolveTarget();
+    if (target == null) return false;
+    if (record.mediaUrl.isEmpty) return false;
+    await castTo(
+      target,
+      CastMedia(
+        url: record.mediaUrl,
+        title: record.title,
+        position: Duration(milliseconds: record.positionMs),
+      ),
+    );
+    return true;
   }
 
   /// 尝试在当前会话上连投下一集（不回 idle，避免状态闪烁）。
@@ -1118,6 +1207,15 @@ class CastController extends ChangeNotifier {
     _polledAt = DateTime.now();
     _lastRunning = true;
     notifyListeners();
+    // 连播/换集成功 = 新媒体投送成功（R1.1）：恢复记录跟着走到当前集，
+    // 重启后「恢复上次投屏」才与电视实况一致。镜像/本地文件会话内部跳过。
+    unawaited(_recordSessionStart(
+      device,
+      next,
+      sourceUrl: next.url,
+      isMirror: next.isMirror,
+      isLocalFile: next.isLocalFile,
+    ));
     return true;
   }
 
@@ -1201,6 +1299,11 @@ class CastController extends ChangeNotifier {
       _lastTimelineState = poll.transportState;
       CastDiagnostics.instance.recordTimeline(
           'transportState=${poll.transportState.isEmpty ? '未知' : poll.transportState}');
+    }
+    // 会话恢复进度（R1.1）：轮询位置按 10s 节流落盘（recorder 内节流）；
+    // 只在已记录会话上生效（镜像/本地文件会话不动旧记录）。
+    if (_sessionRecorded && poll.position > Duration.zero) {
+      await _recordSessionPosition(poll.position);
     }
     // 换集推送进行中（连投/手动跳集）设备可能短暂上报 STOPPED：不是电视端
     // 主动停止，不打断会话；推送失败时 _autoAdvancing 已复位，下一次轮询
@@ -1305,6 +1408,16 @@ class CastController extends ChangeNotifier {
     _lastTransportState = '';
     _pollFailures = 0;
     _userStopping = false;
+    // 会话恢复记录（R1.1）：断开/电视端停止只更新 endedAt，不删记录——
+    // 重启后仍可恢复。未记录的会话（镜像/本地文件）不动旧记录。
+    if (_sessionRecorded) {
+      try {
+        await sessionRecorder?.markSessionEnded();
+      } on Exception catch (e, stack) {
+        ErrorLog.instance.record('投屏会话收尾记录', e, stack);
+      }
+    }
+    _sessionRecorded = false;
     onNextEpisode = null;
     onEpisodeJump = null;
     transcodeResolver = null;

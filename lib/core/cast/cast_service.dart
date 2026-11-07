@@ -15,12 +15,18 @@ class CastService {
   /// M3-4：把 CastStore 的配方/画像表接到控制器（修复配方持久化未接线，
   /// AC-14 跨启动命中依赖这里）。bootstrap 加载完 CastStore 后调用一次；
   /// 未调用时控制器用内存表（不落盘）。
+  ///
+  /// R1：[sessionRecorder] 传 `CastStore` 实例本身（实现
+  /// [CastSessionRecorder]），投送成功/轮询/会话收尾写 `lastSession`
+  /// 恢复记录；不传 = 不记录，「恢复上次投屏」入口不出现。
   void attachStores({
     required CastRecipeStore recipes,
     CastProfileStore? profiles,
+    CastSessionRecorder? sessionRecorder,
   }) {
     controller.recipes = recipes;
     controller.profiles = profiles;
+    controller.sessionRecorder = sessionRecorder;
   }
 
   /// 设备排序：钉选 > 最近使用 > 在线 > 名称（协议无关，按 target id）。

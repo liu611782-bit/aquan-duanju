@@ -126,6 +126,29 @@ String? castFetchIndicatorText(
   return '电视已来取流（${ok.length} 次 · ${mb.toStringAsFixed(1)} MB，最近 $clock）';
 }
 
+/// 恢复卡片可见性（R1.2 / AC-4）：无活动会话（idle/discovering 都算空闲
+/// ——面板打开期间扫描使 state 停在 discovering）且记录与目标都能重建时
+/// 才显示；记录损坏返回 false（调用方负责静默清理存储键）。
+bool castResumeCardVisible({
+  required CastSessionRecord? record,
+  required bool sessionIdle,
+}) {
+  if (!sessionIdle || record == null) return false;
+  return record.resolveTarget() != null;
+}
+
+/// 恢复卡片整行文案（R1.2）：「上次投到 <设备名>：<标题>（HH:mm）· 恢复」。
+/// HH:mm 取记录的 endedAt（会话最后结束/收尾时刻）。
+String castResumeCardText({
+  required CastSessionRecord record,
+  required CastTarget target,
+}) {
+  String two(int v) => v.toString().padLeft(2, '0');
+  final at = record.endedAt;
+  return '上次投到 ${target.name}：${record.title}'
+      '（${two(at.hour)}:${two(at.minute)}）· 恢复';
+}
+
 /// R3：配方字段的中文标签（诊断面板「当前配方」行；固定文案）。
 const Map<DidlVariant, String> _kDidlLabels = {
   DidlVariant.full: '完整',
@@ -462,6 +485,9 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: theme.colorScheme.outline)),
             const SizedBox(height: 12),
+            // 会话恢复卡片（R1.2）：空闲态且有可恢复记录时显示在设备列表
+            // 上方一行，不阻塞列表；损坏记录静默清理后隐藏。
+            ..._resumeCard(context, theme),
             Flexible(
               child: ListView.builder(
                 shrinkWrap: true,
@@ -586,6 +612,86 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
         ),
       ),
     );
+  }
+
+  /// 恢复上次投屏卡片（R1.2）：空闲态且 lastSession 可重建目标时返回一行
+  /// 卡片，显示在设备列表上方（不阻塞列表）；记录损坏（目标无法重建）→
+  /// 静默清理存储键并隐藏。有活动会话（connecting/casting/stopping）时
+  /// 不显示——扫描中（discovering）仍显示。
+  List<Widget> _resumeCard(BuildContext context, ThemeData theme) {
+    final cast = widget.scope.cast;
+    final state = castController.state;
+    final sessionIdle = state == CastSessionState.idle ||
+        state == CastSessionState.discovering;
+    final record = cast.lastSession;
+    if (!castResumeCardVisible(record: record, sessionIdle: sessionIdle)) {
+      return const [];
+    }
+    final target = record!.resolveTarget();
+    if (target == null) {
+      unawaited(_clearBrokenSessionRecord());
+      return const [];
+    }
+    return [
+      _tvItem(
+        context,
+        label: '恢复上次投屏',
+        onTap: _resumeLastSession,
+        child: ListTile(
+          key: const ValueKey('cast_resume_card'),
+          dense: true,
+          leading:
+              Icon(Icons.history, color: theme.colorScheme.primary),
+          title: Text(
+            castResumeCardText(record: record, target: target),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ),
+    ];
+  }
+
+  /// 一键恢复上次投屏（R1.2）：controller 重建目标后走既有标准投屏序列。
+  /// 成功与「已开始投屏」同语义（pop 'started'，调用方暂停本地）；记录
+  /// 不可恢复 → 静默清理并留在面板；恢复尝试失败 → 固定文案
+  /// 「恢复失败，请重新投屏」，原始异常只进 ErrorLog。
+  Future<void> _resumeLastSession() async {
+    if (_connecting) return;
+    final cast = widget.scope.cast;
+    if (cast.lastSession == null) return;
+    setState(() {
+      _connecting = true;
+      _error = null;
+      _stage = '恢复';
+    });
+    try {
+      final ok = await castController.resumeLastSession();
+      if (!mounted) return;
+      if (!ok) {
+        // 记录不可恢复（无记录/目标损坏）：静默清理并隐藏卡片。
+        await _clearBrokenSessionRecord();
+        if (mounted) setState(() => _connecting = false);
+        return;
+      }
+      _stage = '播放';
+      if (mounted) Navigator.of(context).pop('started');
+    } catch (e, stack) {
+      ErrorLog.instance.record('投屏会话恢复', e, stack);
+      if (!mounted) return;
+      setState(() {
+        _connecting = false;
+        _error = '恢复失败，请重新投屏';
+      });
+    }
+  }
+
+  /// 损坏恢复记录的静默清理（R1.4）：写盘失败也吞掉（卡片本次已隐藏，
+  /// 下次打开面板再试）。
+  Future<void> _clearBrokenSessionRecord() async {
+    try {
+      await widget.scope.cast.clearLastSession();
+    } catch (_) {}
   }
 
   /// 兼容模式三态切换（M5-0 / AC-22）：面板即时写入最近使用设备的配方

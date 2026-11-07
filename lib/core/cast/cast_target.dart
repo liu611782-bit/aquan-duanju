@@ -188,6 +188,92 @@ class CastTarget {
   String toString() => 'CastTarget($protocol, $name, $host)';
 }
 
+/// 最近一次投屏会话记录（`aquan_cast.json` 的 `lastSession` 键，v4 加键）。
+///
+/// 结构固定（PRD R1.1）：`targetPersistJson` + `title` + `mediaUrl` +
+/// `positionMs` + `endedAt`。恢复 = 重建 [CastTarget] 后走既有标准投屏序列
+/// （选路/配方/降级链照常），不新加报文。镜像会话（isMirror）不记录——
+/// 无 URL 可恢复；`mediaUrl` 记录的是选路前的源 URL（代理 token / 本机
+/// 中继产物重启后必然失效，恢复时重新走选路生成新地址）。
+class CastSessionRecord {
+  const CastSessionRecord({
+    required this.targetPersistJson,
+    required this.title,
+    required this.mediaUrl,
+    this.positionMs = 0,
+    required this.endedAt,
+  });
+
+  /// [CastTarget.toPersistJson] 原样（含三协议分支）；恢复时经
+  /// [CastTarget.fromPersistJson] 重建。
+  final Map<String, dynamic> targetPersistJson;
+  final String title;
+
+  /// 选路前的源媒体 URL（非代理/中继产物）。
+  final String mediaUrl;
+  final int positionMs;
+
+  /// 会话结束（断开/电视端停止）时刻；卡片显示 HH:mm 用。
+  final DateTime endedAt;
+
+  Map<String, dynamic> toJson() => {
+        'targetPersistJson': targetPersistJson,
+        'title': title,
+        'mediaUrl': mediaUrl,
+        'positionMs': positionMs,
+        'endedAt': endedAt.millisecondsSinceEpoch,
+      };
+
+  /// 损坏 / 缺关键字段 → null（调用方静默清理，卡片隐藏）。
+  /// 关键字段 = 目标 JSON 是对象、mediaUrl 非空、endedAt 是毫秒时间戳。
+  static CastSessionRecord? tryFromJson(Map<String, dynamic> json) {
+    final target = json['targetPersistJson'];
+    if (target is! Map<String, dynamic>) return null;
+    final mediaUrl = json['mediaUrl'];
+    if (mediaUrl is! String || mediaUrl.isEmpty) return null;
+    final endedAt = json['endedAt'];
+    if (endedAt is! int) return null;
+    final title = json['title'];
+    final positionMs = json['positionMs'];
+    return CastSessionRecord(
+      targetPersistJson: target,
+      title: title is String ? title : '',
+      mediaUrl: mediaUrl,
+      positionMs: positionMs is int ? positionMs : 0,
+      endedAt: DateTime.fromMillisecondsSinceEpoch(endedAt),
+    );
+  }
+
+  /// 重建投屏目标（三协议）；损坏 / 未知形态 → null。
+  CastTarget? resolveTarget() => CastTarget.fromPersistJson(targetPersistJson);
+}
+
+/// 会话恢复记录挂点（控制器注入点，[CastStore] 实现，bootstrap 经
+/// `CastService.attachStores` 接线）。投送成功写全量、轮询进度按 10s 节流
+/// 更新、会话结束只更新 endedAt 不删记录。测试用内存假件注入。
+abstract class CastSessionRecorder {
+  /// 最近一次可恢复会话；null = 无记录（或已损坏清理）。
+  CastSessionRecord? get lastSession;
+
+  /// 投送成功：写全量记录（镜像/本地文件会话由控制器排除，不会到达这里）。
+  Future<void> recordSession({
+    required CastTarget target,
+    required String title,
+    required String mediaUrl,
+    int positionMs = 0,
+  });
+
+  /// 轮询进度更新：实现方按 10s 节流（窗口内调用直接忽略）；无记录 no-op。
+  Future<void> updateSessionPosition(int positionMs);
+
+  /// 会话结束（手动断开/电视端停止）：仅更新 endedAt，不删记录（重启后
+  /// 仍可恢复）。
+  Future<void> markSessionEnded();
+
+  /// 静默清理（记录损坏时）：删内存 + 落盘键；无记录时幂等。
+  Future<void> clearLastSession();
+}
+
 /// 投屏传输层异常（区别于 SoapException，但控制器同等处理）。
 class CastException implements Exception {
   CastException(this.message);
