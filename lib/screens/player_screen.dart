@@ -20,6 +20,7 @@ import '../cli/player_bus.dart';
 import '../core/error_log.dart';
 import '../core/aqua_error.dart';
 import '../core/cast/cast_controller.dart';
+import '../core/cast/cast_relay_probe.dart';
 import '../core/muted_hint.dart';
 import '../core/playback_diagnostics.dart';
 import '../core/player/playback_buffer_monitor.dart';
@@ -2322,14 +2323,21 @@ class _PlayerScreenState extends State<PlayerScreen>
     var needsMirror = false;
     if (playback.contentKey != null) {
       // M3：加密分集走本机中继（ffmpeg 解密转 HLS）。
+      // scope 在 await 前捕获：不摸 await 之后的 context（M4-1 约定）。
+      final api = AppScope.read(context).api;
       try {
-        final relay = await AppScope.read(context).api.castRelayStart(
+        final relay = await api.castRelayStart(
           url: stream.url,
           backupUrl: stream.backupUrl,
           decKey: playback.contentKey!.key,
           audioUrl: playback.playback.audioUrl,
         );
         _relaySession = relay['session'] as String?;
+        // M0-5：跟随中继取流日志进诊断（探针在会话回收时自停）。
+        final relaySession = _relaySession;
+        if (relaySession != null) {
+          CastRelayProbe.instance.watch(api.castRelayStatus, relaySession);
+        }
         castUrl = relay['url'] as String? ?? castUrl;
         _showToast('已启动本机解密中继');
       } on AquaException catch (e) {
@@ -2396,6 +2404,12 @@ class _PlayerScreenState extends State<PlayerScreen>
             audioUrl: pb.playback.audioUrl,
           );
           _relaySession = relay['session'] as String?;
+          // M0-5：连播换集中继也跟随取流日志。
+          final relaySession = _relaySession;
+          if (relaySession != null) {
+            CastRelayProbe.instance
+                .watch(castScope.api.castRelayStatus, relaySession);
+          }
           nextUrl = relay['url'] as String? ?? stream.url;
         } catch (_) {
           return null; // 中继起不来：本轮连播终止，走远端停止路径。
@@ -2432,6 +2446,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _stopRelayIfAny() async {
     final session = _relaySession;
     _relaySession = null;
+    CastRelayProbe.instance.unwatch();
     if (session == null) return;
     try {
       await AppScope.read(context).api.castRelayStop(session);

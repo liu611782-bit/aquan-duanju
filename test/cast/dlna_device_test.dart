@@ -179,6 +179,56 @@ void main() {
     });
   });
 
+  group('authority-only LOCATION + 相对 controlURL（M0.5-5，review §8.6）', () {
+    // hongguo DlnaEndpointResolutionTest 记录的海思/乐播拼接 bug：某些库把
+    // authority-only LOCATION（无路径）与相对 controlURL 拼成
+    // `http://ip:16690AVTransport/...`（丢斜杠）。Dart Uri.resolve 语义正确，
+    // 这些测试锁住该形状，防回归。
+    const authorityOnlyLocation = 'http://192.168.1.5:49152';
+
+    const xml = '''
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <device>
+    <friendlyName>拼接测试</friendlyName>
+    <UDN>uuid:slash-test</UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+        <controlURL>/dev/xxx/control</controlURL>
+      </service>
+    </serviceList>
+  </device>
+</root>''';
+
+    test('authority-only LOCATION + 根相对 controlURL → 完整 URL 不丢斜杠', () {
+      final device =
+          parseDeviceDescription(xml, authorityOnlyLocation);
+      expect(device, isNotNull);
+      expect(device!.controlUrl, 'http://192.168.1.5:49152/dev/xxx/control');
+      expect(device.controlUrl.contains(':49152AVTransport'),
+          isFalse, reason: '不许出现 hongguo 式 host+path 粘连');
+    });
+
+    test('authority-only LOCATION + 无前导斜杠相对路径 → 落在根上', () {
+      final url = rebuildControlUrl(
+        controlUrl: 'AVTransport/control',
+        location: authorityOnlyLocation,
+      );
+      expect(url.toString(), 'http://192.168.1.5:49152/AVTransport/control');
+    });
+
+    test('parseDeviceDescription 全链路：相对路径按 LOCATION 还原', () {
+      final relativeNoSlash = xml.replaceAll(
+          '<controlURL>/dev/xxx/control</controlURL>',
+          '<controlURL>dev/xxx/control</controlURL>');
+      final device =
+          parseDeviceDescription(relativeNoSlash, authorityOnlyLocation);
+      expect(device!.controlUrl,
+          'http://192.168.1.5:49152/dev/xxx/control',
+          reason: 'Uri.resolve 对 authority-only 基址把相对路径落到根');
+    });
+  });
+
   group('v1/v2 JSON 往返', () {
     test('缺新字段的旧 json 可读，缺省空串；新写入带字段', () {
       final old = DlnaDevice.fromPersistJson(<String, dynamic>{

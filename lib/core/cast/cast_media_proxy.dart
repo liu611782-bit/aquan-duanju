@@ -92,30 +92,37 @@ class CastMediaProxy {
   }
 
   /// 登记一个媒体 URL，返回代理 URL。清单（.m3u8）会走改写分支。
-  Future<String?> register(String url, {Map<String, String> headers = const {}}) async {
+  ///
+  /// [targetHost] 是目标设备 controlURL 的 host（M0.5 per-device IP）：
+  /// 提供时对外 URL 的 host 用「到该设备的路由源 IP」（电视拉得到流的
+  /// 地址），探测失败回退全局本机地址。同一媒体投两台设备 = 两个 token
+  /// （上游缓存可共享，不影响正确性）。
+  Future<String?> register(String url,
+      {Map<String, String> headers = const {}, String? targetHost}) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme) return null;
     if (!await start()) return null;
-    final base = baseUrl;
-    if (base == null) return null;
+    final authority = await _advertisedAuthority(targetHost);
+    if (authority == null) return null;
     final token = _addToken(_ProxyEntry(
       kind: _isPlaylist(uri) ? _ProxyKind.playlist : _ProxyKind.stream,
       url: uri,
       headers: Map.of(headers),
+      advertisedHost: _hostOfAuthority(authority),
     ));
-    return '$base/p/$token';
+    return 'http://$authority/p/$token';
   }
 
   /// 登记字幕：SRT 拉取转 VTT 静态伺服；VTT/其他走直通。
   Future<String?> registerSubtitle(String url,
-      {Map<String, String> headers = const {}}) async {
+      {Map<String, String> headers = const {}, String? targetHost}) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme) return null;
     final isSrt = uri.path.toLowerCase().endsWith('.srt');
-    if (!isSrt) return register(url, headers: headers);
+    if (!isSrt) return register(url, headers: headers, targetHost: targetHost);
     if (!await start()) return null;
-    final base = baseUrl;
-    if (base == null) return null;
+    final authority = await _advertisedAuthority(targetHost);
+    if (authority == null) return null;
     try {
       final body = await _fetchText(uri, headers, null);
       final vtt = utf8.encode(srtToVtt(body));
@@ -123,11 +130,32 @@ class CastMediaProxy {
         kind: _ProxyKind.static,
         bytes: vtt,
         contentType: 'text/vtt',
+        advertisedHost: _hostOfAuthority(authority),
       ));
-      return '$base/p/$token';
+      return 'http://$authority/p/$token';
     } catch (_) {
       return null;
     }
+  }
+
+  /// 该 token 对外广播的 authority（`host:port`）：目标设备的路由源 IP
+  /// 优先，回退全局本机地址（M0.5 per-device IP；服务端 bind 仍 anyIPv4，
+  /// 改的只是广播出去的 URL host）。
+  Future<String?> _advertisedAuthority(String? targetHost) async {
+    final server = _socket;
+    if (server == null) return null;
+    if (targetHost != null && targetHost.isNotEmpty) {
+      final routed = await LocalMediaServer.resolveRouteSourceIp(targetHost);
+      if (routed != null) return '$routed:${server.port}';
+    }
+    final local = _localAddress;
+    return local == null ? null : '$local:${server.port}';
+  }
+
+  /// 从 `host:port`（或裸 host）里取 host 段（本服务只产生 IPv4 host）。
+  static String? _hostOfAuthority(String authority) {
+    final idx = authority.lastIndexOf(':');
+    return idx <= 0 ? authority : authority.substring(0, idx);
   }
 
   // ---------------------------------------------------------------------------
@@ -172,6 +200,7 @@ class CastMediaProxy {
     final rawTarget = requestLine[1];
     String? range;
     String? userAgent;
+    String? hostHeader;
     for (final line in lines.skip(1)) {
       final idx = line.indexOf(':');
       if (idx <= 0) continue;
@@ -180,6 +209,8 @@ class CastMediaProxy {
         range = line.substring(idx + 1).trim();
       } else if (key == 'user-agent') {
         userAgent = line.substring(idx + 1).trim();
+      } else if (key == 'host') {
+        hostHeader = line.substring(idx + 1).trim();
       }
     }
     final path = Uri.tryParse(rawTarget)?.path ?? '';
@@ -203,7 +234,7 @@ class CastMediaProxy {
       case _ProxyKind.static:
         served = _serveStatic(socket, method, entry);
       case _ProxyKind.playlist:
-        served = _servePlaylist(socket, method, entry);
+        served = _servePlaylist(socket, method, entry, hostHeader);
       case _ProxyKind.stream:
         served = _serveStream(socket, method, entry, range);
     }
@@ -233,9 +264,16 @@ class CastMediaProxy {
   }
 
   /// HLS 清单：拉取文本 → 重写 URI 为代理 token → 伺服；返回供埋点。
-  Future<(int, int)> _servePlaylist(Socket socket, String method, _ProxyEntry entry) async {
+  ///
+  /// 子 URL 的 host 按「两段机制」（review §8.3）选：优先本次请求的 Host
+  /// 头——电视能取到父 URL 就必然可达同一 host:port；无 Host 头退回登记
+  /// 时设备 IP；最后退回全局本机地址。服务端 bind 仍是 anyIPv4，只改
+  /// 「广播出去的 URL host」。
+  Future<(int, int)> _servePlaylist(
+      Socket socket, String method, _ProxyEntry entry, String? hostHeader) async {
     final text = await _fetchText(entry.url!, entry.headers, null);
-    final rewritten = await _rewritePlaylist(text, entry.url!, entry.headers);
+    final rewritten = await _rewritePlaylist(text, entry.url!, entry.headers,
+        _rewriteAuthority(hostHeader, entry.advertisedHost));
     final bytes = utf8.encode(rewritten);
     final head = StringBuffer()
       ..write('HTTP/1.1 200 OK\r\n')
@@ -369,7 +407,8 @@ class CastMediaProxy {
   // 清单改写
   // ---------------------------------------------------------------------------
 
-  Future<String> _rewritePlaylist(String text, Uri base, Map<String, String> headers) async {
+  Future<String> _rewritePlaylist(String text, Uri base,
+      Map<String, String> headers, String authority) async {
     final out = StringBuffer();
     for (final rawLine in const LineSplitter().convert(text)) {
       final line = rawLine.trim();
@@ -378,30 +417,67 @@ class CastMediaProxy {
         continue;
       }
       if (line.startsWith('#')) {
-        out.writeln(await _rewriteUriAttributes(line, base, headers));
+        out.writeln(await _rewriteUriAttributes(line, base, headers, authority));
         continue;
       }
-      out.writeln(await _childUrl(line, base, headers) ?? line);
+      out.writeln(await _childUrl(line, base, headers, authority) ?? line);
     }
     return out.toString();
   }
 
   Future<String> _rewriteUriAttributes(
-      String line, Uri base, Map<String, String> headers) async {
+      String line, Uri base, Map<String, String> headers, String authority) async {
     final uris =
         RegExp('URI="([^"]+)"').allMatches(line).map((m) => m.group(1)!).toList();
     var result = line;
     for (final uri in uris) {
-      final proxied = await _childUrl(uri, base, headers);
+      final proxied = await _childUrl(uri, base, headers, authority);
       if (proxied != null) result = result.replaceFirst('URI="$uri"', 'URI="$proxied"');
     }
     return result;
   }
 
-  Future<String?> _childUrl(String rawUri, Uri base, Map<String, String> headers) async {
+  Future<String?> _childUrl(
+      String rawUri, Uri base, Map<String, String> headers, String authority) async {
     final resolved = _resolveAgainst(rawUri, base);
     if (resolved == null) return null;
-    return register(resolved.toString(), headers: headers);
+    return _registerWithAuthority(resolved, headers, authority);
+  }
+
+  /// 子 URL 改写用的 authority（`host:port`）：优先电视本次请求的 Host 头，
+  /// 退回登记时设备 IP [entryHost]，最后退回全局本机地址。
+  ///
+  /// Host 头没带端口（或登记 IP 是裸 host）时补上本服务端口——本服务
+  /// 不可能跑在 80 端口语义之外的「无端口」形态，补齐才是可达地址。
+  String _rewriteAuthority(String? requestHost, String? entryHost) {
+    final server = _socket;
+    if (server == null) return '';
+    if (requestHost != null && requestHost.isNotEmpty) {
+      return requestHost.contains(':')
+          ? requestHost
+          : '$requestHost:${server.port}';
+    }
+    if (entryHost != null && entryHost.isNotEmpty) {
+      return entryHost.contains(':') ? entryHost : '$entryHost:${server.port}';
+    }
+    final local = _localAddress;
+    return local == null ? '' : '$local:${server.port}';
+  }
+
+  /// 登记一个上游 URL 并用给定 authority 生成对外 URL（清单子 URL 专用：
+  /// host 已由父请求/登记时的设备决定，不再按目标探测）。
+  /// [authority] 为空时退回 [register] 的默认解析。
+  Future<String?> _registerWithAuthority(
+      Uri uri, Map<String, String> headers, String authority) async {
+    if (authority.isEmpty) return register(uri.toString(), headers: headers);
+    if (!await start()) return null;
+    final token = _addToken(_ProxyEntry(
+      kind: _isPlaylist(uri) ? _ProxyKind.playlist : _ProxyKind.stream,
+      url: uri,
+      headers: Map.of(headers),
+      advertisedHost: _hostOfAuthority(authority),
+    ));
+    return 'http://$authority/p/$token';
   }
 
   // ---------------------------------------------------------------------------
@@ -506,6 +582,7 @@ class _ProxyEntry {
     this.headers = const {},
     this.bytes,
     this.contentType = 'application/octet-stream',
+    this.advertisedHost,
   });
 
   final _ProxyKind kind;
@@ -513,4 +590,8 @@ class _ProxyEntry {
   final Map<String, String> headers;
   final List<int>? bytes;
   final String contentType;
+
+  /// 登记时对外广播的设备 IP（M0.5）：清单子 URL 在电视请求时才改写，
+  /// 无 Host 头时退回这里（review §8.3 两段机制的第二段）。
+  final String? advertisedHost;
 }

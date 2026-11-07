@@ -40,15 +40,27 @@ type relayOptions struct {
 
 // relaySessionInfo 是 castRelayStart/Status 的出参。
 type relaySessionInfo struct {
-	Session   string `json:"session"`
-	Token     string `json:"token"`
-	Port      int    `json:"port"`
-	URL       string `json:"url"`
-	Format    string `json:"format"`
-	Encrypted bool   `json:"encrypted"`
-	UptimeMs  int64  `json:"uptimeMs"`
-	Segments  int    `json:"segments"`
-	Ready     bool   `json:"ready"`
+	Session   string             `json:"session"`
+	Token     string             `json:"token"`
+	Port      int                `json:"port"`
+	URL       string             `json:"url"`
+	Format    string             `json:"format"`
+	Encrypted bool               `json:"encrypted"`
+	UptimeMs  int64              `json:"uptimeMs"`
+	Segments  int                `json:"segments"`
+	Ready     bool               `json:"ready"`
+	Recent    []relayAccessEntry `json:"recent,omitempty"` // 电视取流环形日志（M0-5）
+}
+
+// relayAccessEntry 是一条电视取流记录（M0-5）：时间/路径/Range/UA/状态码/字节数。
+type relayAccessEntry struct {
+	Seq    int64  `json:"seq"` // 单调递增：Dart 侧按它去重新增记录
+	At     string `json:"at"`  // 本地时间 HH:MM:SS
+	Path   string `json:"path"`
+	Range  string `json:"range,omitempty"`
+	UA     string `json:"ua,omitempty"`
+	Status int    `json:"status"`
+	Bytes  int64  `json:"bytes"`
 }
 
 type relaySession struct {
@@ -63,6 +75,13 @@ type relaySession struct {
 	ready      bool
 	encrypted  bool
 
+	// 电视取流环形日志（M0-5）：最近 relayAccessLogSize 条。
+	// 独立小锁：info() 会在持 relayMu 的调用点（castRelayStatus）里读取，
+	// sync.Mutex 不可重入，共用 relayMu 会死锁。
+	logMu     sync.Mutex
+	accessLog []relayAccessEntry
+	logSeq    int64
+
 	// waitCh 在 ffmpeg 退出时关闭；waitErr 记录退出原因。
 	// 不依赖 cmd.ProcessState：未调用 Wait() 时它恒为 nil，快检会失效。
 	waitCh  chan struct{}
@@ -76,9 +95,10 @@ var (
 )
 
 const (
-	relayBasePort    = 29170
-	relayIdleTimeout = 5 * time.Minute
-	relayFastWait    = 3 * time.Second
+	relayBasePort      = 29170
+	relayIdleTimeout   = 5 * time.Minute
+	relayFastWait      = 3 * time.Second
+	relayAccessLogSize = 32 // 电视取流环形日志容量
 )
 
 // 中继层哨兵错误：注册进 errorCodes 表（core.go），Dart 按 code 分级文案。
@@ -158,12 +178,7 @@ func castRelayStart(opts relayOptions) (*relaySessionInfo, error) {
 	}()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/cast/"+token+"/", func(w http.ResponseWriter, r *http.Request) {
-		session.touch()
-		name := strings.TrimPrefix(r.URL.Path, "/cast/"+token+"/")
-		name = filepath.Base(name) // 防 ../ 穿越
-		http.ServeFile(w, r, filepath.Join(dir, name))
-	})
+	mux.HandleFunc("/cast/"+token+"/", session.serveCastFile)
 	session.srv.Handler = mux
 	go func() {
 		_ = srv.Serve(ln) // 端口已预先绑定，不存在二次绑定竞态
@@ -250,6 +265,7 @@ func (s *relaySession) info() *relaySessionInfo {
 		UptimeMs:  time.Since(s.startedAt).Milliseconds(),
 		Segments:  segments,
 		Ready:     s.ready,
+		Recent:    s.recentAccess(),
 	}
 }
 
@@ -566,13 +582,77 @@ func relayStatus(sessionID string) (*relaySessionInfo, error) {
 // （端口已由 listenOnFreePort 预绑定，不存在二次绑定竞态）。
 func serveCastFiles(s *relaySession, ln net.Listener) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/cast/"+s.token+"/", func(w http.ResponseWriter, r *http.Request) {
-		s.touch()
-		name := filepath.Base(strings.TrimPrefix(r.URL.Path, "/cast/"+s.token+"/"))
-		http.ServeFile(w, r, filepath.Join(s.dir, name))
-	})
+	mux.HandleFunc("/cast/"+s.token+"/", s.serveCastFile)
 	s.srv.Handler = mux
 	go func() {
 		_ = s.srv.Serve(ln)
 	}()
+}
+
+// serveCastFile 伺服单个清单/分片并记录电视取流日志（M0-5）。
+// http.ServeFile 自己处理 Range/206/416：用 accessRecorder 包一层拿状态码与字节数。
+func (s *relaySession) serveCastFile(w http.ResponseWriter, r *http.Request) {
+	s.touch()
+	rec := &accessRecorder{ResponseWriter: w, status: http.StatusOK}
+	name := strings.TrimPrefix(r.URL.Path, "/cast/"+s.token+"/")
+	name = filepath.Base(name) // 防 ../ 穿越
+	http.ServeFile(rec, r, filepath.Join(s.dir, name))
+	s.recordAccess(r, rec.status, rec.bytes)
+}
+
+// accessRecorder 包装 ResponseWriter，捕获状态码与写给电视的字节数（取流日志）。
+type accessRecorder struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+	bytes       int64
+}
+
+func (w *accessRecorder) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *accessRecorder) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(p)
+	w.bytes += int64(n)
+	return n, err
+}
+
+// recordAccess 追加一条电视取流记录（环形，超过 relayAccessLogSize 淘汰最旧）。
+func (s *relaySession) recordAccess(r *http.Request, status int, bytes int64) {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	s.logSeq++
+	s.accessLog = append(s.accessLog, relayAccessEntry{
+		Seq:    s.logSeq,
+		At:     time.Now().Format("15:04:05"),
+		Path:   r.URL.Path,
+		Range:  r.Header.Get("Range"),
+		UA:     r.Header.Get("User-Agent"),
+		Status: status,
+		Bytes:  bytes,
+	})
+	if len(s.accessLog) > relayAccessLogSize {
+		s.accessLog = s.accessLog[len(s.accessLog)-relayAccessLogSize:]
+	}
+}
+
+// recentAccess 快照最近取流记录（供 info() 组装，避免与 relayMu 嵌套）。
+func (s *relaySession) recentAccess() []relayAccessEntry {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if len(s.accessLog) == 0 {
+		return nil
+	}
+	out := make([]relayAccessEntry, len(s.accessLog))
+	copy(out, s.accessLog)
+	return out
 }

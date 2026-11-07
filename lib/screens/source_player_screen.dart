@@ -10,6 +10,7 @@ import '../core/player/player_engine.dart';
 import '../core/player/mpv_headers.dart';
 import '../core/player/playback_failure_gate.dart';
 import '../core/cast/cast_controller.dart';
+import '../core/cast/cast_relay_probe.dart';
 import '../core/aqua_api.dart';
 import '../core/bili/api.dart';
 import '../core/error_log.dart';
@@ -741,6 +742,11 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
         );
         _castRelayApi = scope.api;
         _castRelaySession = relay['session'] as String?;
+        // M0-5：跟随中继取流日志进诊断（探针在会话回收时自停）。
+        final session = _castRelaySession;
+        if (session != null) {
+          CastRelayProbe.instance.watch(scope.api.castRelayStatus, session);
+        }
         return CastMedia(
           url: relay['url'] as String? ?? resolved.videoUrl,
           title: title,
@@ -767,6 +773,7 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
   void _stopCastRelay() {
     final session = _castRelaySession;
     _castRelaySession = null;
+    CastRelayProbe.instance.unwatch();
     final api = _castRelayApi;
     if (session != null && api != null) {
       api.castRelayStop(session).catchError((_) {});

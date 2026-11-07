@@ -3,8 +3,12 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -178,5 +182,103 @@ func TestRelayInfoJSON(t *testing.T) {
 		if !strings.Contains(string(raw), field) {
 			t.Fatalf("缺少字段 %s: %s", field, raw)
 		}
+	}
+}
+
+// TestRelayAccessLog：电视取流环形日志（M0-5）——记录时间/路径/Range/UA/
+// 状态码/字节数，经 castRelayStatus 的 recent 字段返回；环形上限淘汰最旧。
+// HTTP 客户端必须 Proxy:nil（中继是局域网直连语义，与 castrelay 上游同坑）。
+func TestRelayAccessLog(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.m3u8"), []byte("#EXTM3U\n#EXTINF:4.0,\nseg0.ts\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &relaySession{
+		id: "s1", token: "tok1234567890abcdef", dir: dir,
+		startedAt: time.Now(), lastAccess: time.Now(),
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/cast/"+s.token+"/", s.serveCastFile)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	defer func() { _ = srv.Close() }()
+	base := fmt.Sprintf("http://127.0.0.1:%d/cast/%s", ln.Addr().(*net.TCPAddr).Port, s.token)
+
+	// 直连客户端：绕过系统代理。
+	direct := &http.Client{Transport: &http.Transport{Proxy: nil}}
+
+	// 1) 带 Range + UA 的正常取流。
+	req, err := http.NewRequest("GET", base+"/index.m3u8", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Range", "bytes=0-1")
+	req.Header.Set("User-Agent", "TV-UA/1.0")
+	resp, err := direct.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	// ServeFile 按 Range 正确回 206（2 字节）——记录的状态码就是给电视的形态。
+	if resp.StatusCode != 206 || len(body) != 2 {
+		t.Fatalf("Range 取流应 206/2B: %d %dB", resp.StatusCode, len(body))
+	}
+
+	// 2) 缺失文件 → 404 也必须记录（诊断「电视拉了但没拉到」依赖它）。
+	resp2, err := direct.Get(base + "/missing.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+
+	recent := s.recentAccess()
+	if len(recent) != 2 {
+		t.Fatalf("应有 2 条取流记录: %d", len(recent))
+	}
+	first, second := recent[0], recent[1]
+	if first.Status != 206 || first.Range != "bytes=0-1" || first.UA != "TV-UA/1.0" {
+		t.Fatalf("首条记录字段不符: %+v", first)
+	}
+	if first.Path != "/cast/"+s.token+"/index.m3u8" || first.At == "" || first.Seq <= 0 {
+		t.Fatalf("首条记录字段不符: %+v", first)
+	}
+	if first.Bytes != int64(len(body)) {
+		t.Fatalf("字节数不符: got %d want %d", first.Bytes, len(body))
+	}
+	if second.Status != 404 {
+		t.Fatalf("404 也应记录: %+v", second)
+	}
+	if second.Seq <= first.Seq {
+		t.Fatalf("seq 应单调递增: %d -> %d", first.Seq, second.Seq)
+	}
+
+	// 3) recent 经 info() 进 castRelayStatus 出参（FFI 契约）。
+	raw, err := json.Marshal(s.info())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"recent"`, `"seq"`, `"path"`, `"status"`, `"bytes"`} {
+		if !strings.Contains(string(raw), field) {
+			t.Fatalf("出参缺少字段 %s: %s", field, raw)
+		}
+	}
+
+	// 4) 环形上限：超过 relayAccessLogSize 淘汰最旧，seq 仍连续。
+	for i := 0; i < relayAccessLogSize+5; i++ {
+		s.recordAccess(&http.Request{URL: &url.URL{Path: "/cast/" + s.token + "/seg.ts"}, Header: http.Header{}}, 200, int64(i))
+	}
+	recent = s.recentAccess()
+	if len(recent) != relayAccessLogSize {
+		t.Fatalf("环形日志应封顶 %d: %d", relayAccessLogSize, len(recent))
+	}
+	// 环形淘汰后：首条 seq = 末条 seq - 容量 + 1（seq 连续无缺口）。
+	lastSeq := recent[len(recent)-1].Seq
+	if recent[0].Seq != lastSeq-int64(relayAccessLogSize)+1 {
+		t.Fatalf("环形淘汰后 seq 不连续: 首条 %d 末条 %d", recent[0].Seq, lastSeq)
 	}
 }

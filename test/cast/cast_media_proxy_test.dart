@@ -141,9 +141,13 @@ void main() {
     final playlist = await res.transform(utf8.decoder).join();
     expect(playlist, isNot(contains('/secret.key')),
         reason: 'KEY URI 必须被改写');
-    expect(playlist, contains('#EXT-X-KEY:METHOD=AES-128,URI="http://192.168.1.5:'));
-    expect(playlist, contains('URI="http://192.168.1.5:'), reason: '属性 URI 代理化');
-    expect(playlist.contains('#EXTINF:4.0,\nhttp://192.168.1.5:'), isTrue,
+    // 两段机制（review §8.3）：子 URL 优先用本次请求的 Host 头——本测试
+    // 用 127.0.0.1 取父清单，子 URL 也必须广播 127.0.0.1:port。
+    final authority = 'http://127.0.0.1:${proxy.port}';
+    expect(
+        playlist, contains('#EXT-X-KEY:METHOD=AES-128,URI="$authority'));
+    expect(playlist, contains('URI="$authority'), reason: '属性 URI 代理化');
+    expect(playlist.contains('#EXTINF:4.0,\n$authority'), isTrue,
         reason: '裸分片行代理化');
 
     // 从改写后的清单里取一个代理 URL 再请求 → 二级清单再改写。
@@ -153,9 +157,46 @@ void main() {
         .getUrl(localOf(childMatch!.group(1)!))
         .then((r) => r.close());
     final variantText = await variant.transform(utf8.decoder).join();
-    expect(variantText.contains('http://192.168.1.5:'), isTrue,
+    expect(variantText.contains(authority), isTrue,
         reason: '嵌套清单同样被改写');
     client.close();
+  });
+
+  test('无 Host 头的请求：子 URL 退回登记时的设备 IP（两段机制第二段）', () async {
+    final proxied = await proxy.register(
+      'http://127.0.0.1:${upstream.port}/list.m3u8',
+    );
+    final token = Uri.parse(proxied!).pathSegments[1];
+    // 原始 socket 发不带 Host 头的请求（HttpClient 恒带 Host，只能手写）。
+    final socket =
+        await Socket.connect(InternetAddress.loopbackIPv4, proxy.port!);
+    socket.add(utf8.encode('GET /p/$token HTTP/1.1\r\nConnection: close\r\n\r\n'));
+    final text = await utf8.decoder.bind(socket).join();
+    await socket.close();
+    expect(text.contains('http://192.168.1.5:'), isTrue,
+        reason: '无 Host 头时退回登记时的设备 IP（hostOverride）');
+    expect(text, contains('#EXTM3U'));
+  });
+
+  test('register 带 targetHost：对外 URL host = 路由源 IP（AC-19）', () async {
+    // 到 127.0.0.1 的路由源就是 127.0.0.1（回环探测在全平台确定）。
+    final proxied = await proxy.register(
+      'http://127.0.0.1:${upstream.port}/seg1.ts',
+      targetHost: '127.0.0.1',
+    );
+    expect(Uri.parse(proxied!).host, '127.0.0.1',
+        reason: '对外 URL 的 host 必须是到目标设备的路由源 IP');
+    // host 只是广播形态：伺服 bind anyIPv4，走 127.0.0.1 照常拉到。
+    final client = HttpClient();
+    final res = await client.getUrl(Uri.parse(proxied)).then((r) => r.close());
+    expect(res.statusCode, 200);
+    client.close();
+  });
+
+  test('register 不带 targetHost：保持全局 hostOverride 形态（回归）', () async {
+    final proxied =
+        await proxy.register('http://127.0.0.1:${upstream.port}/seg1.ts');
+    expect(Uri.parse(proxied!).host, '192.168.1.5');
   });
 
   test('SRT 字幕：拉取转 VTT 伺服（text/vtt + WEBVTT 头 + 毫秒点号）', () async {

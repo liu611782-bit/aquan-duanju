@@ -342,8 +342,14 @@ class CastController extends ChangeNotifier {
   /// 受保护流/字幕代理（默认实现；proxyResolver 注入可整体替换）。
   final CastMediaProxy _castProxy = CastMediaProxy();
 
-  Future<String?> _defaultProxyResolve(String url, Map<String, String> headers) =>
-      _castProxy.register(url, headers: headers);
+  /// 受保护流代理登记：默认走 [CastMediaProxy.register] 并按目标设备取
+  /// 路由源 IP（M0.5 per-device IP）；注入的 [proxyResolver] 不感知目标
+  /// 设备（测试/替代实现），行为保持不变。
+  Future<String?> _proxyResolve(String url, Map<String, String> headers,
+          {String? targetHost}) =>
+      proxyResolver != null
+          ? proxyResolver!(url, headers)
+          : _castProxy.register(url, headers: headers, targetHost: targetHost);
 
   /// 字幕投送前的准备：带源站头的字幕必须经代理；Chromecast 的 SRT 转 VTT。
   Future<Uri?> _prepareSubtitle(CastTarget target, CastMedia media) async {
@@ -355,7 +361,8 @@ class CastController extends ChangeNotifier {
         (target.protocol == CastProtocol.chromecast &&
             raw.toLowerCase().endsWith('.srt'));
     if (!needsProxy) return uri;
-    final proxied = await _castProxy.registerSubtitle(raw, headers: media.headers);
+    final proxied = await _castProxy.registerSubtitle(raw,
+        headers: media.headers, targetHost: target.host);
     return proxied == null ? uri : Uri.tryParse(proxied);
   }
 
@@ -396,7 +403,8 @@ class CastController extends ChangeNotifier {
 
     var playUrl = media.url;
     if (media.isLocalFile) {
-      final served = await _mediaServer.urlFor(media.localPath);
+      // M0.5：按目标设备取路由源 IP 生成对外 URL（电视拉得到流的地址）。
+      final served = await _mediaServer.urlFor(media.localPath, targetHost: target.host);
       if (served == null) {
         _state = CastSessionState.idle;
         _currentDevice = null;
@@ -406,8 +414,8 @@ class CastController extends ChangeNotifier {
       playUrl = served;
     } else if (media.headers.isNotEmpty) {
       // 带源站头的直链：经本机代理中转（电视无法自带 Referer/UA）。
-      final resolve = proxyResolver ?? _defaultProxyResolve;
-      final proxied = await resolve(media.url, media.headers);
+      final proxied = await _proxyResolve(media.url, media.headers,
+          targetHost: target.host);
       if (proxied != null) playUrl = proxied;
     }
     final subtitleUri = await _prepareSubtitle(target, media);
@@ -506,23 +514,22 @@ class CastController extends ChangeNotifier {
     }
   }
 
-  /// 诊断目标字段（M0）：本机服务 base 与监听端口来自会话字段；
-  /// 直投公网 URL 时两者为空态（M0.5 接线路由源 IP）。纯采集。
+  /// 诊断目标字段（M0.5 接真实值）：本机伺服（本地文件/代理）时投屏 URL
+  /// 的 host 就是按目标设备解析出的路由源 IP（per-device IP）；
+  /// 直投公网 URL 时 IP/端口为空态。纯采集。
   void _traceTarget(CastMedia media) {
-    String? servingBase;
+    final uri = Uri.tryParse(media.url);
+    final servedLocally = media.isLocalFile || media.headers.isNotEmpty;
     int? servingPort;
     if (media.isLocalFile) {
-      servingBase = _mediaServer.baseUrl;
       servingPort = _mediaServer.port;
     } else if (media.headers.isNotEmpty) {
-      servingBase = _castProxy.baseUrl;
       servingPort = _castProxy.port;
     }
     CastDiagnostics.instance.recordTimeline(
         '媒体地址：${media.isLocalFile ? '本地文件' : (media.headers.isNotEmpty ? '本机代理' : '直投')}');
     CastDiagnostics.instance.setTarget(
-      selectedIp:
-          servingBase == null ? null : Uri.tryParse(servingBase)?.host,
+      selectedIp: servedLocally ? uri?.host : null,
       mediaPort: servingPort,
       mediaUrl: media.url,
     );
@@ -562,12 +569,13 @@ class CastController extends ChangeNotifier {
       if (next == null) return false;
       var playUrl = next.url;
       if (next.isLocalFile) {
-        final served = await _mediaServer.urlFor(next.localPath);
+        final served =
+            await _mediaServer.urlFor(next.localPath, targetHost: device.host);
         if (served == null) return false;
         playUrl = served;
       } else if (next.headers.isNotEmpty) {
-        final resolve = proxyResolver ?? _defaultProxyResolve;
-        final proxied = await resolve(next.url, next.headers);
+        final proxied = await _proxyResolve(next.url, next.headers,
+            targetHost: device.host);
         if (proxied != null) playUrl = proxied;
       }
       final subtitleUri = await _prepareSubtitle(device, next);

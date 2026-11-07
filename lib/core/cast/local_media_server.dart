@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+
+import 'package:ffi/ffi.dart';
 
 import 'cast_diagnostics.dart';
 
@@ -102,12 +105,23 @@ class LocalMediaServer {
   /// 把一个文件登记进服务，返回可直接投给电视的 URL。
   ///
   /// 服务未启动时自动启动；启动失败返回 null。
-  Future<String?> urlFor(String filePath) async {
+  ///
+  /// [targetHost] 是目标设备 controlURL 的 host（M0.5 per-device IP）：
+  /// 提供时对外 URL 的 host 用「到该设备的路由源 IP」（电视拉得到流的
+  /// 地址），探测失败回退登记时的全局本机地址。同一媒体投两台设备 =
+  /// 两个 token，互不影响。
+  Future<String?> urlFor(String filePath, {String? targetHost}) async {
     if (!await start()) return null;
     final token = _register(filePath);
-    final base = baseUrl;
-    if (base == null) return null;
-    return '$base/m/$token';
+    final server = _socket;
+    if (server == null) return null;
+    String? host;
+    if (targetHost != null && targetHost.isNotEmpty) {
+      host = await resolveRouteSourceIp(targetHost);
+    }
+    host ??= _localAddress;
+    if (host == null) return null;
+    return 'http://$host:${server.port}/m/$token';
   }
 
   String _register(String filePath) {
@@ -315,25 +329,235 @@ class LocalMediaServer {
     return _ByteRange(start, end, partial: true);
   }
 
-  /// 私网 IPv4 探测（192.168.* > 10.* > 172.16-31；跳过回环）。
+  /// 私网 IPv4 探测（192.168.* > 10.* > 172.16-31；跳过回环与虚拟网卡）。
   /// 供本目录各本地服务（媒体服务/代理）共用。
   static Future<String?> resolveLanIPv4() => _resolveLocalAddress();
 
-  static Future<String?> _resolveLocalAddress() async {
+  /// 到 [targetHost]（目标设备 controlURL 的 host）的路由源 IP（M0.5 P0b）。
+  ///
+  /// 多网卡 Windows 上「第一个私网地址」常落在 WSL/Hyper-V/VMware 等虚拟
+  /// 交换机上，电视根本不可达（review §2.1 的最可疑根因：旧实现直接返回
+  /// 第一个私网地址，注释承诺的优先级从未生效）。这里按「到该设备的路由」
+  /// 取本机源 IP：
+  ///
+  /// - Windows：iphlpapi `GetBestInterface` 查到目标的最优路由接口，再由
+  ///   `GetIpAddrTable` 取该接口地址——纯路由表查询，**不发出任何数据包**。
+  ///   go2tv `iptools.go` 的 UDP `connect()` 在 Dart 没有对应 API
+  ///   （[RawDatagramSocket] 无 connect 方法，实测确认），这是同语义的
+  ///   Windows 实现；
+  /// - 回退：本机枚举，按 `192.168.* > 10.* > 172.16-31` 排序、跳过虚拟
+  ///   网卡（[rankInterfaceAddresses]），与目标同 /24 的地址优先。
+  ///
+  /// 整体限时 [timeout]（默认 800ms）；任何失败都回退枚举，绝不抛出。
+  static Future<String?> resolveRouteSourceIp(
+    String targetHost, {
+    Duration timeout = const Duration(milliseconds: 800),
+  }) async {
+    if (targetHost.isEmpty) return resolveLanIPv4();
+    try {
+      final targets = await _resolveTargetAddresses(targetHost).timeout(timeout);
+      for (final address in targets) {
+        if (address.isLoopback) return address.address;
+        final routed = windowsRouteSourceIp(address);
+        if (routed != null) return routed;
+      }
+    } catch (_) {
+      // 超时/域名解析失败/FFI 异常：走回退枚举。
+    }
+    return _resolveLocalAddress(targetHost: targetHost);
+  }
+
+  static Future<List<InternetAddress>> _resolveTargetAddresses(String host) async {
+    final direct = InternetAddress.tryParse(host);
+    if (direct != null) return <InternetAddress>[direct];
+    return InternetAddress.lookup(host, type: InternetAddressType.IPv4);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Windows 路由表查询（iphlpapi；无网络包）
+  // ---------------------------------------------------------------------------
+
+  static final DynamicLibrary? _iphlpapi = () {
+    if (!Platform.isWindows) return null;
+    try {
+      return DynamicLibrary.open('iphlpapi.dll');
+    } catch (_) {
+      return null;
+    }
+  }();
+
+  // DWORD GetBestInterface(IPAddr dwDestAddr, PDWORD pdwBestIfIndex);
+  static final _getBestInterface = _iphlpapi?.lookupFunction<
+      Int32 Function(Uint32, Pointer<Uint32>),
+      int Function(int, Pointer<Uint32>)>('GetBestInterface');
+
+  // DWORD GetIpAddrTable(PMIB_IPADDRTABLE pIpAddrTable, PULONG pdwSize, BOOL bOrder);
+  static final _getIpAddrTable = _iphlpapi?.lookupFunction<
+      Int32 Function(Pointer<Uint32>, Pointer<Uint32>, Int32),
+      int Function(Pointer<Uint32>, Pointer<Uint32>, int)>('GetIpAddrTable');
+
+  /// MIB_IPADDRROW = 24 字节（6 个 32 位字）。
+  static const int _ipAddrRowDwords = 6;
+
+  /// MIB_IPADDRTABLE 初始容量（头 1 字 + 64 行）：预分配一次成功，够用。
+  static const int _ipAddrTableInitDwords = 1 + _ipAddrRowDwords * 64;
+
+  /// Windows：查「到 [target] 的最优路由接口」的本机地址（iphlpapi
+  /// `GetBestInterface` + `GetIpAddrTable`；纯路由表查询，无网络包）。
+  /// 非 Windows / FFI 失败 / 目标无路由 → null（调用方回退枚举）。
+  /// 公开供单测锁定实测的行布局。
+  static String? windowsRouteSourceIp(InternetAddress target) {
+    final getBestInterface = _getBestInterface;
+    final getIpAddrTable = _getIpAddrTable;
+    if (getBestInterface == null || getIpAddrTable == null) return null;
+    Pointer<Uint32>? table;
+    Pointer<Uint32>? sizeBuf;
+    Pointer<Uint32>? bestBuf;
+    try {
+      final packed = _packedIp(target.address);
+      if (packed == null) return null;
+      bestBuf = calloc<Uint32>();
+      if (getBestInterface(packed, bestBuf) != 0) return null;
+      final bestIndex = bestBuf.value;
+
+      sizeBuf = calloc<Uint32>()..value = _ipAddrTableInitDwords * 4;
+      table = calloc<Uint32>(_ipAddrTableInitDwords);
+      var rc = getIpAddrTable(table, sizeBuf, 0);
+      if (rc == 122 /* ERROR_INSUFFICIENT_BUFFER */ &&
+          sizeBuf.value > _ipAddrTableInitDwords * 4) {
+        calloc.free(table);
+        table = calloc<Uint32>(sizeBuf.value ~/ 4 + 1);
+        rc = getIpAddrTable(table, sizeBuf, 0);
+      }
+      if (rc != 0) return null;
+      final count = table[0];
+      // 实测（Win10 19045 + Get-NetIPAddress 双重核对）MIB_IPADDRROW 的
+      // 运行时布局是 dwAddr@+0 / dwIfIndex@+4 / dwMask@+8——与常被引用的
+      // 文档顺序（mask 在 ifIndex 前）相反。两遍扫描兜住两种布局：
+      // 先按实测布局匹配，无命中再按文档布局试一次。
+      for (var i = 0; i < count; i++) {
+        final base = 1 + i * _ipAddrRowDwords;
+        if (table[base + 1] == bestIndex) {
+          return _ipFromPacked(table[base] /* dwAddr */);
+        }
+      }
+      for (var i = 0; i < count; i++) {
+        final base = 1 + i * _ipAddrRowDwords;
+        if (table[base + 2] == bestIndex) {
+          return _ipFromPacked(table[base]);
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
+    } finally {
+      final t = table;
+      if (t != null) calloc.free(t);
+      final s = sizeBuf;
+      if (s != null) calloc.free(s);
+      final b = bestBuf;
+      if (b != null) calloc.free(b);
+    }
+  }
+
+  /// `a.b.c.d` → IPAddr 的 uint32 表示（等价 inet_addr 的内存布局）。
+  static int? _packedIp(String ip) {
+    final parts = ip.split('.');
+    if (parts.length != 4) return null;
+    var v = 0;
+    for (var i = 0; i < 4; i++) {
+      final octet = int.tryParse(parts[i]);
+      if (octet == null || octet < 0 || octet > 255) return null;
+      v |= octet << (8 * i);
+    }
+    return v;
+  }
+
+  static String _ipFromPacked(int v) =>
+      '${v & 0xff}.${(v >> 8) & 0xff}.${(v >> 16) & 0xff}.${(v >> 24) & 0xff}';
+
+  // ---------------------------------------------------------------------------
+  // 回退枚举（纯函数，表驱动单测）
+  // ---------------------------------------------------------------------------
+
+  /// 虚拟网卡名判定（M0.5 纯函数）：这些接口上的地址对局域网电视几乎
+  /// 不可达（WSL/Hyper-V/VMware 等虚拟交换机与隧道）。
+  static bool isVirtualAdapterName(String name) {
+    final lower = name.toLowerCase();
+    const marks = <String>[
+      'vethernet',
+      'wsl',
+      'hyper-v',
+      'vmware',
+      'virtualbox',
+      'tap',
+      'tailscale',
+      'zerotier',
+    ];
+    for (final mark in marks) {
+      if (lower.contains(mark)) return true;
+    }
+    return false;
+  }
+
+  /// 私网优先级：192.168.* > 10.* > 172.16-31；其余（含非私网）排最后。
+  static int _privateRank(String ip) {
+    if (ip.startsWith('192.168.')) return 0;
+    if (ip.startsWith('10.')) return 1;
+    if (RegExp(r'^172\.(1[6-9]|2\d|3[01])\.').hasMatch(ip)) return 2;
+    return 3;
+  }
+
+  /// 与目标是否同 /24 网段（dart_cast network_utils 思路：同网段地址优先）。
+  static bool _sameSubnet24(String a, String b) {
+    final pa = a.split('.');
+    final pb = b.split('.');
+    if (pa.length != 4 || pb.length != 4) return false;
+    for (var i = 0; i < 3; i++) {
+      if (pa[i] != pb[i]) return false;
+    }
+    return true;
+  }
+
+  /// 回退枚举的排序（M0.5 纯函数）：跳过虚拟网卡与非私网地址；
+  /// [target] 给定时与目标同 /24 的地址最优先；同级按
+  /// `192.168 > 10 > 172.16-31`（修正旧实现「直接返回第一个私网地址」）。
+  static List<String> rankInterfaceAddresses(
+    Iterable<(String name, String address)> entries, {
+    String? target,
+  }) {
+    final ranked = <String>[
+      for (final (name, address) in entries)
+        if (!isVirtualAdapterName(name) && _isPrivate(address)) address,
+    ];
+    int score(String ip) {
+      final sameSubnet =
+          (target != null && target.isNotEmpty && _sameSubnet24(ip, target))
+              ? 0
+              : 1;
+      return sameSubnet * 10 + _privateRank(ip);
+    }
+
+    ranked.sort((a, b) => score(a).compareTo(score(b)));
+    return ranked;
+  }
+
+  static Future<String?> _resolveLocalAddress({String? targetHost}) async {
     try {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
         includeLoopback: false,
       );
-      for (final interface in interfaces) {
-        for (final address in interface.addresses) {
-          if (_isPrivate(address.address)) return address.address;
-        }
-      }
-      for (final interface in interfaces) {
-        if (interface.addresses.isNotEmpty) {
-          return interface.addresses.first.address;
-        }
+      final entries = <(String, String)>[
+        for (final interface in interfaces)
+          for (final address in interface.addresses)
+            (interface.name, address.address),
+      ];
+      final ranked = rankInterfaceAddresses(entries, target: targetHost);
+      if (ranked.isNotEmpty) return ranked.first;
+      // 最后兜底：跳过虚拟网卡后的任意地址（旧实现会选到 WSL/Hyper-V）。
+      for (final (name, address) in entries) {
+        if (!isVirtualAdapterName(name)) return address;
       }
     } catch (_) {
       return null;
