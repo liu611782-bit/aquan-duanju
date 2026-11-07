@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/cast/cast_profile.dart';
 import '../core/cast/cast_recipe.dart';
 import '../core/cast/cast_target.dart';
+import '../core/castd/receiver_descriptions.dart' show uuidV4;
 import '../core/reader/reader_settings.dart';
 import '../core/reader/reader_theme.dart';
 import '../core/player/playback_health.dart';
@@ -3550,6 +3551,7 @@ class CastStore extends _JsonFileStore {
   final List<CastTarget> _pinned = [];
   late final CastRecipeStore _recipes;
   late final CastProfileStore _profiles;
+  String? _receiverUdn;
 
   CastTarget? get lastDevice => _lastDevice;
   List<CastTarget> get pinned => List.of(_pinned);
@@ -3560,6 +3562,33 @@ class CastStore extends _JsonFileStore {
 
   /// 设备画像（供 `CastController.profiles` 注入；投屏成功后同步更新）。
   CastProfileStore get profiles => _profiles;
+
+  /// 接收端 UDN（uuid；`aquan_cast.json` 的 `receiverUdn` 字段）。
+  /// 缺省 null = 尚未开启过接收端。
+  String? get receiverUdn => _receiverUdn;
+
+  /// 取接收端 UDN，首次生成并持久化（v4 内新增字段：`...existing` 保留
+  /// 未知键，旧备份恢复/旧版本读侧完全兼容）。
+  Future<String> ensureReceiverUdn() async {
+    await ensureLoaded();
+    final existing = _receiverUdn;
+    if (existing != null && existing.isNotEmpty) return existing;
+    final generated = uuidV4();
+    _receiverUdn = generated;
+    await _persistReceiverUdn();
+    return generated;
+  }
+
+  /// 只更新 `receiverUdn` 字段：保留文件里的其它键，不触碰设备记忆。
+  Future<void> _persistReceiverUdn() async {
+    final existing = await _readJson();
+    await _writeJson(<String, dynamic>{
+      ...existing,
+      'version': formatVersion,
+      'receiverUdn': _receiverUdn,
+    });
+    notifyListeners();
+  }
 
   /// 投到某设备时刷新「最近使用」。
   Future<void> touchLast(CastTarget device) async {
@@ -3657,6 +3686,11 @@ class CastStore extends _JsonFileStore {
       _profiles.replaceAll(profiles.cast<String, dynamic>());
     } else {
       _profiles.clear();
+    }
+    // 接收端 UDN：读侧直接认字段（首次生成走 ensureReceiverUdn）。
+    final receiverUdn = json['receiverUdn'];
+    if (receiverUdn is String && receiverUdn.isNotEmpty) {
+      _receiverUdn = receiverUdn;
     }
     _loaded = true;
     if (legacy) {
