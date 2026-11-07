@@ -48,6 +48,15 @@ class DlnaTransport implements CastTransport, CastCompatTransport {
   ///   但保证 ≥ 2 个满配变体完整尝试 + ≥ 2s 门控窗口。
   final Duration retryBudget;
 
+  /// 深度诊断扫描总预算（R1.1，默认 45s；独立于 [retryBudget]，仅
+  /// [scanAll] 使用）。
+  ///
+  /// 公式断言（与 12s 常量同一先例）：全组合最多 10 组合（[diagnosticScanChain]
+  /// 条件全开），每组合只发一次 SetAVTransportURI（确定性 fault 恰 1 次请求，
+  /// 上限 = 单次 SOAP 4s），10 × 4s = 40s ≤ 45s 留 5s 余量；deadline 逐组合
+  /// 截断（超时类组合可能超 4s，有界不悬挂）。
+  static const Duration defaultScanBudget = Duration(seconds: 45);
+
   /// 配方 `playDelayMs` 的合法上限（合法值 0/300/500；公式断言引用）。
   static const int maxPlayDelayMs = 500;
 
@@ -308,6 +317,110 @@ class DlnaTransport implements CastTransport, CastCompatTransport {
   /// 状态时间线埋点（M0 纯采集；recordTimeline 自身吞异常）。
   void _trace(String message) => CastDiagnostics.instance.recordTimeline(message);
 
+  /// 深度诊断扫描（R1，任务 11-07-cast-final-hygiene）：遍历全组合配方链
+  /// （[diagnosticScanChain]，与生产梯度无关——`request.recipes` 不参与），
+  /// 逐组合记录受理结果。诊断语义与生产 `load` 的三点差异：
+  ///
+  /// - **不早停**：某组合受理成功仍继续试完，报告列出全部受理组合；
+  /// - **Play 门控关闭**：每组合只发一次 SetAVTransportURI，401/402/714
+  ///   才是配方信号（报告注明「仅验证受理，不验证播放」）——避免
+  ///   10 组合 × 门控超时拖爆预算；
+  /// - **不写配方记忆**：本方法不触碰配方表（控制器侧同样跳过
+  ///   remember/forget），由报告人工定配方。
+  ///
+  /// 全部组合试完后若有受理项：按最后受理组合（设备当前持有的 URI）发一次
+  /// Play 起播；Play 失败不影响诊断结论。超时类组合照常继续（不早停），
+  /// 总时长由 [scanBudget]（默认 [defaultScanBudget] 45s）截断。
+  Future<CastScanResult> scanAll(
+    CastLoadRequest request, {
+    Duration? scanBudget,
+  }) async {
+    final budget = scanBudget ?? defaultScanBudget;
+    final deadline = DateTime.now().add(budget);
+    final sink = request.protocolInfo.isNotEmpty
+        ? request.protocolInfo
+        : await _safeProtocolInfo();
+    final chain = diagnosticScanChain(
+      pnRequired: sinkRequiresPn(sink),
+      hasSinkEntry:
+          sinkEntryFourthSegment(sink, request.didl.mimeType) != null,
+    );
+    _trace('[诊断] 深度诊断扫描开始：${chain.length} 个组合'
+        '（仅验证受理，不验证播放；不写入配方记忆；预算 ${budget.inSeconds}s）');
+
+    final attempts = <CastScanAttempt>[];
+    for (final recipe in chain) {
+      if (!DateTime.now().isBefore(deadline)) {
+        _trace('[诊断] 预算耗尽，剩余 ${chain.length - attempts.length} 个组合未尝试');
+        break;
+      }
+      final sw = Stopwatch()..start();
+      var accepted = false;
+      var outcome = '受理';
+      try {
+        _activeRecipe = recipe;
+        await _setUriWithRecipe(request, recipe);
+        accepted = true;
+      } on SoapException catch (e) {
+        outcome = _scanOutcome(e);
+      } on Exception {
+        outcome = '连接失败';
+      } finally {
+        _activeRecipe = null;
+        sw.stop();
+      }
+      attempts.add(CastScanAttempt(
+        recipe: recipe,
+        accepted: accepted,
+        outcome: outcome,
+        elapsedMs: sw.elapsedMilliseconds,
+      ));
+      _trace('[诊断] ${recipe.didl.name}+${recipe.protocolInfoTemplate.name}'
+          ' → $outcome (${_fmtScanSeconds(sw.elapsedMilliseconds)}s)');
+    }
+
+    final accepted = <CastScanAttempt>[
+      for (final a in attempts)
+        if (a.accepted) a,
+    ];
+    if (accepted.isNotEmpty) {
+      // 设备当前持有最后受理组合的 URI（每次 SetAVTransportURI 替换会话）：
+      // 按它发一次 Play 起播；`_activeRecipe` 保留该配方供后续 poll/音量同形。
+      _activeRecipe = accepted.last.recipe;
+      try {
+        await play();
+        _trace('[诊断] 按最后受理组合 Play'
+            '（${accepted.last.recipe.didl.name}+'
+            '${accepted.last.recipe.protocolInfoTemplate.name}）');
+      } on Exception {
+        _activeRecipe = null;
+        _trace('[诊断] Play 未成功（受理结论不受影响）');
+      }
+    } else {
+      _trace('[诊断] 扫描完成：全部 ${attempts.length} 个组合均被拒绝');
+    }
+    return CastScanResult(
+      attempts: attempts,
+      budgetExhausted: attempts.length < chain.length,
+    );
+  }
+
+  /// 扫描组合失败结果的短文案（固定词表；原始异常只进 ErrorLog/SoapTrace）。
+  ///
+  /// fault 情形显示 UPnP 数字错误码（401/402/714…，配方信号）而非 SOAP
+  /// faultCode（s:Client 等信封级代码）——报告口径与 load() 的降级语义一致。
+  static String _scanOutcome(SoapException e) {
+    if (e.faultCode != null || e.faultDescription != null) {
+      final code = _errorCode(e);
+      return code != null ? 'fault $code' : 'fault';
+    }
+    if (e.message.contains('超时')) return '超时';
+    if (e.message.contains('请求失败')) return '连接失败';
+    return e.message;
+  }
+
+  static String _fmtScanSeconds(int ms) => (ms / 1000).toStringAsFixed(1);
+
   Future<void> _attempt(
     CastLoadRequest req,
     CastRecipe recipe,
@@ -481,6 +594,58 @@ bool _sinkHasCategory(Set<String> sink, String wanted) {
 }
 
 DateTime _earlier(DateTime a, DateTime b) => a.isBefore(b) ? a : b;
+
+/// 深度诊断扫描里单个组合的尝试记录（R1.3；纯数据，供汇总结构与报告用）。
+class CastScanAttempt {
+  const CastScanAttempt({
+    required this.recipe,
+    required this.accepted,
+    required this.outcome,
+    required this.elapsedMs,
+  });
+
+  /// 尝试的组合（didl 变体 + protocolInfo 模板）。
+  final CastRecipe recipe;
+
+  /// SetAVTransportURI 是否被设备受理。
+  final bool accepted;
+
+  /// 结果短文案（固定词表）：`受理` / `fault 401` / `超时` / `连接失败`。
+  final String outcome;
+
+  /// 该组合耗时（毫秒）。
+  final int elapsedMs;
+}
+
+/// 一次深度诊断扫描的汇总（R1.3）：全部组合的逐项结果 + 受理组合清单。
+class CastScanResult {
+  const CastScanResult({required this.attempts, required this.budgetExhausted});
+
+  /// 按尝试顺序排列的全部组合记录（不早停：含受理项之后的组合）。
+  final List<CastScanAttempt> attempts;
+
+  /// 预算耗尽导致部分组合未尝试。
+  final bool budgetExhausted;
+
+  /// 受理成功的组合清单（按尝试顺序）。
+  List<CastScanAttempt> get accepted => <CastScanAttempt>[
+        for (final a in attempts)
+          if (a.accepted) a,
+      ];
+
+  bool get anyAccepted => attempts.any((a) => a.accepted);
+
+  /// 报告汇总行（固定中文文案；进入诊断报告「深度诊断扫描汇总」段，
+  /// 经 [CastDiagnostics.recordScanSummary] 落地）。
+  List<String> summaryLines() => <String>[
+        '共尝试 ${attempts.length} 个组合，受理 ${accepted.length} 个'
+            '${budgetExhausted ? '（预算耗尽，部分组合未尝试）' : ''}；'
+            '仅验证受理，不验证播放；结果不写入配方记忆',
+        for (final a in attempts)
+          '  ${a.recipe.didl.name}+${a.recipe.protocolInfoTemplate.name}'
+              ' → ${a.outcome} (${(a.elapsedMs / 1000).toStringAsFixed(1)}s)',
+      ];
+}
 
 /// 从 faultCode / faultDescription / message 里取 UPnP 数字错误码。
 int? _errorCode(SoapException e) {

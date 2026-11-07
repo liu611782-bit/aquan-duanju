@@ -272,6 +272,29 @@ class CastController extends ChangeNotifier {
   /// 会话字幕（R3：Go 侧借此给媒体响应补 `CaptionInfo.sec` 第三通道）。
   CastTranscodeResolver? transcodeResolver;
 
+  /// 深度诊断重试一次性开关（R1.2，任务 11-07-cast-final-hygiene）：面板
+  /// 诊断分区打开后，下一次投送（仅 DLNA 目标）走全组合扫描模式
+  /// （[DlnaTransport.scanAll]）；投送时即消费（无论成败），扫描结果**不写
+  /// 配方记忆**（成功不 remember、失败不清既有配方）。开关关 = 现状路径。
+  bool _deepScanArmed = false;
+
+  /// 「深度诊断重试」开关当前状态（面板诊断分区回显用）。
+  bool get deepDiagnosticScanArmed => _deepScanArmed;
+
+  /// 打开「深度诊断重试」：下一次投送走扫描模式（幂等）。
+  void armDeepDiagnosticScan() {
+    if (_deepScanArmed) return;
+    _deepScanArmed = true;
+    notifyListeners();
+  }
+
+  /// 关闭「深度诊断重试」（未被投送消费前可撤销；幂等）。
+  void disarmDeepDiagnosticScan() {
+    if (!_deepScanArmed) return;
+    _deepScanArmed = false;
+    notifyListeners();
+  }
+
   CastSessionState _state = CastSessionState.idle;
   final List<CastTarget> _devices = [];
   CastTarget? _currentDevice;
@@ -723,6 +746,9 @@ class CastController extends ChangeNotifier {
         transport is CastCompatTransport ? transport as CastCompatTransport : null;
     // Sink 提升到 try 外：失败路径的配方清空也要按同一口径（M3 双层键）。
     var sink = const <String>{};
+    // 深度诊断重试（R1.2）：一次性开关在投送时消费；catch 里据此跳过
+    // 配方清空（扫描失败 ≠ 既有配方失败，配方记忆双向都不动）。
+    var scanMode = false;
     try {
       if (compat != null) {
         try {
@@ -796,8 +822,13 @@ class CastController extends ChangeNotifier {
       final durationText =
           media.duration == null ? null : formatUpnpTime(media.duration!);
       CastRecipe? succeeded;
+      // 深度诊断重试（R1.2）：一次性开关在此消费（无论成败）。仅 DLNA
+      // transport 支持扫描（Chromecast/AirPlay 无 DIDL/模板组合概念）。
+      final scanTransport = transport is DlnaTransport ? transport : null;
+      scanMode = _deepScanArmed && scanTransport != null && compat != null;
+      if (scanMode) _deepScanArmed = false;
       if (compat != null) {
-        succeeded = await compat.load(CastLoadRequest(
+        final loadRequest = CastLoadRequest(
           url: Uri.parse(playUrl),
           title: media.title,
           duration: durationText, // 真实时长才有（AC-27）
@@ -818,6 +849,7 @@ class CastController extends ChangeNotifier {
           ),
           // M3 配方链（design §4.5）：udn → model(+sinkHash) → 画像预设 → 梯度；
           // 中继 TS 档产物把默认 standard 模板升级 sinkEntry（R2）。
+          // 扫描模式不消费它（scanAll 自建全组合链）。
           recipes: _recipeChainFor(
             target,
             sink,
@@ -825,7 +857,17 @@ class CastController extends ChangeNotifier {
             productMime: mediaType.mime,
           ),
           protocolInfo: sink,
-        ));
+        );
+        if (scanMode) {
+          final result = await scanTransport.scanAll(loadRequest);
+          CastDiagnostics.instance.recordScanSummary(result.summaryLines());
+          if (!result.anyAccepted) {
+            throw SoapException(
+                '深度诊断扫描：${result.attempts.length} 个组合均未被受理');
+          }
+        } else {
+          succeeded = await compat.load(loadRequest);
+        }
       } else {
         await transport.setUri(
           Uri.parse(playUrl),
@@ -849,8 +891,10 @@ class CastController extends ChangeNotifier {
       }
       if (succeeded != null) await _rememberRecipe(target, succeeded, sink: sink);
       _state = CastSessionState.casting;
-      CastDiagnostics.instance.recordTimeline(
-          'casting（投屏命令已接受${succeeded == null ? '' : '，配方 ${succeeded.didl.name}'}）');
+      CastDiagnostics.instance.recordTimeline(scanMode
+          ? 'casting（深度诊断扫描完成，投屏命令已接受；配方记忆未改写）'
+          : 'casting（投屏命令已接受'
+              '${succeeded == null ? '' : '，配方 ${succeeded.didl.name}'}）');
       notifyListeners();
       _startPolling();
       unawaited(_startGena(target));
@@ -864,8 +908,9 @@ class CastController extends ChangeNotifier {
         isLocalFile: sessionIsLocalFile,
       );
     } on Exception catch (e) {
-      // 命中配方失败一次即清空，下次投屏重回梯度扫描。
-      if (remembered != null) await _forgetRecipe(target);
+      // 命中配方失败一次即清空，下次投屏重回梯度扫描；深度诊断扫描路径
+      // 例外——扫描失败不代表既有配方失败，配方记忆双向都不动（R1.3）。
+      if (remembered != null && !scanMode) await _forgetRecipe(target);
       CastDiagnostics.instance.recordTimeline('投屏失败：$e');
       _state = CastSessionState.idle;
       // transport 已提前创建（M5-0）：失败路径同样要释放底层连接。
@@ -1311,10 +1356,12 @@ class CastController extends ChangeNotifier {
     if (poll.isStopped && !_userStopping && !_autoAdvancing) {
       final position = _lastPosition;
       // 播完自动连投：停在时长结尾（±5s）且注入了下一集提供器；
-      // 停在中途视为遥控器手动停止，不连投。
+      // 停在中途视为遥控器手动停止，不连投。（_autoAdvancing 已由上方
+      // 外层守卫覆盖——外层检查到此行之间无 await，不可能翻转为 true，
+      // P2-1 清理：内层重复判断删除。）
       final ended = _lastDuration > Duration.zero &&
           position >= _lastDuration - const Duration(seconds: 5);
-      if (ended && !_autoAdvancing && await _tryAdvance()) return;
+      if (ended && await _tryAdvance()) return;
       // 电视端主动停止：感知并交还本地（UI 通过 onRemoteStopped 决定续播）。
       CastDiagnostics.instance.recordTimeline('电视端停止投屏');
       await _finishSession();

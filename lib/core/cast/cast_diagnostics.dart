@@ -145,6 +145,7 @@ class CastDiagnostics {
   final List<SoapTrace> _soapTraces = <SoapTrace>[];
   final List<MediaRequestTrace> _mediaRequests = <MediaRequestTrace>[];
   final List<String> _timeline = <String>[];
+  final List<String> _scanSummary = <String>[];
 
   DateTime? _startedAt;
   String? _deviceName;
@@ -161,6 +162,9 @@ class CastDiagnostics {
   List<SoapTrace> get soapTraces => List.unmodifiable(_soapTraces);
   List<MediaRequestTrace> get mediaRequests => List.unmodifiable(_mediaRequests);
   List<String> get timeline => List.unmodifiable(_timeline);
+
+  /// 深度诊断扫描汇总行（R1.3；`CastScanResult.summaryLines` 落地于此）。
+  List<String> get scanSummary => List.unmodifiable(_scanSummary);
 
   /// 本会话是否已发起连接（区分「空态」与「无判定」）。
   bool get hasSession => _startedAt != null;
@@ -189,6 +193,7 @@ class CastDiagnostics {
       _soapTraces.clear();
       _mediaRequests.clear();
       _timeline.clear();
+      _scanSummary.clear();
       _sinkProtocols.clear();
       _selectedIp = null;
       _mediaUrl = null;
@@ -258,6 +263,18 @@ class CastDiagnostics {
     try {
       if (entry.isEmpty) return;
       _pushCapped(_timeline, '${_stamp()} $entry', maxTimelineEntries);
+    } catch (e, stack) {
+      _logCollectError(e, stack);
+    }
+  }
+
+  /// 记录深度诊断扫描汇总（R1.3；覆盖式写入——一次会话至多一次扫描，
+  /// `beginSession` 时清空）。导出报告据此输出「深度诊断扫描汇总」段。
+  void recordScanSummary(Iterable<String> lines) {
+    try {
+      _scanSummary
+        ..clear()
+        ..addAll(lines);
     } catch (e, stack) {
       _logCollectError(e, stack);
     }
@@ -391,7 +408,17 @@ class CastDiagnostics {
     if (_timeline.isNotEmpty) {
       b.writeln();
       b.writeln('-- 状态时间线 --');
+      // 逐行过导出级脱敏（R2.1 防御纵深）：时间线可能内嵌异常消息里的
+      // 投屏 URL/签名 query，不能只因「面板拼接文本」就绕过脱敏。
       for (final l in _timeline) {
+        b.writeln('  ${redactReportText(l)}');
+      }
+    }
+
+    if (_scanSummary.isNotEmpty) {
+      b.writeln();
+      b.writeln('-- 深度诊断扫描汇总 --');
+      for (final l in _scanSummary) {
         b.writeln('  $l');
       }
     }

@@ -263,6 +263,45 @@ CastRecipe? profilePreset(String? profileId) => switch (profileId) {
       _ => null,
     };
 
+/// 深度诊断全组合链（R1.1，任务 11-07-cast-final-hygiene）：与 [CastRecipeStore.gradient]
+/// 的「精选 7 步」相对，这里是**全组合枚举**——一次摸清设备可接受的全部形态。
+///
+/// - 基础 7 项（无条件）：`full`/`compact` × `standard`/`bare`/`wildcard`
+///   交叉 + `compatEscaped` 变体（宽松转义是 full 形状的转义模式，只配
+///   standard 模板——再叠 bare/wildcard 的增量证据已被交叉覆盖）；
+/// - 条件项：`withPn` ×2 仅 Sink 按 PN 匹配（[pnRequired]，与生产梯度同一
+///   过滤语义）；`sinkEntry` 仅 Sink 有同容器条目（[hasSinkEntry]，其价值
+///   在照抄设备第 4 段，变体维度由 full/compact 覆盖）；
+/// - `op11` 恒不入：它只在「本机路由真答 206」时合法，诊断扫描无 Range
+///   场景，谎报 byte-seek 有害无益。
+///
+/// 条件全开时恰 **10 组合**（预算公式断言引用：10 × 单次 SOAP 上限 4s ≤ 45s）。
+List<CastRecipe> diagnosticScanChain({
+  bool pnRequired = false,
+  bool hasSinkEntry = false,
+}) {
+  final chain = <CastRecipe>[];
+  void add(DidlVariant didl, DidlProtocolInfoTemplate template) =>
+      chain.add(CastRecipe(didl: didl, protocolInfoTemplate: template));
+
+  // 与生产梯度同序：首项必须是现状默认形态（full + standard），其余逐形态铺开。
+  add(DidlVariant.full, DidlProtocolInfoTemplate.standard);
+  add(DidlVariant.compact, DidlProtocolInfoTemplate.standard);
+  add(DidlVariant.full, DidlProtocolInfoTemplate.bare);
+  add(DidlVariant.compact, DidlProtocolInfoTemplate.bare);
+  add(DidlVariant.full, DidlProtocolInfoTemplate.wildcard);
+  add(DidlVariant.compact, DidlProtocolInfoTemplate.wildcard);
+  add(DidlVariant.compatEscaped, DidlProtocolInfoTemplate.standard);
+  if (pnRequired) {
+    add(DidlVariant.full, DidlProtocolInfoTemplate.withPn);
+    add(DidlVariant.compact, DidlProtocolInfoTemplate.withPn);
+  }
+  if (hasSinkEntry) {
+    add(DidlVariant.full, DidlProtocolInfoTemplate.sinkEntry);
+  }
+  return chain;
+}
+
 /// 设备配方表（v4 双层键）。
 ///
 /// - 精确层 `udn:<udn>`：这台设备的已验证配方；

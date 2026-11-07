@@ -194,6 +194,11 @@ List<String> castRecipeAttemptLines(List<String> timeline, {int max = 3}) {
   return attempts.sublist(attempts.length - max);
 }
 
+/// 「深度诊断重试」开关可用性（R1.2）：仅 DLNA 目标可用——Chromecast/
+/// AirPlay 没有 DIDL/模板组合概念，置灰；未选择目标时同样置灰。
+bool castDeepScanAvailable(CastTarget? target) =>
+    target != null && target.protocol == CastProtocol.dlna;
+
 /// TRANSITIONING 状态抖动消抖（800ms）：设备起播/换集瞬间 PLAYING ↔
 /// TRANSITIONING 快速抖动，窗口内维持上一状态显示，抖回就不闪「缓冲中」。
 class CastTransitionDebouncer {
@@ -1131,6 +1136,45 @@ Future<void> showCastDiagnostics(
                   ),
                 ],
               ],
+              const SizedBox(height: 12),
+              // 深度诊断重试开关（R1.2）：默认关，仅 DLNA 目标可用
+              // （Chromecast/AirPlay 置灰）。开启后下一次投送走全组合
+              // 扫描模式（一次性）；结果记入下方报告的「深度诊断扫描汇总」。
+              Text('深度诊断重试', style: theme.textTheme.titleSmall),
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '下一次投送遍历全部 DIDL/模板组合（约 45 秒），逐项结果'
+                      '记入诊断报告；只验证受理不验证播放，不写入配方记忆',
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                  ListenableBuilder(
+                    listenable: castController,
+                    builder: (context, _) {
+                      final available = castDeepScanAvailable(target);
+                      return Switch(
+                        value: available &&
+                            castController.deepDiagnosticScanArmed,
+                        onChanged: available
+                            ? (v) => v
+                                ? castController.armDeepDiagnosticScan()
+                                : castController.disarmDeepDiagnosticScan()
+                            : null,
+                      );
+                    },
+                  ),
+                ],
+              ),
+              Text(
+                castDeepScanAvailable(target)
+                    ? '开启后请重新点选设备发起投送；扫描无论成败都不改写设备配方'
+                    : '仅 DLNA 设备支持（当前未选择目标或目标非 DLNA）',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.outline),
+              ),
               const SizedBox(height: 12),
               Text('详细报告（复制/导出为脱敏版）',
                   style: theme.textTheme.titleSmall),

@@ -2,7 +2,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:aquan_duanju/core/cast/cast_diagnostics.dart';
 import 'package:aquan_duanju/core/cast/cast_recipe.dart';
+import 'package:aquan_duanju/core/cast/cast_target.dart';
 import 'package:aquan_duanju/core/cast/didl.dart';
+import 'package:aquan_duanju/core/cast/dlna_device.dart';
 import 'package:aquan_duanju/widgets/cast_panel.dart';
 
 MediaRequestTrace _trace({
@@ -119,6 +121,24 @@ void main() {
       expect(lines.length, 2);
       expect(lines.last, '09:00:05 配方未命中：didl=v5');
       expect(lines.first, '09:00:04 配方未命中：didl=v4');
+    });
+  });
+
+  group('深度诊断重试开关可用性（R1.2）', () {
+    test('仅 DLNA 目标可用；未选择目标 / Chromecast / AirPlay 置灰', () {
+      final dlna = CastTarget.dlna(DlnaDevice(
+        udn: 'uuid:t1',
+        friendlyName: '电视',
+        controlUrl: 'http://192.168.1.8/ctrl',
+      ));
+      final cc = CastTarget.chromecast(
+          const CastDeviceInfo(host: '192.168.1.9', name: 'CC'));
+      final ap = CastTarget.airplay(
+          const AirPlayDeviceInfo(host: '192.168.1.10', name: 'ATV'));
+      expect(castDeepScanAvailable(dlna), isTrue);
+      expect(castDeepScanAvailable(cc), isFalse);
+      expect(castDeepScanAvailable(ap), isFalse);
+      expect(castDeepScanAvailable(null), isFalse);
     });
   });
 }

@@ -347,6 +347,40 @@ void main() {
       expect(d.soapTraces.first.action, 'A5');
     });
 
+    test('R2.1：时间线逐行过导出级脱敏（URL token/签名 query 不外泄）', () {
+      const token = 'Aa1Bb2Cc3Dd4Ee5Ff6Gg7Hh8Ii9Jj0Kk';
+      final d = CastDiagnostics();
+      d.beginSession(deviceName: '客厅电视', protocol: 'dlna');
+      // 时间线可能内嵌异常消息里的投屏 URL（防御纵深：不能只靠面板拼接脱敏）。
+      d.recordTimeline('投屏失败：http://192.168.1.5:18280/p/$token/index.m3u8'
+          '?sign=abc123 已被设备拒绝');
+      final report = d.toRedactedReport();
+      expect(report.contains(token), isFalse);
+      expect(report.contains('/p/<token>/index.m3u8'), isTrue);
+      expect(report.contains('sign=<redacted>'), isTrue);
+      // 面板级时间线视图保持原样（供自测）。
+      expect(d.timeline.first.contains(token), isTrue);
+    });
+
+    test('R1.3：深度诊断扫描汇总入报告（recordScanSummary / beginSession 清空）',
+        () {
+      final d = CastDiagnostics();
+      d.beginSession(protocol: 'dlna');
+      d.recordScanSummary(const [
+        '共尝试 10 个组合，受理 2 个；仅验证受理，不验证播放；结果不写入配方记忆',
+        '  full+standard → 受理 (0.3s)',
+        '  compact+standard → fault 401 (0.1s)',
+      ]);
+      final report = d.toRedactedReport();
+      expect(report.contains('-- 深度诊断扫描汇总 --'), isTrue);
+      expect(report.contains('full+standard → 受理 (0.3s)'), isTrue);
+      expect(report.contains('fault 401'), isTrue);
+      // 新会话清空汇总（重投后不残留旧扫描）。
+      d.beginSession(protocol: 'dlna');
+      expect(d.scanSummary, isEmpty);
+      expect(d.toRedactedReport().contains('深度诊断扫描汇总'), isFalse);
+    });
+
     test('SSDP 报文截断、去重与上限', () {
       final d = CastDiagnostics();
       final packet =
