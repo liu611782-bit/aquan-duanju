@@ -60,7 +60,7 @@ CastRoute resolveCastRoute({
 /// Sink 清单是否宣告了 HLS mime（HLS 别名组两条拼写任一即可）。
 bool sinkHasHls(Iterable<String> sinkMimes) {
   for (final entry in sinkMimes) {
-    final mime = _mimeOfSinkEntry(entry);
+    final mime = mimeOfSinkEntry(entry);
     if (mime == null) continue;
     if (_hlsMimes.contains(mime)) return true;
   }
@@ -86,12 +86,3 @@ bool _isHighCodec(String codecHint) {
   return c == 'hevc' || c == 'h265' || c == 'h.265' || c == 'av1';
 }
 
-/// Sink 条目（`http-get:*:<mime>:<fourth>`）的 mime 段；与
-/// cast_media_type.dart 的口径一致（`*/*` 与残缺条目不算证据）。
-String? _mimeOfSinkEntry(String entry) {
-  final parts = entry.split(':');
-  if (parts.length < 3) return null;
-  final mime = parts[2].trim().toLowerCase();
-  if (mime.isEmpty || mime == '*/*') return null;
-  return mime;
-}

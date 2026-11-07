@@ -821,7 +821,7 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('该集没有可投屏的流（解析或中继失败）'),
+          content: Text('该集没有可投屏的流（解析失败）'),
           duration: Duration(seconds: 2),
         ));
       }

@@ -378,7 +378,10 @@ class CastRecipeStore {
     var removed = _byKey.remove(udnKeyOf(d)) != null;
     final prefix = _modelKeyPrefix(d);
     if (prefix != null) {
+      final before = _byKey.length;
       _byKey.removeWhere((k, _) => k.startsWith(prefix));
+      // 仅 model 共享层被清（无 udn 精确层）时也要落盘，否则重启会回滚。
+      removed = removed || _byKey.length != before;
     }
     if (removed) await _notify();
   }

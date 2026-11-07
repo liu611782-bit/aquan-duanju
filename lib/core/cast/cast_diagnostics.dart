@@ -421,11 +421,18 @@ class CastDiagnostics {
   static final RegExp _tokenPathPattern =
       RegExp(r'/(p|m|cast|w)/([A-Za-z0-9_-]{12,})');
 
-  /// URL query 的敏感键（design §3.5：sign/token/key/auth/sig/t/v 等）。
-  static const Set<String> _sensitiveQueryKeys = {
-    'sign', 'sig', 'token', 'key', 'auth', 'authorization',
-    't', 'v', 'ticket', 'expires', 'expire', 'deadline',
-  };
+  /// URL query 的敏感键：短键（`t`/`v`）精确匹配；其余按凭据词根包含匹配
+  ///（覆盖 `wsSecret`/`auth_key`/`access_token`/`X-Amz-Signature` 等变体拼写；
+  /// 宁多抹不漏抹——导出报告只留扩展名与路径形状用于定位）。
+  static const List<String> _sensitiveQueryRoots = [
+    'sign', 'sig', 'token', 'key', 'auth', 'secret', 'ticket',
+    'expire', 'deadline', 'credential', 'password',
+  ];
+
+  static bool _isSensitiveQueryKey(String key) {
+    if (key == 't' || key == 'v') return true;
+    return _sensitiveQueryRoots.any(key.contains);
+  }
 
   static final RegExp _queryParamPattern =
       RegExp(r'([?&])([A-Za-z0-9_\-]+)=([^&\s"\x27<>]*)');
@@ -451,7 +458,7 @@ class CastDiagnostics {
       .replaceAllMapped(_tokenPathPattern, (m) => '/${m[1]}/<token>')
       .replaceAllMapped(_queryParamPattern, (m) {
         final key = (m[2] ?? '').toLowerCase();
-        if (!_sensitiveQueryKeys.contains(key)) return m.group(0)!;
+        if (!_isSensitiveQueryKey(key)) return m.group(0)!;
         return '${m[1]}${m[2]}=<redacted>';
       });
 

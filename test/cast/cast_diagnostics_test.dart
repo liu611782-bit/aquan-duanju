@@ -168,6 +168,22 @@ void main() {
       expect(out.contains('ext=mp4'), isTrue);
     });
 
+    test('变体拼写的签名/凭据键按词根匹配替换', () {
+      final out = CastDiagnostics.redactReportText('http://cdn.example.com/live'
+          '?wsSecret=9f8e7d6c&auth_key=1700000000-0-abcdef'
+          '&access_token=eyJhbGciOi.X.Y&X-Amz-Signature=cafe01&v=2');
+      expect(out.contains('9f8e7d6c'), isFalse);
+      expect(out.contains('1700000000-0-abcdef'), isFalse);
+      expect(out.contains('eyJhbGciOi'), isFalse);
+      expect(out.contains('cafe01'), isFalse);
+      expect(out.contains('wsSecret=<redacted>'), isTrue);
+      expect(out.contains('auth_key=<redacted>'), isTrue);
+      expect(out.contains('access_token=<redacted>'), isTrue);
+      expect(out.contains('X-Amz-Signature=<redacted>'), isTrue);
+      // 短键 t/v 保持精确匹配（design §3.5 口径，v 常为上游签名版本参数）。
+      expect(out.contains('v=<redacted>'), isTrue);
+    });
+
     test('凭据类请求头整键删除', () {
       final out = CastDiagnostics.redactedHeaders(const {
         'Cookie': 'sid=secret-value',

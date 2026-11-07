@@ -164,7 +164,7 @@ String preferSinkSpelling(String canonical, Iterable<String> sinkMimes) {
   }
   if (group == null) return canonical;
   for (final entry in sinkMimes) {
-    final mime = _mimeOfSinkEntry(entry);
+    final mime = mimeOfSinkEntry(entry);
     if (mime == null) continue;
     if (mime == wanted) return canonical;
     if (group.contains(mime)) return mime;
@@ -173,7 +173,8 @@ String preferSinkSpelling(String canonical, Iterable<String> sinkMimes) {
 }
 
 /// protocolInfo 条目（`http-get:*:<mime>:<fourth>`）的 mime 段。
-String? _mimeOfSinkEntry(String entry) {
+/// `*/*` 与残缺条目不算证据（cast_route.dart 的选路判定共用此口径）。
+String? mimeOfSinkEntry(String entry) {
   final parts = entry.split(':');
   if (parts.length < 3) return null;
   final mime = parts[2].trim().toLowerCase();
