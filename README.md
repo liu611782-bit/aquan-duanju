@@ -87,6 +87,46 @@ aquan-cli status     # 持械入宋：第一季 · 第1集 00:10/02:15（播放�
 > 读一下这个技能并按它操作：https://github.com/wjsqqj/aquan-duanju/blob/main/skills/duanju-search-play/SKILL.md
 > 我要看短剧 持械入宋
 
+## 投屏 · 架构总览
+
+四条发送通道（DLNA / Chromecast / AirPlay / 屏幕镜像）经统一选路进入三处媒体服务
+（本地伺服 / 受保护流代理 / Go 中继）或直投源站；诊断、配方记忆与会话恢复围绕
+CastController 会话生命周期闭环。本机也能作为接收目标（castd）。
+
+```mermaid
+flowchart TB
+  subgraph sender["发送端（本应用）"]
+    panel["播放页 / 投屏面板<br/>（设备列表 · 会话抽屉 · 兼容模式与画质三选）"] --> ctrl
+    ctrl["CastController 会话状态机<br/>投送 → 1s 轮询 / GENA 事件 → 播完连播 → 失联自动恢复 → 收尾"]
+    ctrl --> disc["发现：SSDP :1900（DLNA）· mDNS :5353（Chromecast / AirPlay）· 手动 IP 直连"]
+    ctrl --> route{"三级选路<br/>媒体类型三级判定 × 设备 Sink × 兼容模式三态"}
+    route -->|"无防盗链直链"| direct["源站直链 URL<br/>（HLS 恒以 .m3u8 结尾，URL 带扩展名）"]
+    route -->|"带 Referer/UA 源 / 字幕"| proxysrv["受保护流代理 CastMediaProxy :18280<br/>/p/token 逐级改写 HLS · Range 透传 · 502 防黑屏"]
+    route -->|"加密分集 / HEVC·AV1 / MKV 等 / Sink 不认 HLS"| relay["Go 中继 castrelay :29170<br/>ffmpeg CENC 解密转码 · HLS / TS 双档<br/>画质三档：高清 / 均衡 / 省流"]
+    route -->|"本地文件"| lms["本地伺服 LocalMediaServer :18080<br/>/m/token"]
+    route -->|"屏幕镜像"| mirror["镜像流 :18380（Android MediaProjection → H.264/AAC → MPEG-TS）<br/>桌面镜像（Windows）走 Go 中继 :29170"]
+    direct --> tv
+    proxysrv --> tv
+    relay --> tv
+    lms --> tv
+    mirror --> tv
+    tv["电视 / 电视盒子<br/>DLNA（SOAP · DIDL）· Chromecast CASTv2 :8009 · AirPlay /play :7000"]
+    ctrl -.-> diag["投屏诊断<br/>五类 verdict（未发出/被拒/没取流/解不出/没进播放）· 取流记录<br/>防火墙指引 · 面板展示 / 导出报告两级脱敏 · 深度诊断扫描"]
+    ctrl -.-> recipe["配方记忆（aquan_cast.json v4）<br/>UDN 精确层 + 型号共享层 · 一次成功即固化 · 失败回梯度"]
+    ctrl -.-> resume["恢复<br/>lastSession 断点续投（seek 回最后位置）<br/>中断自动恢复：复检门控 → 恰一次重投 · 电视关机静默回本地"]
+  end
+  subgraph castd["接收端 castd（本机作为投屏目标 · Windows / Android）"]
+    others["局域网任意 DLNA 发送端<br/>（手机视频 App / 电视助手 / 本应用自己）"] --> castdcore
+    castdcore["ReceiverController :18099<br/>SSDP 应答 · 设备描述与 SCPD · AVT 状态机 · GENA 事件 · 投送准入（任何人/询问/白名单）"]
+    castdcore --> recvplayer["独立 media_kit 播放页<br/>（桌面窗口 / Android 前台服务常驻）"]
+  end
+```
+
+端口口径（与实现逐一对照）：代理 **18280** 起 20 个 · 本地伺服 **18080** 起 ·
+Go 中继 **29170** 起 50 个 · 接收端 **18099** 起 20 个 · 镜像 **18380** 起 20 个 ·
+GENA 回调 **18480** · SSDP 组播 **1900** · CASTv2 **8009** · AirPlay **7000**；
+被占用时均自动顺延。
+
 ## 投屏 · 常见问题
 
 ### 为什么有的电视能投、有的不能？
