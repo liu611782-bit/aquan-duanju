@@ -31,7 +31,7 @@ Apache-2.0）的 Flutter 短剧播放器，支持 **Windows / Android / Linux / 
 | 影视聚合 | 发现页入口：导入 TVBox / MoonTV / 多仓 / 文本行源（六形态解码含 2423 AES 加密配置），源市场从索引站一键抓源+逐源测速（「连接成功 XXXms」）、聚合搜索（流式先到先显示）、源管理（自检/钉选/排序/导入导出）、短剧源自动标记 |
 | B 站 | 扫码登录（免 appkey）、推荐/搜索（WBI 签名 + buvid/bili_ticket 风控）、视频/番剧 DASH 双轨播放、弹幕展示与发送、屏蔽词 |
 | 直播 | TVBox lives（TXT/M3U/JSON）：分组换台、备用地址自动切换、逐频道测速、EPG 节目单（XMLTV/xml.gz） |
-| 投屏 | **DLNA + Chromecast 双协议**（SSDP+mDNS 双发现，同设备自动换协议降级）；受保护流四级选路（直链/源站头代理/CENC 解密中继/本地文件）；**屏幕镜像**（MediaProjection→H264/AAC→MPEG-TS，含系统声音、编码器卡死自动降档恢复）；B 站 DASH 双轨合流投送；电视端播完自动连播下一集；GENA 事件推送替代高频轮询；静音/音量/字幕（sec:SubtitleUri + VTT）遥控；断开回本地续播；**接收端**（Windows/Android：本机可成为手机 App 的投屏目标，见「投屏 · 接收端」） |
+| 投屏 | **DLNA + Chromecast + AirPlay 三协议**（SSDP+mDNS 双发现，同设备自动换协议降级；AirPlay 一期为经典接收端的 `/play` 视频投送——UxPlay/shairport-sync 系等无需配对的接收端，新电视的 AirPlay 2 `/command` 与配对留二期，音量遥控不支持）；受保护流四级选路（直链/源站头代理/CENC 解密中继/本地文件）；**屏幕镜像**（MediaProjection→H264/AAC→MPEG-TS，含系统声音、编码器卡死自动降档恢复）；B 站 DASH 双轨合流投送；电视端播完自动连播下一集；GENA 事件推送替代高频轮询；静音/音量/字幕（sec:SubtitleUri + VTT）遥控；断开回本地续播；**接收端**（Windows/Android：本机可成为手机 App 的投屏目标，见「投屏 · 接收端」） |
 | 语音 | 搜索框语音输入：Android 系统识别；桌面 OpenAI 兼容端点（自备 key，设置里配置与自检） |
 | 去广告 | CMS 源播放经本地回环代理重写 m3u8（关键字表剔广告分片），失败自动回退直链 |
 | 扫码导入 | 源管理页生成一次性二维码，手机浏览器粘贴配置提交导入 |
@@ -234,7 +234,14 @@ netsh advfirewall firewall add rule name="aquan-duanju" dir=in action=allow prog
 - **发现**：SSDP 多目标 M-SEARCH（MediaRenderer / rootdevice / ssdp:all / AVTransport:1，
   带 USER-AGENT 三连）× 4 轮 + NOTIFY 监听；多网卡逐接口绑定发送；描述拉取失败不永久拉黑
   （发现期预算：每 URL ≤2 次、全局 24 次）；设备被移出时同步清理 LOCATION 去重（复线可复活）；
-  TTL 到期先做描述 URL 复检，连不上立即离线、连得上续期。Chromecast 走 mDNS。
+  TTL 到期先做描述 URL 复检，连不上立即离线、连得上续期。Chromecast 与 AirPlay 走 mDNS
+  （AirPlay 只收 `_airplay._tcp`，`_raop` 纯音频设备不进列表）。
+- **AirPlay（一期）**：经典接收端（UxPlay / shairport-sync-video / 旧 AirPlaySDK 盒子）的
+  `/play` 视频投送——`POST /play`（`text/parameters`：`Content-Location` + `Start-Position`，
+  蓝本 dart_cast 实机口径）、`/rate`、`/scrub`、`/stop`，`GET /playback-info` 1s 轮询
+  （XML / 二进制 plist 双解码，rate>0=播放中）。不做 HAP/MFi 配对（要求配对的接收端按
+  不支持降级）；AirPlay 2 `/command` 统一媒体控制与镜像二期；音量遥控不支持（接收端不
+  暴露 HTTP 音量端点）。
 - **选路**：本地文件 / 直链 / 源站头代理 / CENC 解密中继 / 本机转码（兼容模式）四级，
   按媒体类型与设备 Sink 能力自动判定。
 - **协议**：真实 serviceType、SOAPAction 恒带引号、M-POST 405 回退；DIDL 恒含

@@ -13,6 +13,7 @@ import 'cast_target.dart';
 import 'didl.dart';
 import 'gena_subscriber.dart';
 import 'mirror/mirror_controller.dart';
+import 'airplay/airplay_transport.dart';
 import 'chromecast/chromecast_transport.dart';
 import 'dlna_transport.dart';
 import 'local_media_server.dart';
@@ -201,8 +202,17 @@ CastTransport defaultTransportFactory(CastTarget target) {
       return DlnaTransport(target.dlna!);
     case CastProtocol.chromecast:
       return ChromecastTransport(target.cast!);
+    case CastProtocol.airplay:
+      return AirPlayTransport(target.airplay!);
   }
 }
+
+/// 同 IP 降级链协议位次（design §3）：dlna → chromecast → airplay（末位追加）。
+int castProtocolFallbackRank(CastProtocol protocol) => switch (protocol) {
+      CastProtocol.dlna => 0,
+      CastProtocol.chromecast => 1,
+      CastProtocol.airplay => 2,
+    };
 
 /// 投屏会话控制器：状态机 + 1s 轮询 + 远端主动停止感知 + 多协议路由。
 ///
@@ -211,6 +221,7 @@ class CastController extends ChangeNotifier {
   CastController({
     CastTransport Function(CastTarget)? transportFactory,
     this.mdnsDiscover,
+    this.airplayDiscover,
     this.proxyResolver,
     CastRecipeStore? recipeStore,
     CastProfileStore? profileStore,
@@ -231,6 +242,9 @@ class CastController extends ChangeNotifier {
 
   /// mDNS 发现挂点（Chromecast）注入点；null = 用默认 [MdnsDiscovery]。
   final Stream<CastDeviceInfo> Function()? mdnsDiscover;
+
+  /// mDNS 发现挂点（AirPlay `_airplay._tcp`）注入点；null = 用默认实现。
+  final Stream<AirPlayDeviceInfo> Function()? airplayDiscover;
 
   /// 受保护流代理挂点。非 null 时带源站头的直链经它包一层；返回 null 表示不代理。
   /// null 时用控制器自带的 [CastMediaProxy]。
@@ -310,6 +324,7 @@ class CastController extends ChangeNotifier {
   SsdpDiscovery? _discovery;
   StreamSubscription<SsdpEvent>? _discoverySub;
   StreamSubscription<CastDeviceInfo>? _mdnsSub;
+  StreamSubscription<AirPlayDeviceInfo>? _airplaySub;
   GenaSubscriber? _gena;
   StreamSubscription<CastPoll>? _genaSub;
   DateTime? _lastGenaAt;
@@ -363,10 +378,20 @@ class CastController extends ChangeNotifier {
     }, onError: (_) {
       // mDNS 失败不影响 DLNA 扫描（老机型/权限缺失场景）。
     });
+    // AirPlay `_airplay._tcp` 同一扫描周期并行收流（失败同样静默，不影响
+    // DLNA/Chromecast；`_raop._tcp` 纯音频设备不进列表——见 MdnsDiscovery）。
+    final discoverAirplay = airplayDiscover ?? _defaultAirplayDiscover;
+    _airplaySub?.cancel();
+    _airplaySub = discoverAirplay().listen((info) {
+      _upsertDevice(CastTarget.airplay(info));
+    }, onError: (_) {});
   }
 
   static Stream<CastDeviceInfo> _defaultMdnsDiscover() =>
       MdnsDiscovery.discover(MdnsDiscovery.chromecastServiceType);
+
+  static Stream<AirPlayDeviceInfo> _defaultAirplayDiscover() =>
+      MdnsDiscovery.discoverAirplay();
 
   void _upsertDevice(CastTarget target) {
     final i = _devices.indexWhere((d) => d.id == target.id);
@@ -386,6 +411,8 @@ class CastController extends ChangeNotifier {
     _discoverySub = null;
     _mdnsSub?.cancel();
     _mdnsSub = null;
+    _airplaySub?.cancel();
+    _airplaySub = null;
     unawaited(_discovery?.stop());
     _discovery = null;
     notifyListeners();
@@ -623,6 +650,9 @@ class CastController extends ChangeNotifier {
 
   /// 投到指定目标。同 IP 存在另一协议目标且首选失败时自动降级重试一次
   /// （如 Chromecast 就绪超时 → 同 IP 的 DLNA MediaRenderer）。
+  ///
+  /// 降级链位次 [castProtocolFallbackRank]：dlna → chromecast → airplay
+  /// （AirPlay 一期排末位——经典 `/play` 接收端覆盖面最小，其余协议优先）。
   Future<void> castTo(CastTarget target, CastMedia media) async {
     try {
       await _castWith(target, media);
@@ -632,7 +662,9 @@ class CastController extends ChangeNotifier {
               d.host.isNotEmpty &&
               d.host == target.host &&
               d.protocol != target.protocol)
-          .toList();
+          .toList()
+        ..sort((a, b) => castProtocolFallbackRank(a.protocol)
+            .compareTo(castProtocolFallbackRank(b.protocol)));
       if (alt.isEmpty) rethrow;
       // 降级目标再失败则直接抛给 UI（不再继续找）。
       await _castWith(alt.first, media);
@@ -1285,6 +1317,7 @@ class CastController extends ChangeNotifier {
     _pollTimer?.cancel();
     _discoverySub?.cancel();
     _mdnsSub?.cancel();
+    _airplaySub?.cancel();
     unawaited(_discovery?.stop());
     unawaited(_mediaServer.stop());
     unawaited(_castProxy.stop());

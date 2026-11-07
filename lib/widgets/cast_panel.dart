@@ -479,9 +479,11 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
                         key: ValueKey(d.id),
                         dense: true,
                         leading: Icon(
-                          d.protocol == CastProtocol.chromecast
-                              ? Icons.cast
-                              : Icons.tv,
+                          switch (d.protocol) {
+                            CastProtocol.chromecast => Icons.cast,
+                            CastProtocol.airplay => Icons.airplay,
+                            CastProtocol.dlna => Icons.tv,
+                          },
                           color: d.online
                               ? theme.colorScheme.primary
                               : theme.colorScheme.outline,
@@ -490,9 +492,11 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
                             maxLines: 1, overflow: TextOverflow.ellipsis),
                         subtitle: Text(
                           [
-                            d.protocol == CastProtocol.chromecast
-                                ? 'Chromecast'
-                                : 'DLNA',
+                            switch (d.protocol) {
+                              CastProtocol.chromecast => 'Chromecast',
+                              CastProtocol.airplay => 'AirPlay',
+                              CastProtocol.dlna => 'DLNA',
+                            },
                             if (d.modelName.isNotEmpty) d.modelName,
                             if (!d.online) '离线',
                           ].join(' · '),
