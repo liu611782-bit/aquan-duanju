@@ -658,8 +658,8 @@ class SettingsPanel extends StatelessWidget {
               );
             },
           ),
-          // DLNA 接收端（仅桌面）：允许局域网内设备投到本机（含改名与
-          // 防火墙放行命令复制，非桌面整块隐藏）。
+          // DLNA 接收端：允许局域网内设备投到本机（桌面 + Android；
+          // iOS 等其余平台整块隐藏，防火墙放行命令仅 Windows 显示）。
           CastReceiverTile(
             onPersistEnabled: (v) => scope.settings.castReceiverEnabled = v,
             onRename: (name) => scope.settings.castReceiverName = name,

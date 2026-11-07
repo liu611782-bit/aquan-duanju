@@ -39,12 +39,16 @@ class ReceiverMediaOpened {
     required this.title,
     required this.senderAddress,
     required this.senderUserAgent,
+    this.subtitleUrl,
   });
 
   final String url;
   final String title;
   final String senderAddress;
   final String senderUserAgent;
+
+  /// 外挂字幕地址（DIDL sec:CaptionInfo/Ex 提取，R2.1；无则 null）。
+  final String? subtitleUrl;
 }
 
 /// Duration → `H:MM:SS`（小时不补零，蓝本 `%d:%02d:%02d`；自家发送端
@@ -80,14 +84,61 @@ String? didlTitle(String? metadata) {
   if (metadata == null || metadata.isEmpty) return null;
   final m = _didlTitlePattern.firstMatch(metadata);
   if (m == null) return null;
-  final title = m.group(1)!
-      .replaceAll('&amp;', '&')
-      .replaceAll('&lt;', '<')
-      .replaceAll('&gt;', '>')
-      .replaceAll('&quot;', '"')
-      .replaceAll('&apos;', "'")
-      .trim();
+  final title = _unescapeXml(m.group(1)!).trim();
   return title.isEmpty ? null : title;
+}
+
+String _unescapeXml(String text) => text
+    .replaceAll('&amp;', '&')
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&apos;', "'");
+
+/// 三星扩展的外挂字幕元素（namespace http://www.sec.co.kr/，R2.1）：发送端
+/// 投送 metadata 里的 `sec:CaptionInfo` / `sec:CaptionInfoEx`，值可带
+/// `<![CDATA[...]]>` 与 `sec:type="srt"` 属性。前缀按「发送端 DIDL 经常不
+/// 规范」口径放宽到任意命名空间前缀；`\1` 反向引用保证闭合标签配对，避免
+/// CaptionInfoEx 元素被 CaptionInfo 的正则吞成跨元素垃圾。
+final RegExp _captionInfoPattern = RegExp(
+  r'<(?:[\w.-]+:)?(CaptionInfoEx|CaptionInfo)\b[^>]*>(.*?)</(?:[\w.-]+:)?\1\s*>',
+  dotAll: true,
+  caseSensitive: false,
+);
+
+final RegExp _cdataPattern =
+    RegExp(r'<!\[CDATA\[(.*?)\]\]>', dotAll: true);
+
+/// DIDL-Lite 里的外挂字幕地址（R2.1，castbay DlnaMedia.subtitles 语义）：
+/// 逐个扫描 CaptionInfo(Ex)，取第一个可用的 http(s) URL；相对路径按
+/// [currentUri] resolve（设计：Uri.resolve）。无字幕 / 解析失败 / 非
+/// http(s) 地址返回 null——字幕失败静默，不阻断主投送链。
+String? didlSubtitleUrl(String? metadata, String currentUri) {
+  if (metadata == null || metadata.isEmpty) return null;
+  for (final match in _captionInfoPattern.allMatches(metadata)) {
+    final url = _normalizeSubtitleValue(match.group(2) ?? '', currentUri);
+    if (url != null) return url;
+  }
+  return null;
+}
+
+String? _normalizeSubtitleValue(String raw, String currentUri) {
+  var text = raw;
+  final cdata = _cdataPattern.firstMatch(text);
+  if (cdata != null) text = cdata.group(1)!;
+  text = _unescapeXml(text).trim();
+  if (text.isEmpty) return null;
+  // 值里可能混描述文字：优先取第一个 http(s) URL。
+  final urlMatch =
+      RegExp('https?://[^\\s<>"\']+').firstMatch(text);
+  if (urlMatch != null) return urlMatch.group(0);
+  // 相对路径：按 CurrentURI resolve；解析不出或结果非 http(s) 都放弃。
+  final base = Uri.tryParse(currentUri);
+  final relative = Uri.tryParse(text);
+  if (base == null || base.scheme.isEmpty || relative == null) return null;
+  final resolved = base.resolveUri(relative);
+  final scheme = resolved.scheme.toLowerCase();
+  return (scheme == 'http' || scheme == 'https') ? resolved.toString() : null;
 }
 
 /// 解析 SOAP 请求体（SOAP 1.1 与 1.2 信封同构，动作名取 Body 第一个元素
@@ -241,7 +292,9 @@ class ReceiverRenderer {
           throw const ReceiverFault(402, 'Invalid Args');
         }
         final metadata = action.args['CurrentURIMetaData'] ?? '';
-        await player.load(Uri.parse(url), title: didlTitle(metadata));
+        final subtitleUrl = didlSubtitleUrl(metadata, url);
+        await player.load(Uri.parse(url),
+            title: didlTitle(metadata), subtitleUrl: subtitleUrl);
         _uri = url;
         _metadata = metadata;
         onOpened?.call(ReceiverMediaOpened(
@@ -249,6 +302,7 @@ class ReceiverRenderer {
           title: didlTitle(metadata) ?? '',
           senderAddress: senderAddress,
           senderUserAgent: senderUserAgent,
+          subtitleUrl: subtitleUrl,
         ));
         return const [];
       case 'Play':

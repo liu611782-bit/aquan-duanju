@@ -296,8 +296,8 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
               ],
             ),
             const SizedBox(height: 4),
-            // DLNA 接收端入口（仅桌面）：与设置页同一开关状态，本机也能
-            // 成为投屏目标；非桌面平台整块隐藏（B-4 守卫）。
+            // DLNA 接收端入口：与设置页同一开关状态，本机也能成为投屏
+            // 目标（桌面 + Android；iOS 等其余平台整块隐藏）。
             CastReceiverTile(
               compact: true,
               onPersistEnabled: (v) =>

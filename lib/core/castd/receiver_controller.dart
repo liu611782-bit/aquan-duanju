@@ -25,6 +25,7 @@ class ReceiverSession {
     required this.senderAddress,
     required this.senderUserAgent,
     required this.startedAt,
+    this.subtitleUrl,
   });
 
   final String url;
@@ -32,6 +33,10 @@ class ReceiverSession {
   final String senderAddress;
   final String senderUserAgent;
   final DateTime startedAt;
+
+  /// 外挂字幕地址（DIDL sec:CaptionInfo/Ex 提取，R2.1；无则 null——
+  /// 字幕已在渲染器 load 时附加给引擎，这里供会话展示/透传用）。
+  final String? subtitleUrl;
 }
 
 class ReceiverController {
@@ -175,6 +180,7 @@ class ReceiverController {
       senderAddress: event.senderAddress,
       senderUserAgent: event.senderUserAgent,
       startedAt: DateTime.now(),
+      subtitleUrl: event.subtitleUrl,
     );
     onIncomingSession?.call(_currentSession!);
   }

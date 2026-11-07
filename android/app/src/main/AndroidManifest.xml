@@ -72,6 +72,12 @@
             android:name="com.aquan.duanju.mirror.MirrorService"
             android:foregroundServiceType="mediaProjection"
             android:exported="false"/>
+        <!-- DLNA 接收端：开关开启期间前台保活（通知 + MulticastLock 生命周期）。
+             FOREGROUND_SERVICE_MEDIA_PLAYBACK 权限已在上方统一声明。 -->
+        <service
+            android:name="com.aquan.duanju.receiver.ReceiverService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="false"/>
         <service android:name="com.ryanheise.audioservice.AudioService"
             android:foregroundServiceType="mediaPlayback"
             android:exported="true" tools:ignore="Instantiatable">

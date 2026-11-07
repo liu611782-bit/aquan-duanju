@@ -1,6 +1,8 @@
 /// 「允许其他设备投到本机」开关（设置页与投屏面板共用入口，R4.1）。
 ///
-/// - 平台守卫（B-4）：非桌面（Android/iOS）整块隐藏，Android 构建不受影响；
+/// - 平台守卫（R1.4）：桌面 ∨ Android 可见；iOS 等其余平台整块隐藏。
+///   Android 开关经平台桥起前台服务（失败回滚 + SnackBar，与桌面启动失败
+///   同一提示口径）；桌面行为不变；
 /// - 开 → [CastReceiverService.setEnabled] (start)；关 → stop（byebye+清会话，
 ///   页开着会一并关闭）；持久化由调用方经 [onPersistEnabled] 写 SettingsStore；
 /// - 防火墙提示：开启后提供「复制防火墙放行命令」（M0 的 program 级生成器，

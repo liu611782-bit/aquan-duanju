@@ -79,8 +79,9 @@ abstract class ReceiverPlayer {
   Stream<ReceiverPlayerStatus> get statusStream;
 
   /// 载入媒体（SetAVTransportURI）：进入 TRANSITIONING，完成后 STOPPED
-  /// （已加载待播）。重复 load = 新投替换当前会话。
-  Future<void> load(Uri url, {String? title});
+  /// （已加载待播）。重复 load = 新投替换当前会话。[subtitleUrl] 为 DIDL
+  /// 提取的外挂字幕地址（无则 null；附加失败静默无字幕，不阻断视频，R2.2）。
+  Future<void> load(Uri url, {String? title, String? subtitleUrl});
 
   Future<void> play();
   Future<void> pause();
@@ -115,6 +116,7 @@ class StubReceiverPlayer implements ReceiverPlayer {
 
   Uri? loadedUri;
   String? loadedTitle;
+  String? loadedSubtitleUrl;
   int loadCount = 0;
   int playCount = 0;
   int pauseCount = 0;
@@ -163,10 +165,11 @@ class StubReceiverPlayer implements ReceiverPlayer {
       );
 
   @override
-  Future<void> load(Uri url, {String? title}) async {
+  Future<void> load(Uri url, {String? title, String? subtitleUrl}) async {
     loadCount++;
     loadedUri = url;
     loadedTitle = title;
+    loadedSubtitleUrl = subtitleUrl;
     _state = kTransportTransitioning;
     _position = Duration.zero;
     _notify();

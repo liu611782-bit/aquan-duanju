@@ -10,6 +10,7 @@ import android.os.Build
 import android.util.Log
 import androidx.core.content.FileProvider
 import com.aquan.duanju.mirror.MirrorService
+import com.aquan.duanju.receiver.ReceiverService
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -122,6 +123,39 @@ class MainActivity : AudioServiceActivity() {
                         "stopMirror" -> {
                             runCatching { MirrorService.stop(applicationContext) }
                                 .onFailure { Log.w(TAG, "stop mirror failed", it) }
+                            result.success(true)
+                        }
+                        "receiverStart" -> {
+                            // 接收端开关（R1.1/R1.2）：前台服务 + MulticastLock。
+                            // Android 13+ 通知权限顺手请求（拒绝仍可投，仅无通知）。
+                            requestReceiverNotificationPermission()
+                            val port = runCatching {
+                                // receiverPause 事件走独立 aquan/castd 通道：
+                                // aquan/cast 的 Dart 侧 handler 被 MirrorController
+                                // 独占，共用会互相顶掉（见 receiver_android_bridge.dart）。
+                                if (ReceiverService.dartChannel == null) {
+                                    ReceiverService.dartChannel = MethodChannel(
+                                        flutterEngine.dartExecutor.binaryMessenger,
+                                        "aquan/castd",
+                                    )
+                                }
+                                ReceiverService.start(applicationContext, call.argument<Int>("port"))
+                                call.argument<Int>("port")
+                            }.getOrElse { e ->
+                                Log.w(TAG, "start receiver failed", e)
+                                null
+                            }
+                            result.success(port)
+                        }
+                        "receiverStop" -> {
+                            runCatching { ReceiverService.stop(applicationContext) }
+                                .onFailure { Log.w(TAG, "stop receiver failed", it) }
+                            result.success(true)
+                        }
+                        "setSessionMeta" -> {
+                            // 通知栏「正在接收：<标题>」+ 首个会话申请音频焦点。
+                            runCatching { ReceiverService.setSessionMeta(call.argument<String>("title")) }
+                                .onFailure { Log.w(TAG, "set session meta failed", it) }
                             result.success(true)
                         }
                         else -> result.notImplemented()
@@ -277,4 +311,20 @@ class MainActivity : AudioServiceActivity() {
         Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
+
+    /// 接收端开启时的通知权限请求（复用 REQ_POST_NOTIFICATIONS 先例与挂起
+    /// 结果机制）：已有申请在飞时不重复弹；拒绝只影响通知显示，前台服务照跑。
+    /// 这里不挂起 receiverStart 的回复——权限与起服务互不阻塞。
+    private fun requestReceiverNotificationPermission() {
+        if (hasNotificationPermission()) return
+        if (pendingNotificationResult != null) return
+        try {
+            requestPermissions(
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                REQ_POST_NOTIFICATIONS,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "receiver notification permission request failed", e)
+        }
+    }
 }

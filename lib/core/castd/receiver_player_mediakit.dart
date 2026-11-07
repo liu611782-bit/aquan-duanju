@@ -85,13 +85,22 @@ class MediaKitReceiverPlayer implements ReceiverPlayer {
   }
 
   @override
-  Future<void> load(Uri url, {String? title}) async {
+  Future<void> load(Uri url, {String? title, String? subtitleUrl}) async {
     _hasMedia = true;
     _loadedNotPlayed = true;
     _stopRequested = false;
     _lastEmittedPositionMs = -1;
     // SetAVTransportURI 语义：装载待播，不自动出画（发送端随后显式 Play）。
     await _player.open(Media(url.toString()), play: false);
+    // 外挂字幕（R2.2）：libmpv sub-files 语义，SRT/VTT 原样喂（libmpv 自
+    // 解析）；字幕源不可达 / 加载失败静默无字幕，不阻断视频播放。
+    if (subtitleUrl != null && subtitleUrl.isNotEmpty) {
+      try {
+        await _player.setSubtitleTrack(SubtitleTrack.uri(subtitleUrl));
+      } catch (e, st) {
+        ErrorLog.instance.record('DLNA 接收·加载字幕', e, st);
+      }
+    }
     _emit();
   }
 

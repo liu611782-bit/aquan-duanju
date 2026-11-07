@@ -13,6 +13,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/castd/receiver_controller.dart';
 import '../core/castd/receiver_player_adapter.dart';
@@ -68,12 +69,16 @@ class _ReceiverPlayerScreenState extends State<ReceiverPlayerScreen> {
       });
     }
     _service.session.addListener(_onSessionChanged);
+    // 接收端播放页屏幕常亮（R1.5）：与本地播放页同口径（WakelockPlus），
+    // 页开着即常亮（接收状态本身就是「正在播放」语义）。
+    unawaited(WakelockPlus.enable());
   }
 
   @override
   void dispose() {
     _service.session.removeListener(_onSessionChanged);
     unawaited(_statusSub?.cancel());
+    unawaited(WakelockPlus.disable());
     // 手动关闭（X / 返回）→ Stop 语义：引擎 stop + 状态 STOPPED；
     // SSDP 继续广播（接收开关不动）。异常只进 ErrorLog。
     unawaited(_stopEngineQuietly());
