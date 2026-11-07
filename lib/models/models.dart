@@ -40,6 +40,9 @@ class SeriesSummary {
     this.author = '',
     this.category = '',
     this.words = 0,
+    this.heat = 0,
+    this.playCount = 0,
+    this.tags = const [],
   });
 
   final String id;
@@ -52,6 +55,17 @@ class SeriesSummary {
   final String category;
   final int words;
 
+  /// 原始热度分（hot_score）：列表行服务端给出时才有（vendor 补丁 P6），
+  /// 0 即未提供，UI 不展示。
+  final int heat;
+
+  /// 总播放量（series_play_cnt）：列表行服务端给出时才有，0 即未提供。
+  final int playCount;
+
+  /// 标签（古装/3D/历史玄幻）：列表行 secondary_infos data_type=3，
+  /// 详情页另有 rows kind=3（两者同源）。
+  final List<String> tags;
+
   factory SeriesSummary.fromJson(Map<String, dynamic> json) => SeriesSummary(
         id: json['id'] as String? ?? '',
         title: json['title'] as String? ?? '',
@@ -62,6 +76,9 @@ class SeriesSummary {
         author: json['author'] as String? ?? '',
         category: json['category'] as String? ?? '',
         words: json['words'] as int? ?? 0,
+        heat: json['heat'] as int? ?? 0,
+        playCount: json['play_count'] as int? ?? 0,
+        tags: (json['tags'] as List<dynamic>? ?? const []).cast<String>(),
       );
 }
 
@@ -123,12 +140,13 @@ class Series extends SeriesSummary {
     super.author,
     super.category,
     super.words,
+    super.heat,
+    super.playCount,
+    super.tags,
     this.status = 0,
     this.payType = 0,
     this.contentType = 0,
     this.platform = 0,
-    this.heat = 0,
-    this.playCount = 0,
     this.followCount = 0,
     this.diggCount = 0,
     this.createdAt = '',
@@ -147,8 +165,6 @@ class Series extends SeriesSummary {
   final int payType;
   final int contentType;
   final int platform;
-  final int heat;
-  final int playCount;
   final int followCount;
   final int diggCount;
   final String createdAt;

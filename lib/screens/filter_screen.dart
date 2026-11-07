@@ -192,20 +192,12 @@ class _FilterScreenState extends State<FilterScreen> {
   /// 一键换一台匿名设备再重拉。
   ///
   /// 这是「匿名访问上限 / 设备被拒」的正规恢复路径：限流不是靠重试能绕过的，
-  /// 换设备后服务端会当作新访客重新计算配额。
+  /// 换设备后服务端会当作新访客重新计算配额。重置与提示口径与设置页共用
+  /// （[resetAnonymousDevice]）。
   Future<void> _resetDeviceAndRetry() async {
     final api = AppScope.read(context).api;
-    try {
-      await api.resetDevice();
-    } catch (e) {
-      ErrorLog.instance.record('筛选', '重置设备失败：$e', StackTrace.current);
-      if (mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-            const SnackBar(content: Text('重置设备失败，请稍后再试')));
-      }
-      return;
-    }
-    if (!mounted) return;
+    final ok = await resetAnonymousDevice(context, api.resetDevice);
+    if (!ok || !mounted) return;
     _panelRetry = 0;
     _resultRetry = 0;
     await _loadPanel();

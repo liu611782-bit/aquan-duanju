@@ -38,6 +38,7 @@ import '../core/player_volume.dart';
 import '../core/player/player_engine.dart';
 import '../core/player/track_preference.dart';
 import '../core/progress_throttle.dart';
+import '../core/window_fullscreen.dart';
 import '../models/models.dart';
 import '../models/play_skip.dart';
 import '../store/stores.dart';
@@ -640,37 +641,64 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// 自建全屏：window_manager 0.5.2 的 Windows setFullScreen 只剥
   /// THICKFRAME/MAXIMIZEBOX 而保留 WS_CAPTION（标题栏还在）且盖不住任务栏——
-  /// 用户实测「全屏后仍有状态栏」。这里显式：隐标题栏 + 窗口铺满显示器 + 原生
-  /// 标记同步；退出时按序还原。
+  /// 用户实测「全屏后仍有状态栏」。这里按 [kFullscreenEnterSteps] /
+  /// [fullscreenExitSteps] 的有序步骤执行（隐标题栏 + 铺满显示器 + 原生标记
+  /// 同步；退出按序还原）。**所有**进入/退出路径（按钮、F、Esc、退出页面）
+  /// 必须走这里，不允许直接调 windowManager.setFullScreen——历史上 Esc 路径
+  /// 绕过标题栏恢复，出现「ESC 退出后标题栏消失」。
   Rect? _preFullscreenBounds;
 
   Future<void> _applyFullscreen(bool on) async {
     if (on) {
-      _preFullscreenBounds = await windowManager.getBounds();
-      await windowManager.setMinimumSize(const Size(0, 0));
-      await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
-      try {
-        // screen_retriever 的坐标是逻辑像素，与 windowManager.setBounds 同一
-        // 体系；visiblePosition 是该屏工作区原点（多显示器下的偏移）。
-        final display = await sr.screenRetriever.getPrimaryDisplay();
-        final origin = display.visiblePosition ?? Offset.zero;
-        await windowManager.setBounds(Rect.fromLTWH(
-          origin.dx,
-          origin.dy,
-          display.size.width,
-          display.size.height,
-        ));
-      } catch (e, stack) {
-        ErrorLog.instance.record('全屏', '取显示器尺寸失败：$e', stack);
+      for (final step in kFullscreenEnterSteps) {
+        switch (step) {
+          case FullscreenStep.saveBounds:
+            _preFullscreenBounds = await windowManager.getBounds();
+          case FullscreenStep.clearMinimumSize:
+            await windowManager.setMinimumSize(const Size(0, 0));
+          case FullscreenStep.hideTitleBar:
+            await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+          case FullscreenStep.coverDisplay:
+            try {
+              // screen_retriever 的坐标是逻辑像素，与 windowManager.setBounds
+              // 同一体系；visiblePosition 是该屏工作区原点（多显示器下的偏移）。
+              final display = await sr.screenRetriever.getPrimaryDisplay();
+              final origin = display.visiblePosition ?? Offset.zero;
+              await windowManager.setBounds(Rect.fromLTWH(
+                origin.dx,
+                origin.dy,
+                display.size.width,
+                display.size.height,
+              ));
+            } catch (e, stack) {
+              ErrorLog.instance.record('全屏', '取显示器尺寸失败：$e', stack);
+            }
+          case FullscreenStep.nativeFullscreenOn:
+            await windowManager.setFullScreen(true);
+          default:
+            break;
+        }
       }
-      await windowManager.setFullScreen(true);
-    } else {
-      await windowManager.setFullScreen(false);
-      await windowManager.setTitleBarStyle(TitleBarStyle.normal);
-      await windowManager.setMinimumSize(const Size(380, 480));
-      final restore = _preFullscreenBounds;
-      if (restore != null) await windowManager.setBounds(restore);
+      return;
     }
+    for (final step in fullscreenExitSteps(
+        restorableBounds: _preFullscreenBounds != null)) {
+      switch (step) {
+        case FullscreenStep.nativeFullscreenOff:
+          await windowManager.setFullScreen(false);
+        case FullscreenStep.showTitleBar:
+          await windowManager.setTitleBarStyle(TitleBarStyle.normal);
+        case FullscreenStep.restoreMinimumSize:
+          await windowManager.setMinimumSize(const Size(380, 480));
+        case FullscreenStep.restoreBounds:
+          final restore = _preFullscreenBounds;
+          if (restore != null) await windowManager.setBounds(restore);
+        default:
+          break;
+      }
+    }
+    // 已退出：清掉还原点，避免下一次退出还原到过期的 bounds。
+    _preFullscreenBounds = null;
   }
 
   Future<void> _toggleFullscreen() async {
@@ -880,9 +908,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     if (key == LogicalKeyboardKey.escape) {
       if (_isDesktop) {
-        windowManager.isFullScreen().then((full) {
-          if (full) windowManager.setFullScreen(false);
-        });
+        // 退出全屏必须走 _applyFullscreen：直接 setFullScreen(false) 不恢复
+        // 标题栏/最小尺寸/bounds（用户实测「ESC 退出后标题栏消失」）。
+        unawaited(windowManager.isFullScreen().then((full) async {
+          if (full) await _applyFullscreen(false);
+        }));
         return KeyEventResult.handled;
       }
     }

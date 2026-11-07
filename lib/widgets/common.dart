@@ -10,6 +10,7 @@ import '../core/aqua_api.dart';
 import '../core/aqua_error.dart';
 import '../core/download_service.dart';
 import '../core/books/book_source_store.dart';
+import '../core/error_log.dart';
 import '../core/image_cache_store.dart';
 import '../core/image_key.dart';
 import '../core/tv/tv_metrics.dart';
@@ -122,6 +123,35 @@ class AppScope extends InheritedNotifier<ChangeNotifier> {
   }
 }
 
+/// 一键重置匿名设备：设置页（我的 → 重置匿名设备）与错误面板的「立即重置」
+/// 共用这一条恢复路径，文案口径一致。
+///
+/// 成功提示「已重置，重新拉取数据即可」，调用方据此自行重拉数据；失败按
+/// [AquaException.friendlyText] 提示（其余统一「重置设备失败」），异常只进
+/// [ErrorLog]。返回是否重置成功。
+Future<bool> resetAnonymousDevice(
+  BuildContext context,
+  Future<void> Function() reset,
+) async {
+  try {
+    await reset();
+  } catch (e, stack) {
+    ErrorLog.instance.record('重置设备', e, stack);
+    if (context.mounted) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
+          content: Text(e is AquaException
+              ? e.friendlyText
+              : '重置设备失败，请稍后再试')));
+    }
+    return false;
+  }
+  if (context.mounted) {
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('已重置，重新拉取数据即可')));
+  }
+  return true;
+}
+
 /// 统一的三态内容视图：加载骨架 / 错误重试 / 内容。
 class LoadView extends StatelessWidget {
   const LoadView({
@@ -133,6 +163,7 @@ class LoadView extends StatelessWidget {
     this.empty = false,
     this.emptyText = '这里空空如也',
     this.skeleton = SkeletonLayout.grid,
+    this.onResetDevice,
   });
 
   final bool loading;
@@ -145,6 +176,10 @@ class LoadView extends StatelessWidget {
   /// 加载态骨架形态：按页面内容结构选择（网格 / 列表 / 详情）。
   final SkeletonLayout skeleton;
 
+  /// 设备被限/被拒时提供「立即重置」：与「我的 → 重置匿名设备」同一逻辑，
+  /// 不必绕道设置页（见 [resetAnonymousDevice]）。
+  final VoidCallback? onResetDevice;
+
   @override
   Widget build(BuildContext context) {
     if (loading) return SkeletonView(layout: skeleton);
@@ -152,6 +187,7 @@ class LoadView extends StatelessWidget {
       return ErrorRetryView(
         error: error!,
         onRetry: onRetry,
+        onResetDevice: onResetDevice,
       );
     }
     if (empty) {
@@ -184,7 +220,8 @@ class ErrorRetryView extends StatelessWidget {
   final Object error;
   final VoidCallback? onRetry;
 
-  /// 仅在设备被限/被拒时提供：一键重置匿名设备并重试。
+  /// 仅在设备被限/被拒时提供：弹窗内直接「立即重置」（复用
+  /// [resetAnonymousDevice]，即「我的 → 重置匿名设备」的逻辑），不必绕道设置页。
   ///
   /// 限流类错误不该自动重试（会更快耗尽配额），但用户可以主动换一台设备。
   final VoidCallback? onResetDevice;
@@ -217,7 +254,7 @@ class ErrorRetryView extends StatelessWidget {
               if (onResetDevice != null)
                 TextButton(
                   onPressed: onResetDevice,
-                  child: const Text('重置设备并重试'),
+                  child: const Text('立即重置'),
                 ),
             ],
           ),
@@ -306,6 +343,101 @@ class _SeriesCardState extends State<SeriesCard> {
                           color: theme.colorScheme.onPrimary,
                           fontSize: 10,
                           fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                // 热度/播放量徽标：封面右上（名次/「广告」角标在左上，对角不重叠）。
+                if (item.heat > 0 || item.playCount > 0)
+                  Positioned(
+                    right: 6,
+                    top: 6,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (item.heat > 0) ...[
+                            const Icon(Icons.local_fire_department,
+                                size: 11, color: Colors.white),
+                            const SizedBox(width: 2),
+                            Text(
+                              formatCount(item.heat),
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w600),
+                            ),
+                          ],
+                          if (item.heat > 0 && item.playCount > 0)
+                            const SizedBox(width: 5),
+                          if (item.playCount > 0) ...[
+                            const Icon(Icons.play_arrow,
+                                size: 11, color: Colors.white),
+                            const SizedBox(width: 2),
+                            Text(
+                              formatCount(item.playCount),
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w600),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                // 标签 chips：封面底部渐变遮罩上，至多 3 个，小号半透明底。
+                if (item.tags.isNotEmpty)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: ClipRRect(
+                      borderRadius: const BorderRadius.vertical(
+                          bottom: Radius.circular(12)),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.transparent,
+                              Colors.black.withValues(alpha: 0.55),
+                            ],
+                          ),
+                        ),
+                        padding: const EdgeInsets.fromLTRB(6, 14, 6, 4),
+                        child: Row(
+                          children: [
+                            for (final tag in item.tags
+                                .where((t) => t.trim().isNotEmpty)
+                                .take(3))
+                              Flexible(
+                                child: Container(
+                                  margin: const EdgeInsets.only(right: 4),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 5, vertical: 1),
+                                  decoration: BoxDecoration(
+                                    color:
+                                        Colors.white.withValues(alpha: 0.18),
+                                    borderRadius: BorderRadius.circular(5),
+                                  ),
+                                  child: Text(
+                                    tag,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        color: Colors.white, fontSize: 9),
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
                       ),
                     ),

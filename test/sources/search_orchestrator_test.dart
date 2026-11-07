@@ -17,7 +17,8 @@ UnifiedSeries _series(String sourceKey, String title,
 
 /// 伪适配器：按脚本发事件。
 class _FakeAdapter implements SourceAdapter {
-  _FakeAdapter(this.id, this.name, {this.hits = const [], this.fail = false});
+  _FakeAdapter(this.id, this.name,
+      {this.hits = const [], this.fail = false, this.notice = ''});
 
   @override
   final String id;
@@ -25,6 +26,9 @@ class _FakeAdapter implements SourceAdapter {
   final String name;
   final List<UnifiedSeries> hits;
   final bool fail;
+
+  /// 随命中批次下发的备注（如「已按 X 检索」）。
+  final String notice;
 
   @override
   SourceCaps get caps => const SourceCaps();
@@ -44,7 +48,7 @@ class _FakeAdapter implements SourceAdapter {
           SourceExceptionCode.network, '模拟失败');
       return;
     }
-    yield SourceHits(items: hits, page: 1);
+    yield SourceHits(items: hits, page: 1, notice: notice);
     yield const SourceSearchDone();
   }
 
@@ -95,6 +99,21 @@ void main() {
     final second = await orch.search('三体', adapters: adapters).toList();
     final result = second.whereType<SourceResult>().single;
     expect(result.items.single.title, '三体');
+  });
+
+  test('源备注（已按 X 检索）随结果透传，且正缓存回放保留', () async {
+    final orch = SearchOrchestrator();
+    final adapters = [
+      _FakeAdapter('a', '红果', hits: [_series('', '万妖图录')],
+          notice: '已按「万妖图录」检索'),
+    ];
+    final first = await orch.search('万妖图录传', adapters: adapters).toList();
+    expect(first.whereType<SourceResult>().single.notice,
+        '已按「万妖图录」检索');
+    // 第二次命中正缓存：备注随缓存回放，不丢。
+    final second = await orch.search('万妖图录传', adapters: adapters).toList();
+    expect(second.whereType<SourceResult>().single.notice,
+        '已按「万妖图录」检索');
   });
 
   test('排序：命中源数多的组在前', () {

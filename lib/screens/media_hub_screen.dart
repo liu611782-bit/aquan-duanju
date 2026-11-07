@@ -579,6 +579,9 @@ class _SearchTabState extends State<_SearchTab>
   final _controller = TextEditingController();
   final _groups = <SourceGroup>[];
   final _failedSources = <String, SourceExceptionCode>{};
+
+  /// 各源的检索备注（如红果退化重试后的「已按 X 检索」），随失败源行展示。
+  final _notices = <String, String>{};
   final _orchestrator = SearchOrchestrator();
 
   bool _searching = false;
@@ -644,6 +647,7 @@ class _SearchTabState extends State<_SearchTab>
     setState(() {
       _groups.clear();
       _failedSources.clear();
+      _notices.clear();
       _hasMoreBySource.clear();
       _loadingMore = false;
       _searching = true;
@@ -668,6 +672,7 @@ class _SearchTabState extends State<_SearchTab>
             _mergeGroups(event);
             _responded.add(event.sourceId);
             _hasMoreBySource[event.sourceId] = event.hasMore;
+            if (event.notice.isNotEmpty) _notices[event.sourceName] = event.notice;
             _done = _responded.length;
           case SourceFailedEvent():
             _failedSources[event.sourceName] = event.code;
@@ -811,6 +816,18 @@ class _SearchTabState extends State<_SearchTab>
               alignment: Alignment.centerLeft,
               child: Text(
                 '失败源：${_failedSources.keys.join('、')}（不影响其他源）',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.outline),
+              ),
+            ),
+          ),
+        if (_notices.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                _notices.entries.map((e) => '${e.key}：${e.value}').join('；'),
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: theme.colorScheme.outline),
               ),

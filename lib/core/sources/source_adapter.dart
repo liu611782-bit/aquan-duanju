@@ -298,10 +298,19 @@ sealed class SourceSearchEvent {
 
 /// 一批命中（流式增量）。
 class SourceHits extends SourceSearchEvent {
-  const SourceHits({required this.items, required this.page, this.hasMore = false});
+  const SourceHits({
+    required this.items,
+    required this.page,
+    this.hasMore = false,
+    this.notice = '',
+  });
   final List<UnifiedSeries> items;
   final int page;
   final bool hasMore;
+
+  /// 需要在结果来源处展示的备注（如红果退化重试后的「已按 X 检索」）；
+  /// 空串即无备注。
+  final String notice;
 }
 
 /// 该源搜索失败（计入健康，UI 显角标）。

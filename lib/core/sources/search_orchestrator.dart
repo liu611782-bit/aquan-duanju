@@ -23,12 +23,16 @@ class SourceResult extends SearchEvent {
     required this.items,
     required this.page,
     this.hasMore = false,
+    this.notice = '',
   });
   final String sourceId;
   final String sourceName;
   final List<UnifiedSeries> items;
   final int page;
   final bool hasMore;
+
+  /// 源备注（来自 [SourceHits.notice]，如「已按 X 检索」）；空串即无。
+  final String notice;
 }
 
 /// 单源失败（显角标，计入健康；不影响其它源）。
@@ -133,7 +137,8 @@ class SearchOrchestrator {
             sourceName: a.name,
             items: hit.items,
             page: 1,
-            hasMore: hit.hasMore);
+            hasMore: hit.hasMore,
+            notice: hit.notice);
         continue;
       }
       fresh.add(a);
@@ -167,10 +172,12 @@ class SearchOrchestrator {
           SourceExceptionCode failCode = SourceExceptionCode.network;
           var failDetail = '';
           var hasMore = false;
+          var notice = '';
           for (final e in events) {
             if (e is SourceHits) {
               hits.addAll(e.items);
               hasMore = hasMore || e.hasMore;
+              if (e.notice.isNotEmpty) notice = e.notice;
             } else if (e is SourceSearchFailed) {
               failed = true;
               failCode = e.code;
@@ -192,14 +199,15 @@ class SearchOrchestrator {
             ledgers
                 .putIfAbsent(adapter.id, SearchPageLedger.new)
                 .accept(1, hits);
-            _cache[cacheKey(adapter.id)] =
-                _CacheEntry(items: hits, at: DateTime.now(), hasMore: hasMore);
+            _cache[cacheKey(adapter.id)] = _CacheEntry(
+                items: hits, at: DateTime.now(), hasMore: hasMore, notice: notice);
             collect.add(SourceResult(
                 sourceId: adapter.id,
                 sourceName: adapter.name,
                 items: hits,
                 page: 1,
-                hasMore: hasMore));
+                hasMore: hasMore,
+                notice: notice));
           }
         } on TimeoutException {
           if (internal.isCancelled || seq != _seq) return;
@@ -391,10 +399,14 @@ class _CacheEntry {
     required this.items,
     required this.at,
     required this.hasMore,
+    this.notice = '',
   });
   final List<UnifiedSeries> items;
   final DateTime at;
   final bool hasMore;
+
+  /// 源备注（退化重试等），随正缓存一起回放。
+  final String notice;
 }
 
 /// 单源分页账本（聚合续页 / 单源浏览共用）：跨页去重 + 重复页终止。

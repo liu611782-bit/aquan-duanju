@@ -110,14 +110,43 @@ type catalogVideo struct {
 	// 放在这一层，video_detail 为空。短剧/漫剧卡片两者都有，优先取 video_detail。
 	Cover        string  `json:"cover"`
 	EpisodeCount flexInt `json:"episode_cnt"`
-	VideoDetail  struct {
-		Title        string            `json:"series_title"`
-		Intro        string            `json:"series_intro"`
-		Cover        string            `json:"series_cover"`
-		EpisodeCount int               `json:"episode_cnt"`
-		VideoList    []json.RawMessage `json:"video_list"`
-		Cards        []seriesCard      `json:"video_detail_list"`
+	// 【本地补丁 P6】video_detail 与详情响应的 video_data 同形，热度/播放量/
+	// 标签行同样出现在列表卡片上；服务端没给时保持零值（omitempty 不下发）。
+	VideoDetail struct {
+		Title          string              `json:"series_title"`
+		Intro          string              `json:"series_intro"`
+		Cover          string              `json:"series_cover"`
+		EpisodeCount   int                 `json:"episode_cnt"`
+		HotScore       int64               `json:"hot_score"`
+		PlayCount      int64               `json:"series_play_cnt"`
+		SecondaryInfos []wireSecondaryInfo `json:"secondary_infos"`
+		VideoList      []json.RawMessage   `json:"video_list"`
+		Cards          []seriesCard        `json:"video_detail_list"`
 	} `json:"video_detail"`
+}
+
+// wireSecondaryInfo 是 secondary_infos 的一行（详情与列表卡片同构）。
+type wireSecondaryInfo struct {
+	Content  string `json:"content"`
+	DataType int    `json:"data_type"`
+	Schema   string `json:"schema"`
+}
+
+// tagsFromSecondaryInfos 提取标签行（data_type=3，与详情页 InfoKind=3 的
+// 标签行同源），空行跳过；没有标签时返回 nil（omitempty 不下发）。
+func tagsFromSecondaryInfos(infos []wireSecondaryInfo) []string {
+	var tags []string
+	for _, row := range infos {
+		if row.DataType != 3 {
+			continue
+		}
+		text := strings.TrimSpace(row.Content)
+		if text == "" {
+			continue
+		}
+		tags = append(tags, text)
+	}
+	return tags
 }
 
 type seriesCard struct {
@@ -127,6 +156,10 @@ type seriesCard struct {
 	Intro        string     `json:"series_intro"`
 	Cover        string     `json:"series_cover"`
 	EpisodeCount int        `json:"episode_cnt"`
+	// 【本地补丁 P6】嵌套卡片同样可能带热度/播放量/标签。
+	HotScore       int64               `json:"hot_score"`
+	PlayCount      int64               `json:"series_play_cnt"`
+	SecondaryInfos []wireSecondaryInfo `json:"secondary_infos"`
 }
 
 type cellDetail struct {
@@ -311,6 +344,8 @@ func appendCatalogCell(page *CatalogPage, cell catalogCell) {
 		page.Items = append(page.Items, model.SeriesSummary{
 			ID: id, Title: title, Description: v.VideoDetail.Intro,
 			CoverURL: cover, EpisodeCount: count,
+			Heat: v.VideoDetail.HotScore, PlayCount: v.VideoDetail.PlayCount,
+			Tags: tagsFromSecondaryInfos(v.VideoDetail.SecondaryInfos),
 		})
 	}
 	if cell.VideoDetail != nil {
@@ -325,6 +360,8 @@ func appendCatalogCell(page *CatalogPage, cell catalogCell) {
 			page.Items = append(page.Items, model.SeriesSummary{
 				ID: id, Title: card.Title, Description: card.Intro,
 				CoverURL: card.Cover, EpisodeCount: card.EpisodeCount,
+				Heat: card.HotScore, PlayCount: card.PlayCount,
+				Tags: tagsFromSecondaryInfos(card.SecondaryInfos),
 			})
 		}
 	}
@@ -474,6 +511,8 @@ func ParseSearchTab(raw []byte, tabType int) (*CatalogPage, error) {
 					page.Items = append(page.Items, model.SeriesSummary{
 						ID: id, Title: title, Description: v.VideoDetail.Intro,
 						CoverURL: v.VideoDetail.Cover, EpisodeCount: v.VideoDetail.EpisodeCount,
+						Heat: v.VideoDetail.HotScore, PlayCount: v.VideoDetail.PlayCount,
+						Tags: tagsFromSecondaryInfos(v.VideoDetail.SecondaryInfos),
 					})
 					continue
 				}
@@ -489,6 +528,8 @@ func ParseSearchTab(raw []byte, tabType int) (*CatalogPage, error) {
 					page.Items = append(page.Items, model.SeriesSummary{
 						ID: cid, Title: ctitle, Description: card.Intro,
 						CoverURL: card.Cover, EpisodeCount: card.EpisodeCount,
+						Heat: card.HotScore, PlayCount: card.PlayCount,
+						Tags: tagsFromSecondaryInfos(card.SecondaryInfos),
 					})
 				}
 			}
@@ -1806,6 +1847,10 @@ func decodeSeriesList(raw json.RawMessage) []model.SeriesSummary {
 		Intro   string     `json:"series_intro"`
 		Count   int        `json:"episode_cnt"`
 		Status  int        `json:"series_status"`
+		// 【本地补丁 P6】筛选/落地页行同样可能带热度/播放量/标签。
+		HotScore       int64               `json:"hot_score"`
+		PlayCount      int64               `json:"series_play_cnt"`
+		SecondaryInfos []wireSecondaryInfo `json:"secondary_infos"`
 	}
 	if err := json.Unmarshal(b, &rows); err != nil {
 		return nil
@@ -1827,6 +1872,8 @@ func decodeSeriesList(raw json.RawMessage) []model.SeriesSummary {
 		out = append(out, model.SeriesSummary{
 			ID: id, Title: title, Description: oneLineText(r.Intro),
 			CoverURL: cover, CoverExpiresAt: URLLifetime(cover), EpisodeCount: r.Count,
+			Heat: r.HotScore, PlayCount: r.PlayCount,
+			Tags: tagsFromSecondaryInfos(r.SecondaryInfos),
 		})
 	}
 	return out

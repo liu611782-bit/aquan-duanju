@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import '../aqua_api.dart';
+import '../error_log.dart';
+import '../search/search_fallback.dart';
 import 'normal_title.dart';
 import 'source_adapter.dart';
 
@@ -44,9 +46,18 @@ class HongguoBridgeAdapter implements SourceAdapter {
   }) async* {
     try {
       // 红果是游标分页 + SDK 设备风控：单并发、只取第一页参与聚合。
-      final result = await _api.search(query);
+      // 服务端对完整剧名可能检索不到（实测「万妖图录传」空、「万妖图录」命中），
+      // 结果为空时客户端按 [searchWithDegradedRetry] 去尾退化重试并合并去重；
+      // 命中词与原词不同时随 [SourceHits.notice] 带给 UI「已按 X 检索」。
+      final outcome = await searchWithDegradedRetry(
+        _api.search,
+        query,
+        isCancelled: () => cancel?.isCancelled ?? false,
+        onError: (e, st) => ErrorLog.instance
+            .record('聚合搜索·红果', '退化重试失败（原词 $query）：$e', st),
+      );
       yield SourceHits(
-        items: result.items
+        items: outcome.page.items
             .map((s) => UnifiedSeries(
                   sourceKey: '',
                   sourceItemId: s.id,
@@ -58,7 +69,9 @@ class HongguoBridgeAdapter implements SourceAdapter {
                 ))
             .toList(),
         page: 1,
-        hasMore: result.hasMore && page == 1 ? false : false,
+        // 红果只参与第 1 页聚合，不再续页。
+        hasMore: false,
+        notice: outcome.degraded ? '已按「${outcome.query}」检索' : '',
       );
       yield const SourceSearchDone();
     } catch (e) {

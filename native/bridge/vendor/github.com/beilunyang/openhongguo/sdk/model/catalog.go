@@ -267,6 +267,16 @@ type SeriesSummary struct {
 	Author   string `json:"author,omitempty"`
 	Category string `json:"category,omitempty"`
 	Words    int64  `json:"words,omitempty"`
+	// Heat 是原始热度分（hot_score）；列表行（搜索/发现流）服务端给出时才有。
+	// 【本地补丁 P6】上游 SeriesSummary 不带此字段。
+	Heat int64 `json:"heat,omitempty"`
+	// PlayCount 是总播放量（series_play_cnt）；列表行服务端给出时才有。
+	// 【本地补丁 P6】上游 SeriesSummary 不带此字段。
+	PlayCount int64 `json:"play_count,omitempty"`
+	// Tags 是标签（secondary_infos data_type=3 的 content，与详情页 InfoKind=3
+	// 标签行同源）；列表行服务端给出时才有。
+	// 【本地补丁 P6】上游 SeriesSummary 不带此字段。
+	Tags []string `json:"tags,omitempty"`
 }
 
 // Series 是一部短剧的详情视图。

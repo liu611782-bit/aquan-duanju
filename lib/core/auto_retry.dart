@@ -43,6 +43,15 @@ bool worthAutoRetry(Object error) {
   }
 }
 
+/// 首载失败的自愈决策：瞬时错误且还有重试额度时，返回下一次自动重试前的
+/// 等待时间；否则返回 null（把错误交给 UI 展示）。
+///
+/// 首页（发现页）首载与筛选页共用这一口径：重试期间保持骨架屏不报错，
+/// 两次快速重试（400ms / 900ms）都在服务端/网络冷启动窗口内，用户感知就是
+/// 「多转一下圈」，而不是「进入失败 → 手动刷新」。
+Duration? selfHealDelay(Object error, int usedAttempts) =>
+    worthAutoRetry(error) ? autoRetryDelay(usedAttempts) : null;
+
 /// 是否属于「换一台匿名设备就能恢复」的错误，UI 据此决定是否给重置入口。
 bool deviceRecoverable(Object error) {
   if (error is! AquaException) return false;

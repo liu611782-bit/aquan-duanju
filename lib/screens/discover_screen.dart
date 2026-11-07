@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../core/aqua_error.dart';
+import '../core/auto_retry.dart';
 import '../core/discover_channels.dart';
+import '../core/error_log.dart';
 import '../core/history_rail_collapse.dart';
 import '../models/models.dart';
 import '../store/stores.dart';
@@ -64,6 +66,13 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   bool _loadingMore = false;
   Object? _error;
 
+  /// 首载自愈已用掉的自动重试次数（手动重试/换频道会清零）。
+  ///
+  /// 首启的第一次请求落在网络/DNS 冷启动窗口里容易失败（用户实测「第一次
+  /// 打开进入失败，过几秒自动刷新才出来」）；重试期间保持骨架屏，两次快速
+  /// 重试都失败才亮错误页。
+  int _retry = 0;
+
   /// 每次加载自增，只有最新一次的结果能落地：连续切类型/频道时先发起的响应
   /// 不会覆盖后发起的那次。
   int _seq = 0;
@@ -121,7 +130,13 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     });
   }
 
-  Future<void> _reload({bool allowFallback = true}) async {
+  Future<void> _reload({bool allowFallback = true}) async =>
+      _reloadWithSelfHeal(allowFallback: allowFallback);
+
+  /// 实际加载；自动重试的续跑传 [keepSelfHealBudget] = true，不重置额度。
+  Future<void> _reloadWithSelfHeal(
+      {bool allowFallback = true, bool keepSelfHealBudget = false}) async {
+    if (!keepSelfHealBudget) _retry = 0;
     final seq = ++_seq;
     final type = _type;
     final channel = _channel;
@@ -173,6 +188,17 @@ class _DiscoverScreenState extends State<DiscoverScreen>
         await _reload(allowFallback: false);
         return;
       }
+      // 首载自愈：瞬时网络类错误自动快速重试（400ms / 900ms），重试期间
+      // 保持骨架屏（_loading 仍为 true），两次都失败才亮错误页。
+      final delay = selfHealDelay(e, _retry);
+      if (delay != null) {
+        _retry++;
+        await Future<void>.delayed(delay);
+        if (!mounted || seq != _seq) return;
+        return _reloadWithSelfHeal(
+            allowFallback: allowFallback, keepSelfHealBudget: true);
+      }
+      ErrorLog.instance.record('发现', '加载失败：$e', StackTrace.current);
       setState(() {
         _error = e;
         _loading = false;
@@ -362,6 +388,14 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   String _friendly(Object error) =>
       error is AquaException ? error.friendlyText : '出了点小问题';
 
+  /// 错误面板「立即重置」：换一台匿名设备后重拉当前频道。
+  Future<void> _resetDeviceAndReload() async {
+    final api = AppScope.read(context).api;
+    final ok = await resetAnonymousDevice(context, api.resetDevice);
+    if (!ok || !mounted) return;
+    unawaited(_reload());
+  }
+
   void _snack(String text) {
     if (!mounted) return;
     ScaffoldMessenger.maybeOf(context)
@@ -457,6 +491,10 @@ class _DiscoverScreenState extends State<DiscoverScreen>
               loading: _loading,
               error: _error,
               onRetry: _reload,
+              // 设备被限/被拒时给「立即重置」，不必绕道「我的 → 设置」。
+              onResetDevice: _error != null && deviceRecoverable(_error!)
+                  ? _resetDeviceAndReload
+                  : null,
               empty: _items.isEmpty,
               // 能力未接入的类型，空态直接说清楚原因。
               emptyText:

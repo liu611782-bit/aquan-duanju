@@ -15,7 +15,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/voice/stt.dart';
 import '../core/aqua_client.dart';
-import '../core/aqua_error.dart';
 import '../core/backup_service.dart';
 import '../core/download_service.dart';
 import '../core/cache_maintenance.dart';
@@ -977,20 +976,8 @@ class SettingsPanel extends StatelessWidget {
             leading: const Icon(Icons.refresh),
             title: const Text('重置匿名设备'),
             subtitle: const Text('遇到访问受限时使用'),
-            onTap: () async {
-              try {
-                await scope.api.resetDevice();
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('已重置，重新拉取数据即可')));
-                }
-              } on AquaException catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context)
-                      .showSnackBar(SnackBar(content: Text(e.friendlyText)));
-                }
-              }
-            },
+            // 与错误面板「立即重置」共用一条路径与文案（resetAnonymousDevice）。
+            onTap: () => resetAnonymousDevice(context, scope.api.resetDevice),
           ),
         ],
       ),

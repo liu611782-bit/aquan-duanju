@@ -2,7 +2,9 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../core/error_log.dart';
 import '../core/search/query_intent.dart';
+import '../core/search/search_fallback.dart';
 import '../core/search_dimensions.dart';
 import '../models/models.dart';
 import '../widgets/common.dart';
@@ -83,6 +85,9 @@ class _SearchScreenState extends State<SearchScreen> {
 
   /// 本次搜索解析出的结构化意图（给结果页顶部展示用）。
   QueryIntent? _intent;
+
+  /// 原词空结果、按退化词出结果时的提示（「未找到 X，已按 Y 检索」）。
+  String? _degradedNote;
   bool _searching = false;
   bool _loadingHot = true;
   Object? _error;
@@ -168,21 +173,33 @@ class _SearchScreenState extends State<SearchScreen> {
     setState(() {
       _intent = intent;
       _submitted = q;
+      _degradedNote = null;
       _searching = true;
       _results.clear();
       _suggestions = const [];
       _error = null;
     });
     try {
-      final page = await scope.api.search(q,
-          tab: _dimension.tab,
-          filters: _dimension.filtersFor(
-              _filter.isEmpty ? const [] : [_filter]));
+      // 服务端对完整剧名可能检索不到：结果为空且词长足够时按
+      // [searchWithDegradedRetry] 去尾退化重试，出结果时提示实际检索词。
+      final outcome = await searchWithDegradedRetry(
+        (term) => scope.api.search(term,
+            tab: _dimension.tab,
+            filters: _dimension.filtersFor(
+                _filter.isEmpty ? const [] : [_filter])),
+        q,
+        onError: (e, st) =>
+            ErrorLog.instance.record('漫剧搜索', '退化重试失败（原词 $q）：$e', st),
+      );
       if (!mounted || seq != _seq) return;
       setState(() {
-        _results.addAll(page.items);
-        _cursor = page.cursor;
-        _hasMore = page.hasMore;
+        _results.addAll(outcome.page.items);
+        _cursor = outcome.page.cursor;
+        _hasMore = outcome.page.hasMore;
+        // 翻页沿用实际命中的检索词，保证结果集一致。
+        _submitted = outcome.query;
+        _degradedNote =
+            outcome.degraded ? '未找到「$q」，已按「${outcome.query}」检索' : null;
         _searching = false;
       });
     } catch (e) {
@@ -294,6 +311,20 @@ class _SearchScreenState extends State<SearchScreen> {
                 setState(() => _intent = null);
                 _submit(raw);
               },
+            ),
+          if (_degradedNote != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 2, 16, 2),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  _degradedNote!,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.primary),
+                ),
+              ),
             ),
           Expanded(
             child: _dimension == SearchDimension.discussion

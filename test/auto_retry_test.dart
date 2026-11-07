@@ -72,4 +72,26 @@ void main() {
       expect(deviceRecoverable(Exception('boom')), isFalse);
     });
   });
+
+  group('selfHealDelay（首载自愈：发现页与筛选页共用口径）', () {
+    test('瞬时网络类错误给退避等待，两次内可自愈', () {
+      expect(selfHealDelay(err(AquaCode.transport), 0),
+          const Duration(milliseconds: 400));
+      expect(selfHealDelay(err(AquaCode.transport), 1),
+          const Duration(milliseconds: 900));
+      expect(selfHealDelay(err(AquaCode.contentUnavailable), 0),
+          const Duration(milliseconds: 400));
+    });
+
+    test('额度用尽后不再自愈（错误交给 UI）', () {
+      expect(selfHealDelay(err(AquaCode.transport), 2), isNull);
+      expect(selfHealDelay(err(AquaCode.transport), 5), isNull);
+    });
+
+    test('设备限流/参数/未知异常不自愈（交给重置入口或错误页）', () {
+      expect(selfHealDelay(err(AquaCode.anonymousLimited), 0), isNull);
+      expect(selfHealDelay(err(AquaCode.challengeRequired), 0), isNull);
+      expect(selfHealDelay(Exception('boom'), 0), isNull);
+    });
+  });
 }
