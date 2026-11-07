@@ -268,8 +268,9 @@ netsh advfirewall firewall add rule name="aquan-duanju" dir=in action=allow prog
 - **选路**：本地文件 / 直链 / 源站头代理 / CENC 解密中继 / 本机转码（兼容模式）四级，
   按媒体类型与设备 Sink 能力自动判定。
 - **协议**：真实 serviceType、SOAPAction 恒带引号、M-POST 405 回退；DIDL 恒含
-  `dc:title` + `upnp:class`，六种 protocolInfo 模板按设备降级；确定性 SOAP 错误不重试，
-  整链预算 ≤12s。
+  `dc:title` + `upnp:class`，六种 protocolInfo 模板按设备降级；full 变体带
+  `upnp:albumArtURI` 剧封面（电视端显示海报，无封面的源零变化）；确定性 SOAP
+  错误不重试，整链预算 ≤12s。
 - **配方记忆**：成功配方按 UDN（+型号/Sink 摘要共享键）持久化到 `aquan_cast.json`（v4），
   重启后直接命中。
 - **诊断**：五类失败判定、两级脱敏（面板展示含 token 供自测 / 导出报告全脱敏）、

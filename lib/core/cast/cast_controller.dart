@@ -640,6 +640,18 @@ class CastController extends ChangeNotifier {
         CastRoute.relay => '本机转码',
       };
 
+  /// 剧封面 → DIDL `upnp:albumArtURI`（R1，11-07-cast-cover-art）：空串/
+  /// 非法 URL/非 http(s) 一律 null——不带封面的源 DIDL 零变化（接收端只认
+  /// http(s)，写了也提取不出）。
+  static Uri? _albumArtUri(String coverUrl) {
+    final raw = coverUrl.trim();
+    if (raw.isEmpty) return null;
+    final uri = Uri.tryParse(raw);
+    if (uri == null || !uri.hasScheme) return null;
+    final scheme = uri.scheme.toLowerCase();
+    return (scheme == 'http' || scheme == 'https') ? uri : null;
+  }
+
   /// 配方链按产物形态调整（R2 DIDL 对齐）：中继 TS 档产物把默认 standard
   /// 模板升级为 sinkEntry——Sink 有 TS 条目时照抄设备第 4 段（WMP 族对
   /// protocolInfo 第 4 段敏感），无条目时模板自身回落 standard。其余产物
@@ -845,6 +857,7 @@ class CastController extends ChangeNotifier {
             subtitleUri: media.subtitleUrl.isEmpty
                 ? null
                 : Uri.tryParse(media.subtitleUrl),
+            albumArtUrl: _albumArtUri(media.coverUrl),
             headers: media.headers,
           ),
           // M3 配方链（design §4.5）：udn → model(+sinkHash) → 画像预设 → 梯度；
@@ -1208,6 +1221,7 @@ class CastController extends ChangeNotifier {
           duration: next.duration,
           live: mediaType.live,
           subtitleUri: subtitleUri,
+          albumArtUrl: _albumArtUri(next.coverUrl),
           headers: next.headers,
         ),
         recipes: _recipeChainFor(

@@ -4,7 +4,9 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:aquan_duanju/core/cast/cast_controller.dart';
+import 'package:aquan_duanju/core/cast/cast_recipe.dart';
 import 'package:aquan_duanju/core/cast/cast_target.dart';
+import 'package:aquan_duanju/core/cast/didl.dart';
 import 'package:aquan_duanju/core/cast/dlna_device.dart';
 import 'package:aquan_duanju/core/cast/soap_client.dart';
 import 'package:aquan_duanju/store/stores.dart';
@@ -55,6 +57,46 @@ class FakeTransport implements CastTransport {
   @override
   Future<CastPoll> poll() async => pollResult;
 
+  @override
+  void close() {}
+}
+
+/// 捕获 compat load 请求的假 transport（恢复链路 DIDL 断言用，
+/// 与 cast_controller_test 的 CapturingCompatTransport 同款）。
+class _CapturingCompatTransport implements CastTransport, CastCompatTransport {
+  _CapturingCompatTransport();
+
+  CastLoadRequest? lastRequest;
+  CastPoll pollResult =
+      const CastPoll(transportState: 'RUNNING', position: Duration(seconds: 30));
+
+  @override
+  Future<Set<String>> preflight() async => <String>{'http-get:*:video/mp4:*'};
+
+  @override
+  Future<CastRecipe?> load(CastLoadRequest request) async {
+    lastRequest = request;
+    return const CastRecipe(didl: DidlVariant.full);
+  }
+
+  @override
+  Future<void> setUri(Uri url,
+      {required String title, String? duration, Uri? subtitleUrl}) async {}
+
+  @override
+  Future<void> play() async {}
+  @override
+  Future<void> pause() async {}
+  @override
+  Future<void> stop() async {}
+  @override
+  Future<void> seekTo(Duration position) async {}
+  @override
+  Future<void> setVolume(int percent) async {}
+  @override
+  Future<void> setMute(bool muted) async {}
+  @override
+  Future<CastPoll> poll() async => pollResult;
   @override
   void close() {}
 }
@@ -237,6 +279,50 @@ void main() {
       );
       expect(recorder.lastSession, isNotNull);
       controller.dispose();
+    });
+
+    test('恢复链路不记封面（R4，11-07-cast-cover-art）：记录结构无封面键、'
+        '恢复投送 DIDL 不带 albumArtURI', () async {
+      final transport = FakeTransport();
+      final recorder = _MemoryRecorder();
+      final controller = CastController(
+        transportFactory: (_) => transport,
+        sessionRecorder: recorder,
+      );
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(
+          url: 'http://192.168.1.10/1.mp4',
+          title: '带封面 · 第1集',
+          coverUrl: 'http://192.168.1.10/cover.jpg',
+        ),
+      );
+      expect(recorder.lastSession, isNotNull);
+      // 记录结构不动：五键原样，无封面键（重启恢复后电视端无封面可接受）。
+      final keys = recorder.lastSession!.toJson().keys.toSet();
+      expect(
+        keys,
+        containsAll(<String>[
+          'targetPersistJson',
+          'title',
+          'mediaUrl',
+          'positionMs',
+          'endedAt',
+        ]),
+      );
+      expect(keys, isNot(contains('cover')));
+      controller.dispose();
+
+      // 恢复重走标准序列：记录无封面 → 重建 CastMedia 无封面 → DIDL 不出标签。
+      final resumeTransport = _CapturingCompatTransport();
+      final controller2 = CastController(
+        transportFactory: (_) => resumeTransport,
+        sessionRecorder: recorder,
+      );
+      expect(await controller2.resumeLastSession(), isTrue);
+      expect(resumeTransport.lastRequest, isNotNull);
+      expect(resumeTransport.lastRequest!.didl.albumArtUrl, isNull);
+      controller2.dispose();
     });
 
     test('轮询进度按节流写入恢复记录（controller → CastStore）', () async {

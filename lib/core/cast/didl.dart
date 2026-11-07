@@ -4,7 +4,8 @@ import 'cast_media_type.dart';
 
 /// DIDL-Lite 元数据变体（v2，取消空 metadata）。
 ///
-/// - [full]：完整形态（`dc:description` 防盗链头、duration、size、字幕三件套）；
+/// - [full]：完整形态（`dc:description` 防盗链头、duration、size、
+///   `upnp:albumArtURI` 剧封面、字幕三件套）；
 /// - [compact]：去掉 `dc:description`/duration/size，保留 `dc:title` +
 ///   `upnp:class` + `<res>`（对扩展字段敏感的设备）；
 /// - [compatEscaped]：同 full，但 `"`/`&` 不转义（go2tv soapbuilders.go
@@ -56,7 +57,9 @@ enum CastSubtitleMode {
 /// 生成 DIDL 所需的媒体信息。
 ///
 /// [uri] 与 SOAP 的 `CurrentURI` 必须是同一个地址；[headers] 只用于
-/// `dc:description`（凭据类键会被过滤，见 [_sensitiveHeaderKey]）。
+/// `dc:description`（凭据类键会被过滤，见 [_sensitiveHeaderKey]）；
+/// [albumArtUrl] 是剧封面（仅 [DidlVariant.full] 输出
+/// `<upnp:albumArtURI>`，电视端播放/待播时显示海报）。
 class DidlRequest {
   const DidlRequest({
     required this.uri,
@@ -66,6 +69,7 @@ class DidlRequest {
     this.sizeBytes,
     this.live = false,
     this.subtitleUri,
+    this.albumArtUrl,
     this.headers = const <String, String>{},
   });
 
@@ -76,6 +80,10 @@ class DidlRequest {
   final int? sizeBytes;
   final bool live;
   final Uri? subtitleUri;
+
+  /// 剧封面地址（接收端只认 http(s)；null/非 http(s) 不写该标签——
+  /// 不带封面的源零变化）。
+  final Uri? albumArtUrl;
   final Map<String, String> headers;
 }
 
@@ -151,6 +159,15 @@ String buildDidl(
     attrs.write(' size="${req.sizeBytes!}"');
   }
   buffer.write('    <res$attrs>${_resBody(req.uri, compat)}</res>\n');
+
+  // 剧封面（R2，11-07-cast-cover-art）：仅 full 变体输出——compact 保持
+  // 最小形态；compatEscaped 保持与 full 的最小差异（只差转义口径）。
+  // 位置在 res 之后、字幕标签之前（go2tv / 接收端正则均按文档序取值）。
+  final art = req.albumArtUrl;
+  if (variant == DidlVariant.full && art != null) {
+    buffer.write('    <upnp:albumArtURI>${_escapeXml(art.toString(), compat)}'
+        '</upnp:albumArtURI>\n');
+  }
 
   final subTags = _subtitleTags(req.subtitleUri, subtitleMode, compat);
   if (subTags.isNotEmpty) buffer.write(subTags);

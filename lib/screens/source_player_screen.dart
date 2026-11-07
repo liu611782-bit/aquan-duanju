@@ -767,6 +767,8 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
         duration: index == _index && _duration > Duration.zero
             ? _duration
             : null,
+        // 剧集级封面随中继/直投两条路径一起透传（DIDL albumArtURI）。
+        coverUrl: widget.series.coverUrl,
         onRelayError: (e, st) =>
             ErrorLog.instance.record('投屏中继回退直投', e, st),
       );
@@ -783,6 +785,8 @@ class _SourcePlayerScreenState extends State<SourcePlayerScreen> {
     return CastMedia(
       url: playback.url,
       title: title,
+      // 剧集级封面投 DIDL albumArtURI（CMS vod_pic；缺失空串即不出标签）。
+      coverUrl: widget.series.coverUrl,
       position: index == _index ? _position : Duration.zero,
       episodeIndex: ep.index,
       episodeCount: _line.episodes.length,

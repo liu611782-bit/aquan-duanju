@@ -12,6 +12,7 @@ DidlRequest _req({
   int? sizeBytes,
   bool live = false,
   Uri? subtitleUri,
+  Uri? albumArtUrl,
   Map<String, String> headers = const <String, String>{},
 }) =>
     DidlRequest(
@@ -22,6 +23,7 @@ DidlRequest _req({
       sizeBytes: sizeBytes,
       live: live,
       subtitleUri: subtitleUri,
+      albumArtUrl: albumArtUrl,
       headers: headers,
     );
 
@@ -236,6 +238,59 @@ void main() {
 
     test('无字幕时不带 sec 节点', () {
       expect(buildDidl(_req(), DidlVariant.full), isNot(contains('sec:')));
+    });
+  });
+
+  group('albumArtURI（发送端封面投送，11-07-cast-cover-art）', () {
+    const artUrl = 'http://192.168.1.5:18280/p/tok1/cover.jpg?w=600&h=800';
+    Uri art() => Uri.parse(artUrl);
+
+    test('full：res 之后、字幕标签之前输出 <upnp:albumArtURI>', () {
+      final didl = buildDidl(
+        _req(albumArtUrl: art(), subtitleUri: Uri.parse('http://x/sub.srt')),
+        DidlVariant.full,
+      );
+      // full 口径转义：& → &amp;。
+      expect(
+          didl,
+          contains('<upnp:albumArtURI>'
+              'http://192.168.1.5:18280/p/tok1/cover.jpg?w=600&amp;h=800'
+              '</upnp:albumArtURI>'));
+      // 位置：res → albumArtURI → 字幕三件套（接收端按文档序取值）。
+      final resEnd = didl.indexOf('</res>');
+      final artIndex = didl.indexOf('<upnp:albumArtURI>');
+      final subIndex = didl.indexOf('<sec:CaptionInfo');
+      expect(resEnd, greaterThanOrEqualTo(0));
+      expect(artIndex, greaterThan(resEnd));
+      expect(subIndex, greaterThan(artIndex));
+      expect(XmlDocument.parse(didl), isA<XmlDocument>());
+    });
+
+    test('full：URL 含 & 转义为 &amp;（沿用 full 转义口径）', () {
+      final didl = buildDidl(_req(albumArtUrl: art()), DidlVariant.full);
+      expect(didl, contains('<upnp:albumArtURI>'
+          'http://192.168.1.5:18280/p/tok1/cover.jpg?w=600&amp;h=800'
+          '</upnp:albumArtURI>'));
+      // 未转义的裸 & 不出现在 albumArtURI 值里（res 值同口径）。
+      expect(didl, isNot(contains('?w=600&h=')));
+      expect(XmlDocument.parse(didl), isA<XmlDocument>());
+    });
+
+    test('compact：不输出 albumArtURI（最小形态）', () {
+      final didl = buildDidl(_req(albumArtUrl: art()), DidlVariant.compact);
+      expect(didl, isNot(contains('albumArtURI')));
+    });
+
+    test('compatEscaped：不输出 albumArtURI（与 full 保持最小差异）', () {
+      final didl = buildDidl(_req(albumArtUrl: art()), DidlVariant.compatEscaped);
+      expect(didl, isNot(contains('albumArtURI')));
+    });
+
+    test('无封面：三变体都不出该标签（零变化）', () {
+      for (final variant in DidlVariant.values) {
+        expect(buildDidl(_req(), variant), isNot(contains('albumArtURI')),
+            reason: 'variant=${variant.name}');
+      }
     });
   });
 

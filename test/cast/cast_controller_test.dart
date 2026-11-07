@@ -316,6 +316,48 @@ void main() {
       controller.dispose();
     });
 
+    test('封面透传（AC-2）：CastMedia.coverUrl → DidlRequest.albumArtUrl',
+        () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(
+          url: 'http://192.168.1.10/1.mp4',
+          title: '测试 · 第1集',
+          coverUrl: 'http://192.168.1.10/cover.jpg?w=600',
+        ),
+      );
+      expect(
+        compat.lastRequest!.didl.albumArtUrl,
+        Uri.parse('http://192.168.1.10/cover.jpg?w=600'),
+      );
+      controller.dispose();
+    });
+
+    test('封面透传：无封面 / 非 http(s) → albumArtUrl null（DIDL 零变化）',
+        () async {
+      final compat = CapturingCompatTransport();
+      final controller = CastController(transportFactory: (_) => compat);
+      await controller.castTo(_target('d1'), _media());
+      expect(compat.lastRequest!.didl.albumArtUrl, isNull);
+
+      final compat2 = CapturingCompatTransport();
+      final controller2 = CastController(transportFactory: (_) => compat2);
+      await controller2.castTo(
+        _target('d2'),
+        const CastMedia(
+          url: 'file:///tmp/x.mp4',
+          title: 't',
+          coverUrl: 'ftp://x/cover.jpg',
+        ),
+      );
+      expect(compat2.lastRequest!.didl.albumArtUrl, isNull,
+          reason: '接收端只认 http(s)，非 http(s) 不写标签');
+      controller.dispose();
+      controller2.dispose();
+    });
+
     test('标准路径 setUri 也带格式化时长', () async {
       final transport = FakeTransport();
       final controller = CastController(transportFactory: (_) => transport);

@@ -45,6 +45,10 @@ class _MediaFixture {
   Uri get url =>
       Uri.parse('http://127.0.0.1:${_server!.port}/fixture/e2e-video.mp4');
 
+  /// 封面 URL（query 带 & 验证 full 变体转义 → 接收端实体还原的往返）。
+  Uri get coverUrl => Uri.parse(
+      'http://127.0.0.1:${_server!.port}/fixture/e2e-cover.jpg?w=600&h=800');
+
   Future<void> start() async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     _server = server;
@@ -188,6 +192,9 @@ void main() {
                 title: '端到端自测',
                 mimeType: 'video/mp4',
                 duration: const Duration(minutes: 10),
+                // 封面投送（AC-3，11-07-cast-cover-art）：发送端 DIDL full
+                // 变体带 albumArtURI → 接收端提取 → 会话字段端到端一致。
+                albumArtUrl: fixture.coverUrl,
               ),
               title: '端到端自测',
             ))
@@ -206,12 +213,14 @@ void main() {
           'PLAYING',
         );
 
-        // 会话回调：投送方地址 / UA / 标题。
+        // 会话回调：投送方地址 / UA / 标题 / 封面（实体转义往返后还原）。
         final s = await gotSession.future.timeout(const Duration(seconds: 4));
         expect(s.url, mediaUrl.toString());
         expect(s.title, '端到端自测');
         expect(s.senderAddress, '127.0.0.1');
         expect(s.senderUserAgent, isNotEmpty);
+        expect(s.albumArtUrl, fixture.coverUrl.toString(),
+            reason: '发送端 albumArtURI → 接收端会话封面端到端一致');
 
         // 状态变化 → NOTIFY LastChange → GenaSubscriber 事件。
         await gotPlaying.future.timeout(const Duration(seconds: 6));

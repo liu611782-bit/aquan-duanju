@@ -2397,6 +2397,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       url: castUrl,
       title:
           '${widget.series.title} · ${ep.title.isEmpty ? '第${ep.number}集' : ep.title}',
+      // 剧封面投 DIDL albumArtURI（电视端显示海报）；缺失空串即不出该标签。
+      coverUrl: widget.series.coverUrl,
       position: _position,
       episodeIndex: _index + 1,
       episodeCount: widget.episodes.length,
@@ -2455,6 +2457,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           url: '',
           localPath: local.filePath,
           title: '${widget.series.title} · ${nep.title.isEmpty ? '第${nep.number}集' : nep.title}',
+          coverUrl: widget.series.coverUrl,
           episodeIndex: nep.number,
           episodeCount: widget.episodes.length,
         );
@@ -2501,6 +2504,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       return CastMedia(
         url: nextUrl,
         title: '${widget.series.title} · ${nep.title.isEmpty ? '第${nep.number}集' : nep.title}',
+        coverUrl: widget.series.coverUrl,
         episodeIndex: nep.number,
         episodeCount: widget.episodes.length,
         // M5-0：连播加密分集的产物已是本机中继 HLS，选路恒直投。

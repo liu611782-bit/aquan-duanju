@@ -25,6 +25,7 @@ Future<(CastMedia, bool)?> castMediaViaRelayOrDirect({
   Map<String, String> headers = const {},
   String relayMimeHint = 'application/vnd.apple.mpegurl',
   Duration? duration,
+  String coverUrl = '',
   void Function(Object error, StackTrace stack)? onRelayError,
 }) async {
   String? relayUrl;
@@ -41,6 +42,7 @@ Future<(CastMedia, bool)?> castMediaViaRelayOrDirect({
     CastMedia(
       url: relayUrl ?? directUrl,
       title: title,
+      coverUrl: coverUrl,
       position: position,
       episodeIndex: episodeIndex,
       episodeCount: episodeCount,
