@@ -138,6 +138,9 @@ class _SearchScreenState extends State<SearchScreen> {
     }
   }
 
+  /// 联想失败状态（只在翻转时记日志，防止逐字输入刷屏）。
+  bool _suggestFailed = false;
+
   void _onChanged(String text) {
     _debounce?.cancel();
     if (text.trim().isEmpty) {
@@ -149,7 +152,17 @@ class _SearchScreenState extends State<SearchScreen> {
         final list = await AppScope.read(context).api.suggest(text.trim());
         if (!mounted) return;
         setState(() => _suggestions = list.take(10).toList());
-      } catch (_) {}
+        if (_suggestFailed) {
+          _suggestFailed = false;
+        }
+      } catch (e, st) {
+        // 联想消失曾经无解释（匿名配额满时 suggest 一并失败）。失败只记
+        // 一次直到恢复；错误面板的「立即重置」是真正的解法。
+        if (!_suggestFailed) {
+          _suggestFailed = true;
+          ErrorLog.instance.record('搜索联想', e, st);
+        }
+      }
     });
   }
 

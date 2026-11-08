@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../core/aqua_api.dart';
+import '../core/auto_retry.dart';
 import '../core/season_number.dart';
 import '../models/models.dart';
 import '../store/stores.dart';
@@ -254,7 +255,19 @@ class _DetailScreenState extends State<DetailScreen> {
       body: _loading
           ? const SkeletonView(layout: SkeletonLayout.detail)
           : _error != null
-              ? ErrorRetryView(error: _error!, onRetry: _reload)
+              ? ErrorRetryView(
+                  error: _error!,
+                  onRetry: _reload,
+                  // 设备被限/被拒时给「立即重置」，不必绕道「我的 → 设置」
+                  //（与发现/筛选页同一入口）。
+                  onResetDevice: deviceRecoverable(_error!)
+                      ? () async {
+                          final ok = await resetAnonymousDevice(context,
+                              AppScope.read(context).api.resetDevice);
+                          if (ok && mounted) _reload();
+                        }
+                      : null,
+                )
               : SafeArea(
                   // 电视横屏左右分栏：左侧信息/同名/推荐，右侧选集与季。
                   // 单列布局在 16:9 大屏上要滚很久才能看到剧集。
@@ -586,7 +599,17 @@ class _DetailScreenState extends State<DetailScreen> {
             ],
           ),
           const SizedBox(height: 8),
-          ListenableBuilder(
+          if (_episodes.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 24),
+              child: Center(
+                child: Text('该季还未上线，先看看别的季吧',
+                    style: theme.textTheme.bodyMedium
+                        ?.copyWith(color: theme.colorScheme.outline)),
+              ),
+            )
+          else
+            ListenableBuilder(
             listenable: AppScope.read(context).downloads,
             builder: (context, _) => GridView.builder(
             shrinkWrap: true,
@@ -689,8 +712,10 @@ class _DetailScreenState extends State<DetailScreen> {
                   maxLines: 1, overflow: TextOverflow.ellipsis),
               subtitle: Text(s.seriesId == widget.seriesId
                   ? '当前季'
-                  : '共${s.episodeCount}集'),
-              onTap: s.seriesId == widget.seriesId
+                  : s.episodeCount <= 0 ? '还未上线' : '共${s.episodeCount}集'),
+              // 还没上线的季（服务端 episode_count=0）不可点，点了只会
+              // 撞上设备配额或空数据（用户实测误报「匿名访问上限」）。
+              onTap: s.seriesId == widget.seriesId || s.episodeCount <= 0
                   ? null
                   : () => openDetail(context, s.seriesId, s.title),
             ),
