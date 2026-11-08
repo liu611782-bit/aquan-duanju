@@ -187,6 +187,9 @@ func castRelayStart(opts relayOptions) (*relaySessionInfo, error) {
 		os.RemoveAll(dir)
 		return nil, relayFail(ErrRelayUnavailable, "ffmpeg 启动失败: "+err.Error())
 	}
+	// ffmpeg 挂进进程级 Job（KILL_ON_JOB_CLOSE）：app 被强杀/崩溃时子进程
+	// 随父退出，不再残留孤儿转码消耗 CPU 与带宽（sweeper 只清目录不清进程）。
+	assignFfmpegToJob(cmd.Process)
 	session.waitCh = make(chan struct{})
 	go func() {
 		session.waitErr = cmd.Wait()
