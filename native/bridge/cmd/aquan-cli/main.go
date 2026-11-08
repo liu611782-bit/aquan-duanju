@@ -107,6 +107,19 @@ func main() {
 		if err := runSeries(args); err != nil {
 			fail(err)
 		}
+	case "cast":
+		// cast        → 恢复上次投屏（跨天重新解析）
+		// cast stop   → 断开投屏
+		rest := splitArgs(args, options{limit: 10}).positional
+		if len(rest) > 0 && rest[0] == "stop" {
+			if err := runControl("cast_stop", "", nil); err != nil {
+				fail(err)
+			}
+			return
+		}
+		if err := runControl("cast", "", nil); err != nil {
+			fail(err)
+		}
 	case "pause", "resume", "toggle", "next", "prev", "status", "open":
 		if err := runControl(cmd, "", args); err != nil {
 			fail(err)
@@ -173,6 +186,10 @@ func controlSummary(kind string, reply map[string]any) string {
 		return msg
 	}
 	switch kind {
+	case "cast":
+		return "已恢复上次投屏"
+	case "cast_stop":
+		return "已断开投屏"
 	case "pause":
 		return "已暂停"
 	case "resume":

@@ -84,6 +84,10 @@ class LaunchCommand {
           value = next() ?? '';
         case '--open':
           kind = 'open';
+        case '--cast':
+          kind = 'cast';
+        case '--cast-stop':
+          kind = 'cast_stop';
         case '--episode':
           episode = int.tryParse(next() ?? '') ?? 0;
         case '--limit':

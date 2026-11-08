@@ -47,3 +47,15 @@ func TestNorm(t *testing.T) {
 		t.Fatalf("norm 处理空格失败")
 	}
 }
+
+func TestControlSummaryCast(t *testing.T) {
+	if got := controlSummary("cast", map[string]any{"ok": true}); got != "已恢复上次投屏" {
+		t.Fatalf("cast summary = %q", got)
+	}
+	if got := controlSummary("cast_stop", map[string]any{"ok": true}); got != "已断开投屏" {
+		t.Fatalf("cast_stop summary = %q", got)
+	}
+	if got := controlSummary("cast", map[string]any{"ok": false, "error": "没有可恢复的投屏记录，或恢复失败"}); got != "失败：没有可恢复的投屏记录，或恢复失败" {
+		t.Fatalf("cast failure summary = %q", got)
+	}
+}

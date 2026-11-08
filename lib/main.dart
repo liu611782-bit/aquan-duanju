@@ -570,6 +570,17 @@ class _AquaAppState extends State<AquaApp> {
   /// 执行 AI / 命令行转交过来的命令；返回值作为单实例通道的回包。
   Future<Map<String, dynamic>> _handleCommand(LaunchCommand command) async {
     if (command.isEmpty || !_ready) return {'ok': true};
+    // 投屏控制同样不抢窗口焦点：恢复/断开走全局 CastService。
+    if (command.kind == 'cast') {
+      final ok = await CastService.instance.controller.resumeLastSession();
+      return ok
+          ? {'ok': true}
+          : {'ok': false, 'error': '没有可恢复的投屏记录，或恢复失败'};
+    }
+    if (command.kind == 'cast_stop') {
+      await CastService.instance.controller.disconnect();
+      return {'ok': true};
+    }
     // 播放控制不需要抢窗口焦点，直接下发给当前播放器。
     if (LaunchCommand.isPlayerKind(command.kind)) {
       return PlayerBus.instance.dispatch(command);
