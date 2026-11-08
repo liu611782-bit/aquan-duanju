@@ -609,31 +609,50 @@ class _HttpClientFetcher implements DescriptionFetcher {
 DescriptionFetcher _defaultFactory() => _HttpClientFetcher();
 
 /// 目标可达性复检（中断自动恢复门控用，任务 11-07-cast-auto-reconnect）：
-/// 对设备描述 URL 做一次轻量 GET（[descriptionTimeout] 超时，与发现期拉取
+/// 对设备描述 URL 做轻量 GET（[descriptionTimeout] 超时，与发现期拉取
 /// 同口径）。HTTP 200 = 可达；超时/连接失败/非 200 = 不可达。异常在此吞掉，
 /// 调用方只拿布尔值（复检失败按「电视不可达」静默处理，不打扰用户）。
-Future<bool> probeDeviceDescriptionReachable(String url) async {
-  final fetcher = _defaultFactory();
-  try {
-    await fetcher.fetchDescription(url);
-    return true;
-  } catch (_) {
-    return false;
-  } finally {
-    if (fetcher is _HttpClientFetcher) fetcher.close();
+///
+/// [attempts] 次尝试（默认 2）：慢 Wi-Fi 老设备首次响应可能超过单次超时，
+/// 单次判定会把可恢复的设备误杀——第二次尝试前短暂让渡。
+Future<bool> probeDeviceDescriptionReachable(String url,
+    {int attempts = 2}) async {
+  for (var i = 0; i < attempts; i++) {
+    if (i > 0) {
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
+    final fetcher = _defaultFactory();
+    try {
+      await fetcher.fetchDescription(url);
+      return true;
+    } catch (_) {
+      // 不可达：重试或放弃。
+    } finally {
+      if (fetcher is _HttpClientFetcher) fetcher.close();
+    }
   }
+  return false;
 }
 
 /// 无描述 URL 目标（Chromecast CASTv2 / AirPlay HTTP 端点）的可达性复检：
 /// TCP 连上即可达，超时同 [descriptionTimeout] 口径。连接失败/超时 = 不可达。
-Future<bool> probeHostPortReachable(String host, int port) async {
-  try {
-    final socket = await Socket.connect(host, port).timeout(descriptionTimeout);
-    socket.destroy();
-    return true;
-  } catch (_) {
-    return false;
+/// [attempts] 次尝试，口径同 [probeDeviceDescriptionReachable]。
+Future<bool> probeHostPortReachable(String host, int port,
+    {int attempts = 2}) async {
+  for (var i = 0; i < attempts; i++) {
+    if (i > 0) {
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
+    try {
+      final socket =
+          await Socket.connect(host, port).timeout(descriptionTimeout);
+      socket.destroy();
+      return true;
+    } catch (_) {
+      // 不可达：重试或放弃。
+    }
   }
+  return false;
 }
 
 /// 构造 M-SEARCH 报文（CineFlow 同款格式 + UA 头）。

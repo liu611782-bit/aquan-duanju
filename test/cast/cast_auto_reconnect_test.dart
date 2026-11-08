@@ -463,12 +463,32 @@ void main() {
         await Future<void>.delayed(const Duration(seconds: 3));
         await req.response.close();
       });
+      // 单次尝试口径：attempts=1 时 1.8s 超时先发制人，不等 3s 慢响应。
       final sw = Stopwatch()..start();
       final ok = await probeDeviceDescriptionReachable(
-          'http://127.0.0.1:${server.port}/dd.xml');
+          'http://127.0.0.1:${server.port}/dd.xml',
+          attempts: 1);
       expect(ok, isFalse);
-      expect(sw.elapsed, lessThan(const Duration(seconds: 3)),
-          reason: '1.8s 超时先发制人，不等 3s 慢响应');
+      expect(sw.elapsed, lessThan(const Duration(seconds: 3)));
+    });
+
+    test('默认双尝试：首次超时第二次成功 → 可达（慢设备防御）', () async {
+      var hits = 0;
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(server.close);
+      server.listen((req) async {
+        hits++;
+        if (hits == 1) {
+          await Future<void>.delayed(const Duration(seconds: 3));
+          await req.response.close();
+          return;
+        }
+        await req.response.close();
+      });
+      final ok = await probeDeviceDescriptionReachable(
+          'http://127.0.0.1:${server.port}/dd.xml');
+      expect(ok, isTrue, reason: '第二次尝试应命中');
+      expect(hits, 2);
     });
 
     test('无描述 URL 协议：端口探活连上即可达、拒绝则不可达', () async {
