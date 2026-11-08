@@ -6,15 +6,16 @@
 
 ## 仓库内位置
 
-本目录只放两个二进制，**纳入版本控制**：
+本目录只放三个二进制，**纳入版本控制**：
 
 ```
 android/ffmpeg/libffmpeg-arm64-v8a.so     # 17,779,024 B
 android/ffmpeg/libffmpeg-armeabi-v7a.so   # 16,484,516 B
+android/ffmpeg/libffmpeg-x86_64.so        # 21,619,808 B（11-08 补齐：模拟器/平板不再缺二进制）
 ```
 
 `android/app/src/main/jniLibs/` 整体被 `.gitignore` 排除（Go 产物每次重建），所以
-`scripts/build_native.py --android` 会在编译完成后把这两个文件复制成
+`scripts/build_native.py --android` 会在编译完成后把这三个文件复制成
 `jniLibs/<abi>/libffmpeg.so`。CI 与本地走同一个脚本，不需要额外步骤。
 
 ## 来源
@@ -23,6 +24,7 @@ android/ffmpeg/libffmpeg-armeabi-v7a.so   # 16,484,516 B
 |---|---|---|---|
 | arm64-v8a | `https://github.com/Khang-NT/ffmpeg-binary-android/releases/download/2018-07-31/arm64-v8a-full.tar.bz2` | `86FD9F45FC8594C61D0AF64F82CAF90D1CD30A6E5D6B23F3A7FB55A1B936B206` | 17,779,024 B |
 | armeabi-v7a | `https://github.com/Khang-NT/ffmpeg-binary-android/releases/download/2018-07-31/armv7-a-full.tar.bz2` | `30EF724DDF72C1FD15F2192F462B0FD204CCCF1345E95F974711515FE65B251A` | 16,484,516 B |
+| x86_64 | `https://github.com/Khang-NT/ffmpeg-binary-android/releases/download/2018-07-31/x86_64-full.tar.bz2` | `11515B46C98B0476B24C72B6ED43674C5A68CF0B279F9834AA5BDC73045A675B` | 21,619,808 B |
 
 上游仓库：<https://github.com/Khang-NT/ffmpeg-binary-android>
 

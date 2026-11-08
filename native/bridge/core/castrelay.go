@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -39,6 +40,8 @@ type relayOptions struct {
 	Format      string `json:"format"`       // 输出档位（R2）：""/"hls"（默认）| "ts"；未知值一律按 hls
 	Quality     string `json:"quality"`      // 画质档位（R2）：high|balanced|compact；空/未知 = balanced（现状）
 	SubtitleURL string `json:"subtitle_url"` // 会话字幕地址（R3）：非空时媒体响应带 CaptionInfo.sec
+	WorkDir     string `json:"work_dir"`     // 会话临时目录基址（11-08 真机修复）：Android 进程无 TMPDIR，os.MkdirTemp("",…) 落 /tmp 必败；空 = 现状（桌面）
+	CAFile      string `json:"ca_file"`      // SSL_CERT_FILE（11-08 真机修复）：Android 无默认 CA 路径，https 上游需要显式证书包；空 = 不追加
 }
 
 // relaySessionInfo 是 castRelayStart/Status 的出参。
@@ -93,6 +96,10 @@ type relaySession struct {
 	// 不依赖 cmd.ProcessState：未调用 Wait() 时它恒为 nil，快检会失效。
 	waitCh  chan struct{}
 	waitErr error
+
+	// stderrLog 是 ffmpeg 的 stderr 落盘句柄（11-08 真机修复）：提前退出时
+	// 读尾部拼进错误详情（去 URL）；文件随会话目录回收。nil = 创建失败（现状丢弃）。
+	stderrLog *os.File
 }
 
 var (
@@ -144,9 +151,9 @@ func castRelayStart(opts relayOptions) (*relaySessionInfo, error) {
 	if err != nil {
 		return nil, relayFail(ErrRelayInternal, "token 生成失败")
 	}
-	dir, err := os.MkdirTemp("", "aquan-cast-")
+	dir, err := mkRelayTempDir(opts)
 	if err != nil {
-		return nil, relayFail(ErrRelayInternal, "临时目录创建失败")
+		return nil, relayFail(ErrRelayInternal, "临时目录创建失败: "+err.Error())
 	}
 
 	port, ln, err := listenOnFreePort(relayBasePort)
@@ -180,7 +187,18 @@ func castRelayStart(opts relayOptions) (*relaySessionInfo, error) {
 	cmd := exec.Command(args[0], args[1:]...)
 	// 上游是签名直链：清空代理环境（guoappxxx 同款坑）。
 	cmd.Env = cleanProxyEnv()
-	cmd.Stderr = nil // ffmpeg 日志体积大且含上游 URL：不落盘，靠退出码与快检判断。
+	// CA 定位（11-08 真机修复）：Android 没有默认证书路径，https 上游握手
+	// 会因证书校验失败早退；Dart 把内置 CA 包落盘后经 ca_file 传入。
+	// OpenSSL 构建读 SSL_CERT_FILE；schannel/gnutls 构建忽略之（桌面无影响）。
+	if opts.CAFile != "" {
+		cmd.Env = append(cmd.Env, "SSL_CERT_FILE="+opts.CAFile)
+	}
+	// ffmpeg stderr 落会话目录（castdesktop 同款做法）：体积大且含上游 URL，
+	// 不全量外发；ffmpeg 提前退出时读「去 URL 的尾部」拼进错误详情可诊断。
+	if stderrLog, err := os.Create(filepath.Join(dir, "ffmpeg-stderr.log")); err == nil {
+		cmd.Stderr = stderrLog
+		session.stderrLog = stderrLog
+	}
 	session.cmd = cmd
 	if err := cmd.Start(); err != nil {
 		srv.Close()
@@ -193,6 +211,9 @@ func castRelayStart(opts relayOptions) (*relaySessionInfo, error) {
 	session.waitCh = make(chan struct{})
 	go func() {
 		session.waitErr = cmd.Wait()
+		if session.stderrLog != nil {
+			_ = session.stderrLog.Close()
+		}
 		close(session.waitCh)
 	}()
 
@@ -226,9 +247,12 @@ func castRelayStart(opts relayOptions) (*relaySessionInfo, error) {
 				relayMu.Unlock()
 				return session.info(), nil
 			}
+			// 详情先读（relayStop 会 RemoveAll 会话目录）：stderr 尾部是
+			// 「证书校验失败 / 403 / 密钥错」等真因的唯一线索（11-08）。
+			detail := relayStderrTail(dir)
 			relayStop(sessionID)
 			return nil, relayFail(ErrRelayUnavailable,
-				"中继启动失败（ffmpeg 提前退出，检查密钥与播放地址）")
+				"中继启动失败（ffmpeg 提前退出，检查密钥与播放地址）"+detail)
 		case <-deadline.C:
 			// 超时但进程仍存活：转码慢属正常，放行交给电视端边转边播。
 			if opts.Format == "ts" {
@@ -343,14 +367,88 @@ func relayStop(sessionID string) {
 // relaySessions 随内存消失，临时目录成孤儿（实测 Temp 残留 30+）。启动时
 // 活跃会话为空，Temp 下 aquan-cast- 前缀目录全部属于孤儿，直接删除；
 // 30s 周期的 sweeper 只覆盖进程存活期。
+//
+// 基址（11-08）：Android 会话目录在 Dart 传入的 workDir（应用缓存目录），
+// 桌面仍走 os.TempDir()——两处都扫，覆盖旧版本残留与测试混跑。
 func sweepOrphanDirs() {
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "aquan-cast-*"))
+	relayWorkDirMu.Lock()
+	base := relayWorkDirCurrent
+	relayWorkDirMu.Unlock()
+	bases := []string{os.TempDir()}
+	if base != "" && base != os.TempDir() {
+		bases = append(bases, base)
+	}
+	for _, dir := range bases {
+		matches, err := filepath.Glob(filepath.Join(dir, "aquan-cast-*"))
+		if err != nil {
+			continue
+		}
+		for _, match := range matches {
+			_ = os.RemoveAll(match)
+		}
+	}
+}
+
+// relayWorkDirCurrent 记录最近一次会话的临时目录基址（mkRelayTempDir 覆写），
+// sweepOrphanDirs 据此找到 Android 应用缓存目录里的孤儿目录。
+var (
+	relayWorkDirMu      sync.Mutex
+	relayWorkDirCurrent string
+)
+
+// mkRelayTempDir 按基址建会话临时目录（11-08 真机修复）：
+// Android 应用进程没有 TMPDIR 环境变量，os.MkdirTemp("", …) 落 /tmp 必败
+// （真机实证 CAST_RELAY_INTERNAL「临时目录创建失败」）。Dart 经 work_dir
+// 传入 path_provider 临时目录；为空保持现状（桌面零回归）。
+func mkRelayTempDir(opts relayOptions) (string, error) {
+	relayWorkDirMu.Lock()
+	relayWorkDirCurrent = opts.WorkDir
+	relayWorkDirMu.Unlock()
+	if opts.WorkDir != "" {
+		return os.MkdirTemp(opts.WorkDir, "aquan-cast-")
+	}
+	return os.MkdirTemp("", "aquan-cast-")
+}
+
+// urlRedactRe 匹配 http(s) 直链：签名 URL 绝不能进错误详情（弹窗/日志可见）。
+var urlRedactRe = regexp.MustCompile(`https?://\S+`)
+
+// redactUrls 把字符串里的 http(s) 直链替换成 <url>。
+func redactUrls(s string) string {
+	return urlRedactRe.ReplaceAllString(s, "<url>")
+}
+
+// relayStderrTail 读会话目录 ffmpeg-stderr.log 的尾部（≤800 字节），去 URL 后
+// 以 "; stderr: …" 形式返回；文件缺失/为空返回空串（不拼详情）。
+func relayStderrTail(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, "ffmpeg-stderr.log"))
 	if err != nil {
-		return
+		return ""
 	}
-	for _, dir := range matches {
-		_ = os.RemoveAll(dir)
+	s := strings.TrimSpace(string(data))
+	if s == "" {
+		return ""
 	}
+	if len(s) > 800 {
+		s = s[len(s)-800:]
+		// 尾切可能劈开 UTF-8 字符：跳到下一个合法起始字节。
+		for len(s) > 0 && !utf8ValidPrefix(s) {
+			s = s[1:]
+		}
+	}
+	return "; stderr: " + redactUrls(s)
+}
+
+// utf8ValidPrefix 判断 s 是否从合法 UTF-8 序列开始（前导字节连续性检查）。
+func utf8ValidPrefix(s string) bool {
+	if s == "" {
+		return true
+	}
+	b := s[0]
+	if b < 0x80 || (b&0xC0) == 0xC0 {
+		return true // ASCII 或多字节序列首字节
+	}
+	return false // 0x80-0xBF 是续字节：被劈开
 }
 
 // startSweeper 启动空闲回收（30s 扫一遍，5 分钟无访问即回收）。

@@ -2420,17 +2420,29 @@ class _PlayerScreenState extends State<PlayerScreen>
       } on AquaException catch (e) {
         ErrorLog.instance.record('投屏', '中继启动失败：${e.friendlyText}',
             StackTrace.current);
+        // 真因进诊断时间线（11-08）：面板诊断报告据此区分「目录/端口」与
+        // 「ffmpeg 早退」等失败面，不再只看到固定文案。
+        CastDiagnostics.instance.recordTimeline('中继启动失败：${e.friendlyText}');
         if (mounted) {
-          await _chooseRelayFallback(e.friendlyText, (mirror) {
-            needsMirror = mirror;
-          });
+          await _chooseRelayFallback(
+            e.friendlyText,
+            detail: e.message,
+            onChoose: (mirror) {
+              needsMirror = mirror;
+            },
+          );
         }
       } catch (e) {
         ErrorLog.instance.record('投屏', '中继启动失败：$e', StackTrace.current);
+        CastDiagnostics.instance.recordTimeline('中继启动失败：$e');
         if (mounted) {
-          await _chooseRelayFallback('加密中继启动失败', (mirror) {
-            needsMirror = mirror;
-          });
+          await _chooseRelayFallback(
+            '加密中继启动失败',
+            detail: '$e',
+            onChoose: (mirror) {
+              needsMirror = mirror;
+            },
+          );
         }
       }
     }
@@ -2643,15 +2655,35 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// 中继失败后的选择（M1-6 / AC-21）：直投原 URL 或切换镜像屏幕。
   /// [onChoose] 收到 true = 切换镜像；false = 直投原 URL（默认项）。
-  /// 原始异常已由调用方记入 ErrorLog，这里只展示固定文案。
-  Future<void> _chooseRelayFallback(
-      String reason, void Function(bool mirror) onChoose) async {
+  /// 原始异常已由调用方记入 ErrorLog 与诊断时间线；[detail] 是 Go 侧原始
+  /// 原因（11-08：ffmpeg stderr 尾部已去 URL，可安全展示——不再让用户只
+  /// 看到「中继启动失败，请重试」而无法反馈真因）。
+  Future<void> _chooseRelayFallback(String reason,
+      {String? detail, required void Function(bool mirror) onChoose}) async {
     final mirror = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('本机中继不可用'),
-        content: Text('$reason。\n\n可选择直接投送原始地址'
-            '（部分格式电视可能不支持），或改用镜像屏幕投屏。'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('$reason。\n\n可选择直接投送原始地址'
+                '（部分格式电视可能不支持），或改用镜像屏幕投屏。'),
+            if (detail != null && detail.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                detail.length > 200 ? '${detail.substring(0, 200)}…' : detail,
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: Theme.of(context).colorScheme.outline),
+                maxLines: 4,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ],
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, true),

@@ -44,6 +44,26 @@ void main() {
       expect(back['format'], 'ts');
       expect(back['url'], 'http://up/1.m3u8');
     });
+
+    test('work_dir/ca_file 默认空串（Go 侧空值回落现状，旧测试零回归）', () {
+      final payload = castRelayStartPayload(url: 'http://up/1.m3u8');
+      expect(payload['work_dir'], '');
+      expect(payload['ca_file'], '');
+    });
+
+    test('work_dir/ca_file 显式透传（11-08 真机修复，与 Go JSON 标签对齐）', () {
+      final payload = castRelayStartPayload(
+        url: 'http://up/1.m3u8',
+        workDir: '/data/user/0/x/cache',
+        caFile: '/data/user/0/x/cache/aquan-cast-ca.pem',
+      );
+      expect(payload['work_dir'], '/data/user/0/x/cache');
+      expect(payload['ca_file'], '/data/user/0/x/cache/aquan-cast-ca.pem');
+      final back =
+          Map<String, dynamic>.from(jsonDecode(jsonEncode(payload)) as Map);
+      expect(back['work_dir'], '/data/user/0/x/cache');
+      expect(back['ca_file'], '/data/user/0/x/cache/aquan-cast-ca.pem');
+    });
   });
 
   group('SettingsStore 画质档位持久化（R2 / AC-2）', () {

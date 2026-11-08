@@ -15,6 +15,9 @@ import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 // 继承 AudioServiceActivity（它本身继承 FlutterActivity）才能让 audio_service 的
 // 前台服务拿到 Activity 上下文；同时保住下面 aquan/cast 的自定义通道。
@@ -32,10 +35,12 @@ class MainActivity : AudioServiceActivity() {
         const val TAG = "MainActivity"
         const val REQ_POST_NOTIFICATIONS = 4001
         const val REQ_MIRROR_PERMISSION = 4002
+        const val CRASH_LOG_MAX_BYTES = 256 * 1024
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        installCrashLogger()
         // DLNA 投屏设备发现：不持 MulticastLock 时多数机型收不到 SSDP 组播响应。
         // 所有 aquan/cast 方法统一 runCatching + 结构化返回：任何原生异常都不会
         // 冒出通道（R4），原始堆栈只写 logcat，不回传 Dart 作用户可见文案。
@@ -263,6 +268,34 @@ class MainActivity : AudioServiceActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    /// 11-08 真机修复：默认未捕获异常处理器装饰器——任何线程的未捕获
+    /// Throwable 先落 `<filesDir>/native_crash.log`（256KB 滚动）+ logcat，
+    /// 再交还原 handler（**崩溃行为不变**，只增可观测）：真机闪退后可经
+    /// 「导出运行日志」或 adb 拿到原生堆栈，不再黑盒排查。
+    private fun installCrashLogger() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        if (previous == null) return
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            runCatching { writeNativeCrashLog(thread, throwable) }
+                .onFailure { Log.e(TAG, "write native crash log failed", it) }
+            previous.uncaughtException(thread, throwable)
+        }
+    }
+
+    private fun writeNativeCrashLog(thread: Thread, throwable: Throwable) {
+        val dir = filesDir ?: return
+        val file = File(dir, "native_crash.log")
+        val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        val text = "$stamp thread=${thread.name}\n${throwable.stackTraceToString()}\n\n"
+        if (file.length() > CRASH_LOG_MAX_BYTES) {
+            // 只留最近一次：滚动即重写，日志永不超限。
+            file.writeText(text)
+        } else {
+            file.appendText(text)
+        }
+        Log.e(TAG, "uncaught exception on ${thread.name}", throwable)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

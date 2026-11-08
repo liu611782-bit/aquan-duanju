@@ -837,3 +837,117 @@ func TestSweepOrphanDirs(t *testing.T) {
 		t.Fatalf("非 aquan-cast 目录被误删: %s", other)
 	}
 }
+
+// --- 11-08-android-cast-device-fixes：workDir / stderr 诊断 / URL 清洗 ---
+
+func TestMkRelayTempDirWorkDir(t *testing.T) {
+	base, err := os.MkdirTemp("", "aquan-workdir-base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(base)
+
+	dir, err := mkRelayTempDir(relayOptions{WorkDir: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	if !strings.HasPrefix(dir, base) {
+		t.Fatalf("会话目录应落在 WorkDir 下: dir=%s base=%s", dir, base)
+	}
+	relayWorkDirMu.Lock()
+	got := relayWorkDirCurrent
+	relayWorkDirMu.Unlock()
+	if got != base {
+		t.Fatalf("relayWorkDirCurrent 未随 mkRelayTempDir 更新: %s", got)
+	}
+
+	// 空基址回落现状（os.TempDir），且不清 relayWorkDirCurrent 之外的值。
+	dir2, err := mkRelayTempDir(relayOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir2)
+	if !strings.HasPrefix(dir2, os.TempDir()) {
+		t.Fatalf("空 WorkDir 应回落 os.TempDir(): %s", dir2)
+	}
+}
+
+func TestSweepOrphanDirsWorkDir(t *testing.T) {
+	base, err := os.MkdirTemp("", "aquan-sweep-base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(base)
+
+	orphan := filepath.Join(base, "aquan-cast-orphan")
+	if err := os.Mkdir(orphan, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(base, "not-aquan-cast-keep")
+	if err := os.Mkdir(keep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 伪装最近会话在 base：清扫应覆盖它（os.TempDir 也要扫，防误删无关目录不成立——
+	// base 内非前缀目录必须保留）。
+	relayWorkDirMu.Lock()
+	prev := relayWorkDirCurrent
+	relayWorkDirCurrent = base
+	relayWorkDirMu.Unlock()
+	defer func() {
+		relayWorkDirMu.Lock()
+		relayWorkDirCurrent = prev
+		relayWorkDirMu.Unlock()
+	}()
+
+	sweepOrphanDirs()
+
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("WorkDir 下的孤儿目录未被清理: %s", orphan)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("非 aquan-cast 目录被误删: %s", keep)
+	}
+}
+
+func TestRedactUrls(t *testing.T) {
+	in := "https://cdn.example.com/v.mp4?sig=abc http://a.b/c 403 Forbidden"
+	got := redactUrls(in)
+	if strings.Contains(got, "example.com") || strings.Contains(got, "a.b") {
+		t.Fatalf("URL 未清洗: %s", got)
+	}
+	if !strings.Contains(got, "<url>") || !strings.Contains(got, "403 Forbidden") {
+		t.Fatalf("清洗后应保留非 URL 文本: %s", got)
+	}
+}
+
+func TestRelayStderrTail(t *testing.T) {
+	dir := t.TempDir()
+	if got := relayStderrTail(dir); got != "" {
+		t.Fatalf("无日志文件应返回空串: %q", got)
+	}
+	log := filepath.Join(dir, "ffmpeg-stderr.log")
+	content := "https://secret.example.com/v.mp4?sig=1: Server returned 403 Forbidden (access denied)"
+	if err := os.WriteFile(log, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := relayStderrTail(dir)
+	if strings.Contains(got, "secret.example") {
+		t.Fatalf("stderr 尾部含未清洗 URL: %s", got)
+	}
+	if !strings.Contains(got, "403 Forbidden") || !strings.HasPrefix(got, "; stderr: ") {
+		t.Fatalf("尾部格式不符: %s", got)
+	}
+
+	// 超长截尾：只保留最后 800 字节且不劈 UTF-8。
+	long := strings.Repeat("a", 900) + "中文结尾"
+	if err := os.WriteFile(log, []byte("https://x.y/z "+long), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tail := relayStderrTail(dir)
+	if len(tail) == 0 || strings.Contains(tail, "中文结尾") == false {
+		t.Fatalf("超长日志应保留尾部内容: %s", tail)
+	}
+}

@@ -130,6 +130,9 @@ flutter:
     - assets/venera/init.js
     - assets/fongmi/http.js
     - assets/fongmi/lib/
+    # 投屏中继 CA 证书包（11-08）：Android 无默认 CA 路径，中继 https 上游
+    # 经 SSL_CERT_FILE 定位（RelayDirs 拷到临时目录后透传）。
+    - assets/cast/cacert.pem
 
   fonts:
     - family: LXGWWenKai

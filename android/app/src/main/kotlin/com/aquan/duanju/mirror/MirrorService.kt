@@ -205,21 +205,23 @@ class MirrorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        // Android 14 起 startForeground(mediaProjection) 要求调用前已持有
-        // MediaProjection，且授权 token 只能消费一次：在服务内先创建再起前台。
-        try {
-            createProjectionFromGrant()
-        } catch (e: Exception) {
-            Log.e(TAG, "projection unavailable", e)
-            failAndStop("no-projection")
-            return
-        }
+        // Android 14+（targetSdk 34+）要求：getMediaProjection() 必须在
+        // startForeground(FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION) **之后**
+        // 调用，否则 SecurityException（11-08 真机修复——原顺序在 14+ 全灭）。
+        // 授权 token 只能消费一次：先起前台、再在服务内消费 token。
         try {
             startAsForeground()
         } catch (e: Exception) {
             // 前台服务受限 / 通知渠道异常：不重抛，走 mirrorStopped 优雅退出。
             Log.e(TAG, "startForeground failed", e)
             failAndStop("foreground-failed")
+            return
+        }
+        try {
+            createProjectionFromGrant()
+        } catch (e: Exception) {
+            Log.e(TAG, "projection unavailable", e)
+            failAndStop("no-projection")
         }
     }
 
@@ -237,10 +239,12 @@ class MirrorService : Service() {
         Thread({
             try {
                 runMirror(withAudio)
-            } catch (e: Exception) {
+            } catch (t: Throwable) {
                 // 编码器 / VirtualDisplay / HTTP 服务初始化异常统一走事件，不杀进程。
-                Log.e(TAG, "mirror failed", e)
-                emitStopped("error", "${e.message}")
+                // 11-08 真机修复：catch Throwable——Error 级（OOM/LinkageError 等）
+                // 也降级为 mirrorStopped 优雅停机，绝不让 worker 异常炸掉整个进程。
+                Log.e(TAG, "mirror failed", t)
+                emitStopped("error", "${t.message}")
             } finally {
                 cleanup()
                 emitStopped("stopped") // 失败路径已发过，去重后不会二次通知。

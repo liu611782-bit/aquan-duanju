@@ -9,6 +9,7 @@ import '../models/manga.dart';
 import '../models/models.dart';
 import '../models/post.dart';
 import 'aqua_client.dart';
+import 'cast/relay_dirs.dart';
 
 /// fetchImage 的最小接口，便于缓存层与测试注入假实现；[AquaApi] 实现它。
 abstract class AquaImageFetcher {
@@ -96,6 +97,9 @@ class AquaApi implements AquaImageFetcher, MangaPageFetcher {
   /// balanced / compact——Go 侧对空/未知值缺省回 balanced（现状参数）。
   /// [subtitleUrl] 是会话字幕地址（R3）：非空时中继媒体响应带
   /// `CaptionInfo.sec` 第三通道。
+  /// [workDir]/[caFile]（11-08 真机修复）：默认 null 时经 [RelayDirs] 解析——
+  /// Android 进程无 TMPDIR、无默认 CA 路径，缺了会「临时目录创建失败」或
+  /// https 上游证书校验失败；显式传 '' 可跳过解析（单测断言 payload 用）。
   Future<Map<String, dynamic>> castRelayStart({
     required String url,
     String backupUrl = '',
@@ -106,7 +110,11 @@ class AquaApi implements AquaImageFetcher, MangaPageFetcher {
     String format = '',
     String subtitleUrl = '',
     String quality = '',
+    String? workDir,
+    String? caFile,
   }) async {
+    final resolvedWorkDir = workDir ?? await RelayDirs.workDir();
+    final resolvedCaFile = caFile ?? await RelayDirs.caFile();
     final r = await _client.call('castRelayStart', [
       jsonEncode(castRelayStartPayload(
         url: url,
@@ -118,6 +126,8 @@ class AquaApi implements AquaImageFetcher, MangaPageFetcher {
         format: format,
         subtitleUrl: subtitleUrl,
         quality: quality,
+        workDir: resolvedWorkDir,
+        caFile: resolvedCaFile,
       )),
     ]);
     return _map(r);
@@ -420,6 +430,8 @@ Map<String, dynamic> castRelayStartPayload({
   String format = '',
   String subtitleUrl = '',
   String quality = '',
+  String? workDir,
+  String? caFile,
 }) =>
     <String, dynamic>{
       'url': url,
@@ -431,4 +443,7 @@ Map<String, dynamic> castRelayStartPayload({
       'format': format,
       'subtitle_url': subtitleUrl,
       'quality': quality,
+      // 11-08 真机修复（可空：Go 侧空值回落现状，桌面/旧测试零回归）。
+      'work_dir': workDir ?? '',
+      'ca_file': caFile ?? '',
     };

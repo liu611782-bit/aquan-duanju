@@ -69,7 +69,7 @@ def stage_android_ffmpeg(jni: Path) -> None:
     APK 不含 ffmpeg，加密分集只能退化成镜像投屏。
     """
     src_dir = REPO / "android" / "ffmpeg"
-    for abi in ("arm64-v8a", "armeabi-v7a"):
+    for abi in ("arm64-v8a", "armeabi-v7a", "x86_64"):
         src = src_dir / f"libffmpeg-{abi}.so"
         if not src.exists():
             print(f"skip ffmpeg for {abi}: {src} 不存在")

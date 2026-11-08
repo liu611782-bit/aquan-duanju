@@ -260,6 +260,10 @@ Future<String?> showCastSheet(
     // 跳转诊断弹窗（配方表查询用）。
     return showModalBottomSheet<String>(
       context: context,
+      // 11-08 真机修复：默认限高 9/16 屏，手机上会话操作被压缩；
+      // isScrollControlled + useSafeArea 让面板撑满整屏（内容自适应）。
+      isScrollControlled: true,
+      useSafeArea: true,
       builder: (sheetContext) => _CastSessionSheet(scope: scope),
     );
   }
@@ -275,6 +279,11 @@ Future<String?> showCastSheet(
   if (context.mounted) {
     await showModalBottomSheet<String>(
       context: context,
+      // 11-08 真机修复：设备选择面板全屏化——默认限高 9/16 屏导致设备列表
+      // 被压到选不中；isScrollControlled + useSafeArea 后设备多时撑满整屏
+      // （内容整体可滚动），设备少时仍按内容高度。
+      isScrollControlled: true,
+      useSafeArea: true,
       builder: (sheetContext) => _CastDeviceSheet(
         scope: scope,
         media: media,
@@ -383,10 +392,15 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
       for (final d in cast.pinned)
         if (!devices.any((x) => x.id == d.id)) d,
     ];
+    // 11-08 真机修复：整体可滚动——头部行/兼容模式/画质/恢复卡都是不可压缩
+    // 的 inflexible 子项，设备多时加上设备列表会超出面板限高，原 Flexible +
+    // ListView 的组合会把它们顶出溢出。现在外层 SingleChildScrollView 滚动
+    // 兜底，设备列表改为 shrinkWrap 内嵌（不自行滚动）。
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.all(16),
-        child: Column(
+        child: SingleChildScrollView(
+          child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -501,12 +515,13 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
             // 会话恢复卡片（R1.2）：空闲态且有可恢复记录时显示在设备列表
             // 上方一行，不阻塞列表；损坏记录静默清理后隐藏。
             ..._resumeCard(context, theme),
-            Flexible(
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: devices.length +
-                    pinnedOffline.length +
-                    (devices.isEmpty && pinnedOffline.isEmpty ? 1 : 0),
+            ListView.builder(
+              shrinkWrap: true,
+              // 外层 SingleChildScrollView 统一滚动：内嵌列表只负责铺开。
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: devices.length +
+                  pinnedOffline.length +
+                  (devices.isEmpty && pinnedOffline.isEmpty ? 1 : 0),
                 itemBuilder: (itemContext, index) {
                   if (index < devices.length) {
                     final d = devices[index];
@@ -577,7 +592,6 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
                     ),
                   );
                 },
-              ),
             ),
             const SizedBox(height: 8),
             Row(
@@ -622,6 +636,7 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
                 child: Center(child: AppLoading.inline()),
               ),
           ],
+          ),
         ),
       ),
     );
