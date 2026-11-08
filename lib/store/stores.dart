@@ -2505,13 +2505,16 @@ class PlaybackHealthStore extends _JsonFileStore {
   Future<void> record(String key, PlaybackHealthEvent event) async {
     await ensureLoaded();
     registry.record(key, event);
-    await _writeJson(registry.toJson());
+    // 读改写整体入队（[_updateJson]，11-08-store-race-final）：文档仍由内存态
+    // （registry）构建，入队后与其它写者串行，并发混合写不再互相覆盖。
+    await _updateJson((existing) => registry.toJson());
     notifyListeners();
   }
 
   Future<void> clear() async {
     registry.clear();
-    await _writeJson(<String, dynamic>{});
+    // 必须落空文档（不能返回 null），与旧版 `_writeJson({})` 一致。
+    await _updateJson((existing) => <String, dynamic>{});
     notifyListeners();
   }
 
@@ -2541,7 +2544,7 @@ class PlaybackHealthStore extends _JsonFileStore {
             : PlaybackHealthEvent.success,
       );
     }
-    await _writeJson(registry.toJson());
+    await _updateJson((existing) => registry.toJson());
     return registry.records.length - before;
   }
 }
@@ -2628,13 +2631,16 @@ class BookmarkStore extends _JsonFileStore {
     await _flush();
   }
 
+  /// 全量写盘（整表覆写）。读改写整体入队（[_updateJson]，
+  /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
+  /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
   Future<void> _flush() async {
-    await _writeJson(<String, dynamic>{
-      for (final entry in _byBook.entries)
-        entry.key: <Map<String, dynamic>>[
-          for (final item in entry.value) item.toJson(),
-        ],
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          for (final entry in _byBook.entries)
+            entry.key: <Map<String, dynamic>>[
+              for (final item in entry.value) item.toJson(),
+            ],
+        });
     notifyListeners();
   }
 
@@ -2770,13 +2776,16 @@ class MarkingStore extends _JsonFileStore {
     await _flush();
   }
 
+  /// 全量写盘（整表覆写）。读改写整体入队（[_updateJson]，
+  /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
+  /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
   Future<void> _flush() async {
-    await _writeJson(<String, dynamic>{
-      for (final entry in _byBook.entries)
-        entry.key: <Map<String, dynamic>>[
-          for (final item in entry.value) item.toJson(),
-        ],
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          for (final entry in _byBook.entries)
+            entry.key: <Map<String, dynamic>>[
+              for (final item in entry.value) item.toJson(),
+            ],
+        });
     notifyListeners();
   }
 
@@ -2909,14 +2918,17 @@ class ReplaceRuleStore extends _JsonFileStore {
     await _flush();
   }
 
+  /// 全量写盘（规则整表覆写）。读改写整体入队（[_updateJson]，
+  /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
+  /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
   Future<void> _flush() async {
-    await _writeJson(<String, dynamic>{
-      'rules': <Map<String, dynamic>>[
-        for (final rule in _custom) rule.toJson(),
-      ],
-      'hidden_builtin': _hiddenBuiltin.toList(),
-      'builtin_enabled': _builtinEnabled,
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          'rules': <Map<String, dynamic>>[
+            for (final rule in _custom) rule.toJson(),
+          ],
+          'hidden_builtin': _hiddenBuiltin.toList(),
+          'builtin_enabled': _builtinEnabled,
+        });
     notifyListeners();
   }
 
@@ -3036,7 +3048,7 @@ class ListenEntry {
 
 /// 听书进度存储（`aquan_listen.json`）。
 class ListenProgressStore extends _JsonFileStore {
-  ListenProgressStore() : super('aquan_listen.json');
+  ListenProgressStore({super.testDirectory}) : super('aquan_listen.json');
 
   final Map<String, ListenEntry> _entries = {};
 
@@ -3081,10 +3093,13 @@ class ListenProgressStore extends _JsonFileStore {
     await _flush();
   }
 
+  /// 全量写盘（听书进度整表覆写）。读改写整体入队（[_updateJson]，
+  /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
+  /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
   Future<void> _flush() async {
-    await _writeJson({
-      for (final e in _entries.entries) e.key: e.value.toJson(),
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          for (final e in _entries.entries) e.key: e.value.toJson(),
+        });
     notifyListeners();
   }
 
@@ -3211,11 +3226,14 @@ class SourcesStore extends _JsonFileStore {
   String _normApi(String api) =>
       api.endsWith('/') ? api.substring(0, api.length - 1) : api;
 
+  /// 全量写盘（源清单整表覆写）。读改写整体入队（[_updateJson]，
+  /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
+  /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
   Future<void> _flush() async {
-    await _writeJson({
-      'version': 1,
-      'sources': [for (final s in _sources.values) s.toJson()],
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          'version': 1,
+          'sources': [for (final s in _sources.values) s.toJson()],
+        });
     notifyListeners();
   }
 
@@ -3293,13 +3311,17 @@ class SourceHealthStore extends _JsonFileStore {
     await _flush();
   }
 
+  /// 全量写盘（健康记录整表覆写）。读改写整体入队（[_updateJson]，
+  /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
+  /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
+  /// `_probes`（会话内主动测速记忆）依旧不落盘。
   Future<void> _flush() async {
-    await _writeJson({
-      'version': 1,
-      'health': {
-        for (final e in _health.entries) e.key: e.value.toJson(),
-      },
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          'version': 1,
+          'health': {
+            for (final e in _health.entries) e.key: e.value.toJson(),
+          },
+        });
     notifyListeners();
   }
 
@@ -3487,23 +3509,26 @@ class SourceDiscoveryStore extends _JsonFileStore {
     await _flush();
   }
 
+  /// 全量写盘（找源记录整表覆写）。读改写整体入队（[_updateJson]，
+  /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
+  /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
   Future<void> _flush() async {
-    await _writeJson(<String, dynamic>{
-      'version': 1,
-      if (lastRunAt != null) 'last_run_at': lastRunAt!.millisecondsSinceEpoch,
-      if (lastOkAt != null) 'last_ok_at': lastOkAt!.millisecondsSinceEpoch,
-      if (lastError.isNotEmpty) 'last_error': lastError,
-      'fail_streak': failStreak,
-      'merged': <String, dynamic>{
-        'sites': mergedSiteCount,
-        if (mergedBuiltAt != null)
-          'built_at': mergedBuiltAt!.millisecondsSinceEpoch,
-        'url': mergedSourceUrl,
-      },
-      'entries': <String, dynamic>{
-        for (final e in _entries.entries) e.key: e.value.toJson(),
-      },
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          'version': 1,
+          if (lastRunAt != null) 'last_run_at': lastRunAt!.millisecondsSinceEpoch,
+          if (lastOkAt != null) 'last_ok_at': lastOkAt!.millisecondsSinceEpoch,
+          if (lastError.isNotEmpty) 'last_error': lastError,
+          'fail_streak': failStreak,
+          'merged': <String, dynamic>{
+            'sites': mergedSiteCount,
+            if (mergedBuiltAt != null)
+              'built_at': mergedBuiltAt!.millisecondsSinceEpoch,
+            'url': mergedSourceUrl,
+          },
+          'entries': <String, dynamic>{
+            for (final e in _entries.entries) e.key: e.value.toJson(),
+          },
+        });
     notifyListeners();
   }
 
@@ -3638,15 +3663,19 @@ class MarketSitesStore extends _JsonFileStore {
     if (changed) await _flush();
   }
 
+  /// 全量写盘（索引站/解析接口整表覆写）。读改写整体入队（[_updateJson]，
+  /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
+  /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
+  /// `loadFromDisk` 首次使用的内置站落盘也经此入队（不改读路径代码）。
   Future<void> _flush() async {
-    await _writeJson({
-      'version': 1,
-      'sites': [for (final s in _sites) s.toJson()],
-      'parses': [
-        for (final p in _parses)
-          {'name': p.name, 'url': p.url, 'ext': p.ext},
-      ],
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          'version': 1,
+          'sites': [for (final s in _sites) s.toJson()],
+          'parses': [
+            for (final p in _parses)
+              {'name': p.name, 'url': p.url, 'ext': p.ext},
+          ],
+        });
     notifyListeners();
   }
 
@@ -4162,13 +4191,16 @@ class LivesStore extends _JsonFileStore {
     }
   }
 
+  /// 全量写盘（直播源整表覆写）。读改写整体入队（[_updateJson]，
+  /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
+  /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
   Future<void> _flush() async {
-    await _writeJson({
-      'version': 1,
-      'lives': [for (final e in _entries) e.toJson()],
-      if (_lastLiveId != null) 'last_live_id': _lastLiveId,
-      if (_lastChannelName != null) 'last_channel': _lastChannelName,
-    });
+    await _updateJson((existing) => <String, dynamic>{
+          'version': 1,
+          'lives': [for (final e in _entries) e.toJson()],
+          if (_lastLiveId != null) 'last_live_id': _lastLiveId,
+          if (_lastChannelName != null) 'last_channel': _lastChannelName,
+        });
     notifyListeners();
   }
 
@@ -4280,7 +4312,11 @@ class SeedStore extends _JsonFileStore {
   @override
   Future<void> persist(Map<String, dynamic> json) => _writeJson(json);
 
-  Future<void> _flush() => _writeJson(<String, dynamic>{
+  /// 全量写盘（种子清单整表覆写）。读改写整体入队（[_updateJson]，
+  /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
+  /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
+  /// 通知时机不变：`_flush` 不 notifyListeners，由各写者显式通知。
+  Future<void> _flush() => _updateJson((existing) => <String, dynamic>{
         'seeds': <Map<String, dynamic>>[
           for (final seed in _custom) seed.toJson(),
         ],
@@ -4451,8 +4487,14 @@ class ReaderSettingsStore extends _JsonFileStore {
     await update(_value.withBookOverride(bookId, field, value));
   }
 
+  /// 全量写盘（阅读设置整表覆写）。读改写整体入队（[_updateJson]，
+  /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
+  /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
+  /// 通知时机不变：[update] 仍是先 notifyListeners 再落盘。
   Future<void> _flush() async {
-    await _writeJson({'settings': _value.toJson()});
+    await _updateJson((existing) => <String, dynamic>{
+          'settings': _value.toJson(),
+        });
   }
 
   /// 备份/还原用。
