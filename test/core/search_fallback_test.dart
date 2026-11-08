@@ -20,6 +20,75 @@ void main() {
     });
   });
 
+  group('频道补充检索（supplementary）', () {
+    test('综合结果已含精确标题命中：不调补充检索', () async {
+      var supplementCalls = 0;
+      final outcome = await searchWithDegradedRetry(
+        (q) async => _page([_item('1', '万妖图录传'), _item('2', '万妖图录传第一季')]),
+        '万妖图录传',
+        supplementary: (q) async {
+          supplementCalls++;
+          return _page([_item('3', '万妖图录传')]);
+        },
+      );
+      expect(supplementCalls, 0);
+      expect(outcome.supplemented, isFalse);
+      expect(outcome.page.items.length, 2);
+    });
+
+    test('综合只有衍生季（无精确命中）：并入频道检索的本体', () async {
+      final outcome = await searchWithDegradedRetry(
+        (q) async => _page([_item('1', '万妖图录传第一季'), _item('2', '万妖图录传！')]),
+        '万妖图录传',
+        supplementary: (q) async => _page([_item('3', '万妖图录传')]),
+      );
+      expect(outcome.supplemented, isTrue);
+      expect(outcome.page.items.map((e) => e.id), contains('3'));
+      expect(outcome.degraded, isFalse);
+    });
+
+    test('补充检索异常不打断：原词命中照常返回', () async {
+      final outcome = await searchWithDegradedRetry(
+        (q) async => _page([_item('1', '万妖图录传第一季')]),
+        '万妖图录传',
+        supplementary: (q) async => throw Exception('频道挂了'),
+        onError: (_, _) {},
+      );
+      expect(outcome.supplemented, isFalse);
+      expect(outcome.page.items.length, 1);
+    });
+
+    test('综合为空且补充命中：不再走退化链', () async {
+      var degradedCalls = 0;
+      final outcome = await searchWithDegradedRetry(
+        (q) async => _page(const []),
+        '万妖图录传',
+        supplementary: (q) async => _page([_item('3', '万妖图录传')]),
+        onError: (_, _) {},
+      );
+      expect(outcome.supplemented, isTrue);
+      expect(outcome.degraded, isFalse);
+      expect(outcome.page.items.map((e) => e.id), contains('3'));
+      expect(degradedCalls, 0);
+      // 静默防抖：退化层未被调用（补充已命中即止）。
+      expect(outcome.page.items.length, 1);
+    });
+
+    test('补充与综合都为空：仍走退化链（回归）', () async {
+      final outcome = await searchWithDegradedRetry(
+        // 原词与补充都空，退化词「万妖图录」命中——mock 按词区分。
+        (q) async =>
+            q == '万妖图录' ? _page([_item('1', '万妖图录')]) : _page(const []),
+        '万妖图录传',
+        supplementary: (q) async => _page(const []),
+      );
+      expect(outcome.supplemented, isFalse);
+      expect(outcome.degraded, isTrue);
+      expect(outcome.query, '万妖图录');
+      expect(outcome.page.items.map((e) => e.id), contains('1'));
+    });
+  });
+
   group('degradedQueries', () {
     test('完整剧名：先去尾 1 字（用户实测「万妖图录」可命中），再去 2 字', () {
       expect(degradedQueries('万妖图录传'), ['万妖图录', '万妖']);

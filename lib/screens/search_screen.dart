@@ -180,14 +180,20 @@ class _SearchScreenState extends State<SearchScreen> {
       _error = null;
     });
     try {
-      // 服务端对完整剧名可能检索不到：结果为空且词长足够时按
-      // [searchWithDegradedRetry] 去尾退化重试，出结果时提示实际检索词。
+      // 两层兜底（根因见 search_fallback.dart 头注）：综合检索完整剧名
+      // 可能只给衍生季不含本体（无精确命中 → 频道检索补充），也可能为空
+      // （→ 去尾退化重试）；出补充/退化结果时提示实际检索口径。
       final outcome = await searchWithDegradedRetry(
         (term) => scope.api.search(term,
             tab: _dimension.tab,
             filters: _dimension.filtersFor(
                 _filter.isEmpty ? const [] : [_filter])),
         q,
+        // 频道补充：综合检索对完整剧名可能只给衍生季不含本体（实测
+        // 「万妖图录传」本体在漫剧频道结果里），无精确命中时补一次。
+        supplementary: _dimension.allowsFilters
+            ? (term) => scope.api.search(term, filters: const ['comic'])
+            : null,
         onError: (e, st) =>
             ErrorLog.instance.record('漫剧搜索', '退化重试失败（原词 $q）：$e', st),
       );
@@ -198,8 +204,11 @@ class _SearchScreenState extends State<SearchScreen> {
         _hasMore = outcome.page.hasMore;
         // 翻页沿用实际命中的检索词，保证结果集一致。
         _submitted = outcome.query;
-        _degradedNote =
-            outcome.degraded ? '未找到「$q」，已按「${outcome.query}」检索' : null;
+        _degradedNote = outcome.degraded
+            ? '未找到「$q」，已按「${outcome.query}」检索'
+            : outcome.supplemented
+                ? '已并入频道检索结果'
+                : null;
         _searching = false;
       });
     } catch (e) {

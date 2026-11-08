@@ -71,7 +71,11 @@ class HongguoBridgeAdapter implements SourceAdapter {
         page: 1,
         // 红果只参与第 1 页聚合，不再续页。
         hasMore: false,
-        notice: outcome.degraded ? '已按「${outcome.query}」检索' : '',
+        notice: outcome.degraded
+            ? '已按「${outcome.query}」检索'
+            : outcome.supplemented
+                ? '已并入频道检索结果'
+                : '',
       );
       yield const SourceSearchDone();
     } catch (e) {

@@ -1,10 +1,17 @@
-/// 漫剧搜索的退化重试。
+/// 漫剧搜索的退化重试与频道补充。
 ///
-/// 服务端检索对完整剧名可能不匹配：实测搜「万妖图录传」空结果、
-/// 搜「万妖图录」命中——全名带尾字时检索不到。客户端兜底：结果为空、
-/// query 含 CJK 且长度 ≥4 时，逐次去尾退化重试（至多 2 次），命中即止
-/// （更短的词只会匹配更宽，继续退化只会引入噪声），命中词与原词结果
-/// 合并去重（按 [SeriesSummary.id]，即红果 seriesId）。
+/// 根因修正（aquan-cli 直连服务端实测）：综合检索「万妖图录传」**非空**，
+/// 但只含衍生季（第一季/番外「万妖图录传！」），本体「万妖图录传」在
+/// 漫剧频道（filters=[comic]）结果里——退化重试在这种情况不会触发
+/// （结果非空）。因此两层兜底：
+///
+/// ① **频道补充**：原词有结果但没有任何条目标题精确等于原词时，并入
+///    [searchWithDegradedRetry.supplementary]（频道检索）把本体带回来；
+/// ② **退化重试**：结果为空、query 含 CJK 且长度 ≥4 时，逐次去尾退化
+///    重试（至多 2 次），命中即止（更短的词只会匹配更宽，继续退化只会
+///    引入噪声）。
+///
+/// 各层结果合并去重（按 [SeriesSummary.id]，即红果 seriesId）。
 library;
 
 import '../../models/models.dart';
@@ -46,6 +53,7 @@ class FallbackSearchResult {
     required this.page,
     required this.query,
     required this.degraded,
+    this.supplemented = false,
   });
 
   /// 合并去重后的结果页（cursor/hasMore 取自实际命中的那一页）。
@@ -57,19 +65,31 @@ class FallbackSearchResult {
   /// 是否按退化词出了结果（用于 UI「已按 X 检索」提示）；
   /// 全链为空时为 false（没有「实际检索词」可标注）。
   final bool degraded;
+
+  /// 是否并入了补充检索（频道检索）的结果——综合检索对完整剧名可能
+  /// 只返回衍生季而不含本体（实测：搜「万妖图录传」综合页只有第一季/番外，
+  /// 本体在漫剧频道结果里），补充检索把它带回来。
+  final bool supplemented;
 }
 
-/// 带退化重试的搜索：先用原词搜，结果为空且满足退化条件时逐次退化重试，
-/// 命中即止。所有层级的结果合并去重（按 id，先到者优先）。
+/// 带退化重试与频道补充的搜索：
 ///
-/// [search] 是单次搜索调用（调用方决定 tab/filters 等参数怎么带）；
-/// 原词调用的异常**原样抛出**（源失败要进编排器的健康统计/负缓存），
-/// 退化层的异常经 [onError] 交给调用方记 ErrorLog 后视为该层为空，
-/// 不打断后续退化；[isCancelled] 返回真时停止后续重试（取消令牌）。
+/// 1. 原词搜索；**有结果但没有任何条目的标题精确等于原词**时，调用
+///    [supplementary]（频道检索，如漫剧频道）把本体带回来合并——
+///    实测综合检索「万妖图录传」只返回衍生季（第一季/番外），本体在
+///    漫剧频道结果里，此时退化重试不会触发（结果非空）。
+/// 2. 原词结果为空且满足退化条件时逐次退化重试，命中即止。
+/// 所有层级的结果合并去重（按 [SeriesSummary.id]，先到者优先）。
+///
+/// [search] 是单次搜索调用（调用方决定 tab 等参数怎么带）；原词调用的
+/// 异常**原样抛出**（源失败要进编排器的健康统计/负缓存），补充/退化层的
+/// 异常经 [onError] 交给调用方记 ErrorLog 后视为该层为空，不打断后续；
+/// [isCancelled] 返回真时停止后续重试（取消令牌）。
 Future<FallbackSearchResult> searchWithDegradedRetry(
   Future<AquaPage<SeriesSummary>> Function(String query) search,
   String query, {
   int maxSteps = 2,
+  Future<AquaPage<SeriesSummary>> Function(String query)? supplementary,
   bool Function()? isCancelled,
   void Function(Object error, StackTrace stack)? onError,
 }) async {
@@ -104,9 +124,57 @@ Future<FallbackSearchResult> searchWithDegradedRetry(
     return FallbackSearchResult(
         page: const AquaPage<SeriesSummary>(items: []), query: q, degraded: false);
   }
+  var supplemented = false;
   // 原词失败不吞：编排器/页面要按「源失败」处理（健康统计、负缓存、错误页）。
   final first = await attempt(q, degraded: false);
-  if (first != null) return first;
+  if (first != null) {
+    // 有结果但没有精确标题命中（综合检索只给衍生季、本体在频道里）：
+    // 调频道检索补本体。补充层失败不打断（结果至少有原词命中）。
+    if (supplementary != null &&
+        !first.page.items.any((s0) => s0.title.trim() == q)) {
+      try {
+        final extra = await supplementary(q);
+        for (final item in extra.items) {
+          if (item.id.isEmpty) continue;
+          if (collected.any((s0) => s0.id == item.id)) continue;
+          collected.add(item);
+          supplemented = true;
+        }
+      } catch (e, st) {
+        onError?.call(e, st);
+      }
+    }
+    return FallbackSearchResult(
+      page: AquaPage<SeriesSummary>(
+          items: List.of(collected), cursor: first.page.cursor, hasMore: first.page.hasMore),
+      query: first.query,
+      degraded: first.degraded,
+      supplemented: supplemented,
+    );
+  }
+
+  if (supplementary != null && collected.isEmpty) {
+    try {
+      final extra = await supplementary(q);
+      for (final item in extra.items) {
+        if (item.id.isEmpty) continue;
+        if (collected.any((s0) => s0.id == item.id)) continue;
+        collected.add(item);
+        supplemented = true;
+      }
+    } catch (e, st) {
+      onError?.call(e, st);
+    }
+  }
+  if (supplemented) {
+    return FallbackSearchResult(
+      page: AquaPage<SeriesSummary>(
+          items: List.of(collected), cursor: '', hasMore: false),
+      query: q,
+      degraded: false,
+      supplemented: true,
+    );
+  }
 
   for (final term in degradedQueries(q, maxSteps: maxSteps)) {
     if (isCancelled?.call() ?? false) break;
@@ -123,5 +191,6 @@ Future<FallbackSearchResult> searchWithDegradedRetry(
     page: AquaPage<SeriesSummary>(items: List.of(collected)),
     query: q,
     degraded: false,
+    supplemented: supplemented,
   );
 }
