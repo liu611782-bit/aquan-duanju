@@ -206,7 +206,7 @@ class _SearchScreenState extends State<SearchScreen> {
         // 频道补充：综合检索对完整剧名可能只给衍生季不含本体（实测
         // 「万妖图录传」本体在漫剧频道结果里），无精确命中时补一次。
         supplementary: _dimension.allowsFilters
-            ? (term) => scope.api.search(term, filters: const ['comic'])
+            ? (term) => scope.api.search(term, filters: const ['content_type_dynamic_comic'])
             : null,
         onError: (e, st) =>
             ErrorLog.instance.record('漫剧搜索', '退化重试失败（原词 $q）：$e', st),

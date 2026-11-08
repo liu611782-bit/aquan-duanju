@@ -281,6 +281,11 @@ class CastController extends ChangeNotifier {
   /// 会话字幕（R3：Go 侧借此给媒体响应补 `CaptionInfo.sec` 第三通道）。
   CastTranscodeResolver? transcodeResolver;
 
+  /// 无播放页场景（恢复投屏）的兜底转码执行体：播放页注入的
+  /// [transcodeResolver] 收尾后恢复回本值而非 null——否则恢复场景的
+  /// 加密分集「转码不可用→回退直投」→ 接收端秒停（UI 冒烟实证）。
+  CastTranscodeResolver? defaultTranscodeResolver;
+
   /// 深度诊断重试一次性开关（R1.2，任务 11-07-cast-final-hygiene）：面板
   /// 诊断分区打开后，下一次投送（仅 DLNA 目标）走全组合扫描模式
   /// （[DlnaTransport.scanAll]）；投送时即消费（无论成败），扫描结果**不写
@@ -1593,7 +1598,8 @@ class CastController extends ChangeNotifier {
     _sessionRecorded = false;
     onNextEpisode = null;
     onEpisodeJump = null;
-    transcodeResolver = null;
+    // 恢复默认兜底而非 null：面板随时可能一键恢复，兜底 resolver 必须常驻。
+    transcodeResolver = defaultTranscodeResolver;
     _state = CastSessionState.idle;
     notifyListeners();
   }

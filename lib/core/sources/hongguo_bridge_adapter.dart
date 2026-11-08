@@ -52,6 +52,9 @@ class HongguoBridgeAdapter implements SourceAdapter {
       final outcome = await searchWithDegradedRetry(
         _api.search,
         query,
+        // 频道补充：综合检索对完整剧名可能只给衍生季不含本体（cli 实测）。
+        supplementary: (term) =>
+            _api.search(term, filters: const ['content_type_dynamic_comic']),
         isCancelled: () => cancel?.isCancelled ?? false,
         onError: (e, st) => ErrorLog.instance
             .record('聚合搜索·红果', '退化重试失败（原词 $query）：$e', st),

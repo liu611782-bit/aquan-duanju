@@ -21,6 +21,7 @@ import 'core/reader/speech/listen_media_bridge.dart';
 import 'core/aqua_client.dart';
 import 'core/aqua_error.dart';
 import 'core/cast/cast_service.dart';
+import 'core/cast/default_relay_resolver.dart';
 import 'core/castd/receiver_admission.dart';
 import 'core/castd/receiver_service.dart';
 import 'core/download_service.dart';
@@ -473,6 +474,10 @@ class _AquaAppState extends State<AquaApp> {
       );
       if (!mounted) return;
       final api = AquaApi(client);
+      // 恢复投屏等无播放页场景的兜底转码执行体（加密分集恢复不再回退直投）。
+      CastService.instance.controller.defaultTranscodeResolver =
+          defaultRelayResolver(api,
+              quality: () => widget.settings.castRelayQuality);
       // 全局听书控制器：挂在 AppScope 上，阅读页退出后仍可继续朗读。
       final speech = ReaderSpeechController(
         api: api,

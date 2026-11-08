@@ -46,7 +46,9 @@ void main() {
     final adapter = HongguoBridgeAdapter(api);
 
     final events = await adapter.search('万妖图录传').toList();
-    expect(api.calls, ['万妖图录传', '万妖图录'], reason: '命中即止，不再退化');
+    // 调用序列：原词 → 频道补充（同词换 filter，空结果兜底）→ 退化命中即止。
+    expect(api.calls, ['万妖图录传', '万妖图录传', '万妖图录'],
+        reason: '补充检索用原词换频道；退化命中即止');
 
     final hits = events.whereType<SourceHits>().single;
     expect(hits.items, hasLength(1));
@@ -80,7 +82,13 @@ void main() {
     final adapter = HongguoBridgeAdapter(api);
 
     final events = await adapter.search('不存在的剧名某某').toList();
-    expect(api.calls, ['不存在的剧名某某', '不存在的剧名某', '不存在的剧']);
+    // 原词 → 补充（同词换频道）→ 两级退化，全空。
+    expect(api.calls, [
+      '不存在的剧名某某',
+      '不存在的剧名某某',
+      '不存在的剧名某',
+      '不存在的剧',
+    ]);
     final hits = events.whereType<SourceHits>().single;
     expect(hits.items, isEmpty);
     expect(hits.notice, '');
