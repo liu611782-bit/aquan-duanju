@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../core/error_log.dart';
 import '../core/search/query_intent.dart';
 import '../core/search/search_fallback.dart';
+import '../core/search/suggest_submit.dart';
 import '../core/search_dimensions.dart';
 import '../models/models.dart';
 import '../widgets/common.dart';
@@ -373,7 +374,9 @@ class _SearchScreenState extends State<SearchScreen> {
             title: Text(s.text, maxLines: 1, overflow: TextOverflow.ellipsis),
             onTap: () {
               _controller.text = s.text;
-              _submit(s.keyword.isNotEmpty ? s.keyword : s.text);
+              // keyword 可能是内容 ID（纯数字，SDK 解析缺口，见
+              // suggest_submit.dart）——把 ID 当搜索词服务端检索不到。
+              _submit(suggestSubmitText(s));
             },
           );
         },
