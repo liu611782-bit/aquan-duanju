@@ -75,6 +75,12 @@ aquan-cli watch 持械入宋
 # 指挥正在播放的窗口
 aquan-cli pause      # 暂停（resume / toggle / next / prev 同理）
 aquan-cli status     # 持械入宋：第一季 · 第1集 00:10/02:15（播放中）
+
+# 投屏到电视/接收端（同一局域网，投过一次设备就会被记住）
+aquan-cli cast                    # 恢复上次投屏（跨天自动重新解析）
+aquan-cli cast 万妖图录传          # 搜关键词自动匹配，投到上次设备
+aquan-cli cast 7701350814786259993 --episode 3   # 指定剧集与集号
+aquan-cli cast stop               # 断开投屏
 ```
 
 主程序本身也认这些参数（`aquan_duanju --search/--series/--watch/--pause/...`）。
