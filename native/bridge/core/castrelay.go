@@ -131,6 +131,7 @@ func castRelayStart(opts relayOptions) (*relaySessionInfo, error) {
 		return nil, relayFail(ErrRelayInvalid, "缺少播放地址")
 	}
 	startSweeper()
+	sweepOrphanDirs()
 
 	// ffmpeg 可用性最先探（缺二进制是最常见的失败，秒回）。
 	ffmpeg, err := findFFmpeg()
@@ -333,6 +334,20 @@ func relayStop(sessionID string) {
 		_ = s.srv.Close()
 	}
 	_ = os.RemoveAll(s.dir)
+}
+
+// sweepOrphanDirs 清理上次进程遗留的中继临时目录：app 强杀/退出时
+// relaySessions 随内存消失，临时目录成孤儿（实测 Temp 残留 30+）。启动时
+// 活跃会话为空，Temp 下 aquan-cast- 前缀目录全部属于孤儿，直接删除；
+// 30s 周期的 sweeper 只覆盖进程存活期。
+func sweepOrphanDirs() {
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "aquan-cast-*"))
+	if err != nil {
+		return
+	}
+	for _, dir := range matches {
+		_ = os.RemoveAll(dir)
+	}
 }
 
 // startSweeper 启动空闲回收（30s 扫一遍，5 分钟无访问即回收）。

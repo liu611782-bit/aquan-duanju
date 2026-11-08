@@ -810,3 +810,30 @@ func TestRelayCaptionInfoHeader(t *testing.T) {
 		t.Fatalf("未登记字幕线上字节不应出现该头: %s", raw2)
 	}
 }
+
+func TestSweepOrphanDirs(t *testing.T) {
+	// 孤儿目录： aquan-cast- 前缀 → 应被清；其他前缀 → 不动。
+	orphan, err := os.MkdirTemp("", "aquan-cast-orphan-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(orphan)
+	other, err := os.MkdirTemp("", "not-aquan-cast-keep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(other)
+	// 孤儿里放个产物文件，验证目录确实被删。
+	if err := os.WriteFile(filepath.Join(orphan, "index.m3u8"), []byte("#EXTM3U"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sweepOrphanDirs()
+
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("孤儿中继目录未被清理: %s", orphan)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("非 aquan-cast 目录被误删: %s", other)
+	}
+}
