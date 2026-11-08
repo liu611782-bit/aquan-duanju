@@ -2454,6 +2454,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       // auto 选路把 HEVC/AV1 分集路由到本机转码。
       viaRelay: viaRelay,
       codecHint: stream.codec,
+      // 恢复重新解析的定位键（11-08-resume-reparse）：随会话恢复记录持久化，
+      // 面板一键恢复按它重新解析分集拿新鲜 URL。
+      sourceId: widget.series.id,
       // M5-2 字幕接线点：红果源目前不提供外挂字幕 URL，源无字幕就不传
       // （DIDL 不写字幕标签、不制造噪声）；源补齐外挂字幕数据后在此
       // 传入 CastMedia.subtitleUrl 即全链路生效。
@@ -2506,6 +2509,9 @@ class _PlayerScreenState extends State<PlayerScreen>
           coverUrl: widget.series.coverUrl,
           episodeIndex: nep.number,
           episodeCount: widget.episodes.length,
+          // 恢复重新解析定位键（11-08-resume-reparse）；本地文件会话本身
+          // 不写恢复记录，此处仅保持字段口径一致。
+          sourceId: widget.series.id,
         );
       }
       final cached = _prefetched.remove(n);
@@ -2572,6 +2578,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         // 编码提示与首投同口径：缺了它 HEVC/AV1 分集连播时 auto 选路无证据
         // → 直投 → 接收端解不动（UI 冒烟实证的连播风暴根因之一）。
         codecHint: stream.codec,
+        // 恢复重新解析的定位键（11-08-resume-reparse）：连播换集也把记录
+        // 跟到当前集，跨天恢复按它重新解析。
+        sourceId: widget.series.id,
       );
     }
     // 连播/跳集基准 = 会话当前集（currentMedia.episodeIndex 为 1-based，

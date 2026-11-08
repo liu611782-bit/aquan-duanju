@@ -190,17 +190,21 @@ class CastTarget {
 
 /// 最近一次投屏会话记录（`aquan_cast.json` 的 `lastSession` 键，v4 加键）。
 ///
-/// 结构固定（PRD R1.1）：`targetPersistJson` + `title` + `mediaUrl` +
-/// `positionMs` + `endedAt`。恢复 = 重建 [CastTarget] 后走既有标准投屏序列
-/// （选路/配方/降级链照常），不新加报文。镜像会话（isMirror）不记录——
-/// 无 URL 可恢复；`mediaUrl` 记录的是选路前的源 URL（代理 token / 本机
-/// 中继产物重启后必然失效，恢复时重新走选路生成新地址）。
+/// 结构（PRD R1.1 + 11-08-resume-reparse 增键）：`targetPersistJson` +
+/// `title` + `mediaUrl` + `positionMs` + `endedAt`（+ `sourceId` /
+/// `episodeIndex`，旧 JSON 缺键回落缺省）。恢复 = 重建 [CastTarget] 后走既有
+/// 标准投屏序列（选路/配方/降级链照常），不新加报文；记录带 [sourceId] 时
+/// 优先经 [CastController.resumeProvider] 重新解析分集。镜像会话（isMirror）
+/// 不记录——无 URL 可恢复；`mediaUrl` 记录的是选路前的源 URL（代理 token /
+/// 本机中继产物重启后必然失效，恢复时重新走选路生成新地址）。
 class CastSessionRecord {
   const CastSessionRecord({
     required this.targetPersistJson,
     required this.title,
     required this.mediaUrl,
     this.positionMs = 0,
+    this.sourceId = '',
+    this.episodeIndex = 1,
     required this.endedAt,
   });
 
@@ -213,6 +217,16 @@ class CastSessionRecord {
   final String mediaUrl;
   final int positionMs;
 
+  /// 源剧集 id（红果 seriesId，11-08-resume-reparse）：非空时恢复场景经
+  /// resumeProvider 重新解析分集拿新鲜 URL（红果直链带时效，跨天必失效）。
+  /// CMS 源（source_player_screen）无红果剧集 id 留空 = 恢复走记录 URL
+  /// 现状回退。旧 JSON 缺键 = ''。
+  final String sourceId;
+
+  /// 集号（1-based，CastMedia.episodeIndex 同语义）：重新解析按它翻页定位
+  /// 分集。旧 JSON 缺键 = 1（首集，CastMedia 缺省口径）。
+  final int episodeIndex;
+
   /// 会话结束（断开/电视端停止）时刻；卡片显示 HH:mm 用。
   final DateTime endedAt;
 
@@ -221,6 +235,8 @@ class CastSessionRecord {
         'title': title,
         'mediaUrl': mediaUrl,
         'positionMs': positionMs,
+        'sourceId': sourceId,
+        'episodeIndex': episodeIndex,
         'endedAt': endedAt.millisecondsSinceEpoch,
       };
 
@@ -235,11 +251,15 @@ class CastSessionRecord {
     if (endedAt is! int) return null;
     final title = json['title'];
     final positionMs = json['positionMs'];
+    final sourceId = json['sourceId'];
+    final episodeIndex = json['episodeIndex'];
     return CastSessionRecord(
       targetPersistJson: target,
       title: title is String ? title : '',
       mediaUrl: mediaUrl,
       positionMs: positionMs is int ? positionMs : 0,
+      sourceId: sourceId is String ? sourceId : '',
+      episodeIndex: episodeIndex is int ? episodeIndex : 1,
       endedAt: DateTime.fromMillisecondsSinceEpoch(endedAt),
     );
   }
@@ -256,11 +276,14 @@ abstract class CastSessionRecorder {
   CastSessionRecord? get lastSession;
 
   /// 投送成功：写全量记录（镜像/本地文件会话由控制器排除，不会到达这里）。
+  /// [sourceId] / [episodeIndex] 是恢复重新解析的定位键（11-08-resume-reparse）。
   Future<void> recordSession({
     required CastTarget target,
     required String title,
     required String mediaUrl,
     int positionMs = 0,
+    String sourceId = '',
+    int episodeIndex = 1,
   });
 
   /// 轮询进度更新：实现方按 10s 节流（窗口内调用直接忽略）；无记录 no-op。

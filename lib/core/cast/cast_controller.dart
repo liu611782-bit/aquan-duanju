@@ -53,6 +53,13 @@ typedef CastTranscodeResolver = Future<String?> Function(
   Uri? relaySubtitleUrl,
 });
 
+/// 恢复投屏「重新解析」挂点形状（11-08-resume-reparse）：按恢复记录重新
+/// 解析分集产出新鲜 [CastMedia]（红果直链带时效签名，跨天必失效）。
+/// 返回 null / 抛异常由控制器归一为「回退记录 URL」现状分支。
+typedef CastResumeProvider = Future<CastMedia?> Function(
+  CastSessionRecord record,
+);
+
 /// 要投出去的媒体（URL 必须是电视可达的局域网/公网直链，绝不能是 127.0.0.1）。
 class CastMedia {
   const CastMedia({
@@ -71,6 +78,7 @@ class CastMedia {
     this.duration,
     this.viaRelay = false,
     this.codecHint = '',
+    this.sourceId = '',
   });
 
   final String url;
@@ -119,6 +127,12 @@ class CastMedia {
   /// 视频编码提示（如 `hevc` / `h265` / `av1`，红果 VideoStream.codec）。
   /// 兼容模式 auto 选路据此把 HEVC/AV1 分集路由到本机转码（统一转 H.264）。
   final String codecHint;
+
+  /// 源剧集 id（红果 seriesId，11-08-resume-reparse）。随会话恢复记录持久化：
+  /// 恢复场景经 [CastController.resumeProvider] 重新解析分集拿新鲜 URL
+  /// （红果直链带时效签名，跨天必失效）。CMS 源（source_player_screen）无
+  /// 红果剧集 id 留空，恢复走记录 URL 现状回退。
+  final String sourceId;
 
   bool get isLocalFile => localPath.isNotEmpty;
 }
@@ -293,6 +307,21 @@ class CastController extends ChangeNotifier {
   /// [transcodeResolver] 收尾后恢复回本值而非 null——否则恢复场景的
   /// 加密分集「转码不可用→回退直投」→ 接收端秒停（UI 冒烟实证）。
   CastTranscodeResolver? defaultTranscodeResolver;
+
+  /// 恢复投屏「重新解析」挂点（11-08-resume-reparse）：恢复链路
+  /// （[_replayLastSessionRecord]，resumeLastSession 与中断自动恢复共用）
+  /// 遇记录带 sourceId 时由它重新解析分集产出新鲜媒体；返回 null / 抛异常
+  /// （只进 ErrorLog）→ 回退记录 URL 现状分支，绝不让解析失败堵死恢复。
+  /// 注入模式同 [onNextEpisode]；会话收尾由 [_finishSession] 恢复回
+  /// [defaultResumeProvider] 而非 null——面板随时可能一键恢复，兜底
+  /// provider 必须常驻（同 [transcodeResolver] / [defaultTranscodeResolver]
+  /// 双字段先例）。
+  CastResumeProvider? resumeProvider;
+
+  /// 无播放页场景（恢复投屏）的兜底重新解析执行体：bootstrap 注入
+  /// （default_resume_provider.dart：listEpisodes 翻页定位集 →
+  /// resolvePlayback → 加密分集本机中继）；会话收尾恢复回本值。
+  CastResumeProvider? defaultResumeProvider;
 
   /// 深度诊断重试一次性开关（R1.2，任务 11-07-cast-final-hygiene）：面板
   /// 诊断分区打开后，下一次投送（仅 DLNA 目标）走全组合扫描模式
@@ -751,8 +780,12 @@ class CastController extends ChangeNotifier {
 
   Future<void> _castWith(CastTarget target, CastMedia media) async {
     // 会话恢复记录取选路前的源 URL（R1.1）：media 在下方会被改写成代理/
-    // 中继产物地址，token 重启后失效，记录必须留可重投的原始地址。
-    final sessionSourceUrl = media.url;
+    // 中继产物地址，token 重启后失效，记录必须留可重投的原始地址。调用方
+    // 已带 recordUrl（恢复重解析产物，url 是随会话回收即死的中继产物）时
+    // 以它为准（11-08-resume-reparse）；下方重建会丢掉 recordUrl，这里一并
+    // 捕获。sourceId 同理（恢复重新解析的定位键，记录重写不能丢）。
+    final sessionSourceUrl = media.recordUrl ?? media.url;
+    final sessionSourceId = media.sourceId;
     final sessionIsMirror = media.isMirror;
     final sessionIsLocalFile = media.isLocalFile;
     _sessionRecorded = false;
@@ -949,7 +982,8 @@ class CastController extends ChangeNotifier {
       await _recordSessionStart(
         target,
         media,
-        sourceUrl: media.recordUrl ?? sessionSourceUrl,
+        sourceUrl: sessionSourceUrl,
+        sourceId: sessionSourceId,
         isMirror: sessionIsMirror,
         isLocalFile: sessionIsLocalFile,
       );
@@ -1052,11 +1086,13 @@ class CastController extends ChangeNotifier {
 
   /// 投送成功 → 写会话恢复记录（R1.1）。镜像（无 URL 可恢复）与本地文件
   /// （记录结构不含路径，恢复不了）会话跳过；[sourceUrl] 是选路前的源
-  /// URL。失败只进 ErrorLog，绝不让记录拖垮投屏成功路径。
+  /// URL；[sourceId] / media.episodeIndex 是恢复重新解析的定位键
+  /// （11-08-resume-reparse）。失败只进 ErrorLog，绝不让记录拖垮投屏成功路径。
   Future<void> _recordSessionStart(
     CastTarget target,
     CastMedia media, {
     required String sourceUrl,
+    required String sourceId,
     required bool isMirror,
     required bool isLocalFile,
   }) async {
@@ -1070,6 +1106,8 @@ class CastController extends ChangeNotifier {
         title: media.title,
         mediaUrl: sourceUrl,
         positionMs: media.position.inMilliseconds,
+        sourceId: sourceId,
+        episodeIndex: media.episodeIndex,
       );
       _sessionRecorded = true;
     } on Exception catch (e, stack) {
@@ -1092,6 +1130,8 @@ class CastController extends ChangeNotifier {
   /// 恢复上次投屏会话（R1.2）：读记录 → 重建 CastTarget → 复用 [castTo]
   /// 的标准投屏序列（选路/配方/同 IP 降级链照常，不新加报文）→ 记录位置
   /// >3s 时既有序列自动 seek（DLNA compat.load 与标准三件套都带 position）。
+  /// 记录带 sourceId 时优先经 [resumeProvider] 重新解析分集拿新鲜 URL
+  /// （11-08-resume-reparse，跨天可用）；解析失败回退记录 URL 现状分支。
   ///
   /// 返回 false = 无可恢复记录（未注入 recorder / 无记录 / 记录或目标
   /// 损坏）——调用方应静默清理记录并隐藏恢复入口。恢复尝试失败时异常
@@ -1104,6 +1144,12 @@ class CastController extends ChangeNotifier {
   /// （选路/配方/同 IP 降级链照常，不新加报文）→ 记录位置 >3s 由既有序列
   /// 自动 seek——lastSession 在会话中被持续更新，天然就是「最后位置」。
   ///
+  /// 重新解析分支（11-08-resume-reparse）：记录带 sourceId 且注入了
+  /// [resumeProvider] 时优先重新解析分集产出新鲜媒体（红果直链带时效签名，
+  /// 跨天/跨会话必失效）；返回 null / 抛异常（只进 ErrorLog）→ 回退记录 URL
+  /// 现状分支。position 接续逻辑不变：无论哪条分支都用记录位置，标准序列
+  /// >3s 自动 seek。
+  ///
   /// 返回 false = 无可恢复记录（未注入 recorder / 无记录 / 记录或目标损坏）。
   /// 重投失败异常原样上抛（与 [castTo] 同语义），由调用方决定呈现方式。
   Future<bool> _replayLastSessionRecord() async {
@@ -1112,14 +1158,48 @@ class CastController extends ChangeNotifier {
     final target = record.resolveTarget();
     if (target == null) return false;
     if (record.mediaUrl.isEmpty) return false;
-    await castTo(
-      target,
-      CastMedia(
-        url: record.mediaUrl,
-        title: record.title,
-        position: Duration(milliseconds: record.positionMs),
-      ),
+    // 回退基线（现状分支）：记录 URL。sourceId / episodeIndex 一并透传——
+    // 恢复重投成功后记录会被重写，定位键不能在这里丢（provider 缺席/失败的
+    // 后续恢复仍可重试重新解析）。
+    var media = CastMedia(
+      url: record.mediaUrl,
+      title: record.title,
+      position: Duration(milliseconds: record.positionMs),
+      sourceId: record.sourceId,
+      episodeIndex: record.episodeIndex,
     );
+    final provider = resumeProvider;
+    if (provider != null && record.sourceId.isNotEmpty) {
+      try {
+        final fresh = await provider(record);
+        if (fresh != null) {
+          media = CastMedia(
+            url: fresh.url,
+            title: fresh.title,
+            coverUrl: fresh.coverUrl,
+            // position 接续逻辑不变：一律用记录位置（provider 不感知进度）。
+            position: Duration(milliseconds: record.positionMs),
+            episodeIndex: fresh.episodeIndex,
+            episodeCount: fresh.episodeCount,
+            localPath: fresh.localPath,
+            headers: fresh.headers,
+            recordUrl: fresh.recordUrl,
+            subtitleUrl: fresh.subtitleUrl,
+            isMirror: fresh.isMirror,
+            mimeHint: fresh.mimeHint,
+            duration: fresh.duration,
+            viaRelay: fresh.viaRelay,
+            codecHint: fresh.codecHint,
+            // provider 产物不带 sourceId（按记录解析）——重写记录的定位键
+            // 以记录为准。
+            sourceId: record.sourceId,
+          );
+        }
+      } on Exception catch (e, stack) {
+        ErrorLog.instance.record('投屏会话恢复解析', e, stack);
+      }
+    }
+    await castTo(target, media);
     return true;
   }
 
@@ -1314,6 +1394,7 @@ class CastController extends ChangeNotifier {
       device,
       next,
       sourceUrl: next.recordUrl ?? next.url,
+      sourceId: next.sourceId,
       isMirror: next.isMirror,
       isLocalFile: next.isLocalFile,
     ));
@@ -1608,6 +1689,9 @@ class CastController extends ChangeNotifier {
     onEpisodeJump = null;
     // 恢复默认兜底而非 null：面板随时可能一键恢复，兜底 resolver 必须常驻。
     transcodeResolver = defaultTranscodeResolver;
+    // 重新解析挂点同款（11-08-resume-reparse）：兜底 provider 常驻，跨会话
+    // 的一键恢复不因会话收尾失去重新解析能力。
+    resumeProvider = defaultResumeProvider;
     _state = CastSessionState.idle;
     notifyListeners();
   }

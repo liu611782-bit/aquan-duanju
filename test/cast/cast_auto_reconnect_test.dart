@@ -77,6 +77,8 @@ class _MemoryRecorder implements CastSessionRecorder {
     required String title,
     required String mediaUrl,
     int positionMs = 0,
+    String sourceId = '',
+    int episodeIndex = 1,
   }) async {
     calls.add('record:$mediaUrl|$positionMs');
     lastSession = CastSessionRecord(
@@ -84,6 +86,8 @@ class _MemoryRecorder implements CastSessionRecorder {
       title: title,
       mediaUrl: mediaUrl,
       positionMs: positionMs,
+      sourceId: sourceId,
+      episodeIndex: episodeIndex,
       endedAt: DateTime.now(),
     );
   }
@@ -98,6 +102,8 @@ class _MemoryRecorder implements CastSessionRecorder {
       title: r.title,
       mediaUrl: r.mediaUrl,
       positionMs: positionMs,
+      sourceId: r.sourceId,
+      episodeIndex: r.episodeIndex,
       endedAt: r.endedAt,
     );
   }

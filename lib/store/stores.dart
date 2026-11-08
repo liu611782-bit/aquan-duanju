@@ -3863,6 +3863,7 @@ class CastStore extends _JsonFileStore implements CastSessionRecorder {
   CastSessionRecord? get lastSession => _lastSession;
 
   /// 投送成功：写全量恢复记录（镜像/本地文件会话由控制器排除）。
+  /// [sourceId] / [episodeIndex] 是恢复重新解析的定位键（11-08-resume-reparse）。
   /// [now] 仅供测试注入时钟。
   @override
   Future<void> recordSession({
@@ -3870,6 +3871,8 @@ class CastStore extends _JsonFileStore implements CastSessionRecorder {
     required String title,
     required String mediaUrl,
     int positionMs = 0,
+    String sourceId = '',
+    int episodeIndex = 1,
     DateTime? now,
   }) async {
     await ensureLoaded();
@@ -3879,6 +3882,8 @@ class CastStore extends _JsonFileStore implements CastSessionRecorder {
       title: title,
       mediaUrl: mediaUrl,
       positionMs: positionMs,
+      sourceId: sourceId,
+      episodeIndex: episodeIndex,
       endedAt: at,
     );
     _lastPositionWriteAt = at;
@@ -3901,6 +3906,8 @@ class CastStore extends _JsonFileStore implements CastSessionRecorder {
       title: record.title,
       mediaUrl: record.mediaUrl,
       positionMs: positionMs,
+      sourceId: record.sourceId,
+      episodeIndex: record.episodeIndex,
       endedAt: record.endedAt,
     );
     await _persistLastSession();
@@ -3918,6 +3925,8 @@ class CastStore extends _JsonFileStore implements CastSessionRecorder {
       title: record.title,
       mediaUrl: record.mediaUrl,
       positionMs: record.positionMs,
+      sourceId: record.sourceId,
+      episodeIndex: record.episodeIndex,
       endedAt: now ?? DateTime.now(),
     );
     await _persistLastSession();

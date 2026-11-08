@@ -22,6 +22,7 @@ import 'core/aqua_client.dart';
 import 'core/aqua_error.dart';
 import 'core/cast/cast_service.dart';
 import 'core/cast/default_relay_resolver.dart';
+import 'core/cast/default_resume_provider.dart';
 import 'core/castd/receiver_admission.dart';
 import 'core/castd/receiver_service.dart';
 import 'core/download_service.dart';
@@ -477,6 +478,13 @@ class _AquaAppState extends State<AquaApp> {
       // 恢复投屏等无播放页场景的兜底转码执行体（加密分集恢复不再回退直投）。
       CastService.instance.controller.defaultTranscodeResolver =
           defaultRelayResolver(api,
+              quality: () => widget.settings.castRelayQuality);
+      // 恢复投屏「跨天可用」（11-08-resume-reparse）：面板一键恢复按记录的
+      // sourceId 重新解析分集拿新鲜 URL（红果直链带时效签名，跨天必失效）；
+      // 加密分集走本机解密中继（与播放页同款）。解析失败回退记录 URL 现状
+      // 分支，异常只进 ErrorLog。
+      CastService.instance.controller.defaultResumeProvider =
+          defaultResumeProvider(api,
               quality: () => widget.settings.castRelayQuality);
       // 全局听书控制器：挂在 AppScope 上，阅读页退出后仍可继续朗读。
       final speech = ReaderSpeechController(

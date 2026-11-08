@@ -9,6 +9,7 @@ import 'package:aquan_duanju/core/cast/cast_target.dart';
 import 'package:aquan_duanju/core/cast/didl.dart';
 import 'package:aquan_duanju/core/cast/dlna_device.dart';
 import 'package:aquan_duanju/core/cast/soap_client.dart';
+import 'package:aquan_duanju/core/error_log.dart';
 import 'package:aquan_duanju/store/stores.dart';
 import 'package:aquan_duanju/widgets/cast_panel.dart';
 
@@ -113,6 +114,8 @@ class _MemoryRecorder implements CastSessionRecorder {
     required String title,
     required String mediaUrl,
     int positionMs = 0,
+    String sourceId = '',
+    int episodeIndex = 1,
   }) async {
     calls.add('record:$mediaUrl|$title|$positionMs|${target.id}');
     lastSession = CastSessionRecord(
@@ -120,6 +123,8 @@ class _MemoryRecorder implements CastSessionRecorder {
       title: title,
       mediaUrl: mediaUrl,
       positionMs: positionMs,
+      sourceId: sourceId,
+      episodeIndex: episodeIndex,
       endedAt: DateTime.now(),
     );
   }
@@ -134,6 +139,8 @@ class _MemoryRecorder implements CastSessionRecorder {
       title: r.title,
       mediaUrl: r.mediaUrl,
       positionMs: positionMs,
+      sourceId: r.sourceId,
+      episodeIndex: r.episodeIndex,
       endedAt: r.endedAt,
     );
   }
@@ -494,6 +501,243 @@ void main() {
       );
       expect(controller.state, CastSessionState.idle);
       expect(recorder.lastSession, isNotNull, reason: '失败不删记录（电视开机后可重试）');
+      controller.dispose();
+    });
+  });
+
+  group('恢复重新解析（11-08-resume-reparse，AC-1/AC-2）', () {
+    test('CastMedia.sourceId 透传记录 + CastSessionRecord 持久化往返；'
+        '旧 JSON 缺键回落缺省', () async {
+      // 控制器埋点透传：投送成功记录带 sourceId / episodeIndex。
+      final transport = FakeTransport();
+      final recorder = _MemoryRecorder();
+      final controller = CastController(
+        transportFactory: (_) => transport,
+        sessionRecorder: recorder,
+      );
+      await controller.castTo(
+        _target('d1'),
+        const CastMedia(
+          url: 'http://192.168.1.10/3.mp4',
+          title: '短剧 · 第3集',
+          episodeIndex: 3,
+          sourceId: 'sid-123',
+        ),
+      );
+      expect(recorder.lastSession?.sourceId, 'sid-123');
+      expect(recorder.lastSession?.episodeIndex, 3);
+      controller.dispose();
+
+      // CastStore 落盘往返（重启 = 新实例读回）。
+      final dir =
+          await Directory.systemTemp.createTemp('cast_resume_sourceid');
+      addTearDown(() => dir.delete(recursive: true));
+      final store = await _newStore(dir);
+      await store.recordSession(
+        target: _target('u1'),
+        title: '短剧 · 第3集',
+        mediaUrl: 'http://example.com/3.mp4',
+        positionMs: 65000,
+        sourceId: 'sid-123',
+        episodeIndex: 3,
+      );
+      final store2 = await _newStore(dir);
+      expect(store2.lastSession?.sourceId, 'sid-123');
+      expect(store2.lastSession?.episodeIndex, 3);
+
+      // 旧 JSON 缺键 = '' / 1（CastMedia 缺省口径）。
+      final legacy = CastSessionRecord.tryFromJson(<String, dynamic>{
+        'targetPersistJson': _target('u1').toPersistJson(),
+        'title': 't',
+        'mediaUrl': 'http://x/1.mp4',
+        'endedAt': 1730000000000,
+      });
+      expect(legacy?.sourceId, '');
+      expect(legacy?.episodeIndex, 1);
+    });
+
+    test('resumeProvider 返回新鲜 URL → castTo 用新 URL，位置接续、'
+        'sourceId 不丢（重写记录仍可下次重解析）', () async {
+      final transport = FakeTransport();
+      final recorder = _MemoryRecorder();
+      final controller = CastController(
+        transportFactory: (_) => transport,
+        sessionRecorder: recorder,
+      );
+      recorder.lastSession = CastSessionRecord(
+        targetPersistJson: _target('d1').toPersistJson(),
+        title: '短剧 · 第2集',
+        mediaUrl: 'http://192.168.1.10/old/2.m3u8',
+        positionMs: 95000,
+        sourceId: 'sid-2',
+        episodeIndex: 2,
+        endedAt: DateTime.now(),
+      );
+      CastSessionRecord? passedRecord;
+      controller.resumeProvider = (record) async {
+        passedRecord = record;
+        return const CastMedia(
+          url: 'http://192.168.1.10/relay/fresh/index.m3u8',
+          recordUrl: 'http://cdn.example.com/fresh/2.m3u8',
+          title: '短剧 · 第2集',
+          episodeIndex: 2,
+        );
+      };
+
+      final ok = await controller.resumeLastSession();
+
+      expect(ok, isTrue);
+      expect(passedRecord?.sourceId, 'sid-2', reason: '记录原样交给 provider');
+      expect(passedRecord?.episodeIndex, 2);
+      // castTo 用新 URL（不是记录里的旧地址）。
+      expect(transport.calls.first,
+          startsWith('setUri:http://192.168.1.10/relay/fresh/index.m3u8'));
+      // position 接续逻辑不变：记录 95s > 3s → 标准序列自动 seek。
+      expect(transport.calls, contains('seek:0:01:35.000000'));
+      // 重写记录：mediaUrl 存 recordUrl（源地址），sourceId / episodeIndex
+      // 保留（下次恢复仍可重新解析）。
+      expect(recorder.lastSession?.mediaUrl,
+          'http://cdn.example.com/fresh/2.m3u8');
+      expect(recorder.lastSession?.sourceId, 'sid-2');
+      expect(recorder.lastSession?.episodeIndex, 2);
+      controller.dispose();
+    });
+
+    test('provider 返回 null → 回退记录 URL（现状分支不动）', () async {
+      final transport = FakeTransport();
+      final recorder = _MemoryRecorder();
+      final controller = CastController(
+        transportFactory: (_) => transport,
+        sessionRecorder: recorder,
+      );
+      recorder.lastSession = CastSessionRecord(
+        targetPersistJson: _target('d1').toPersistJson(),
+        title: '短剧 · 第2集',
+        mediaUrl: 'http://192.168.1.10/2.m3u8',
+        positionMs: 95000,
+        sourceId: 'sid-2',
+        endedAt: DateTime.now(),
+      );
+      controller.resumeProvider = (record) async => null;
+
+      final ok = await controller.resumeLastSession();
+
+      expect(ok, isTrue);
+      expect(transport.calls.first,
+          startsWith('setUri:http://192.168.1.10/2.m3u8'));
+      // 回退重投成功后重写记录：sourceId 保留（后续恢复可重试重新解析）。
+      expect(recorder.lastSession?.sourceId, 'sid-2');
+      controller.dispose();
+    });
+
+    test('provider 抛异常 → 回退记录 URL + 原始异常只进 ErrorLog', () async {
+      final transport = FakeTransport();
+      final recorder = _MemoryRecorder();
+      final controller = CastController(
+        transportFactory: (_) => transport,
+        sessionRecorder: recorder,
+      );
+      recorder.lastSession = CastSessionRecord(
+        targetPersistJson: _target('d1').toPersistJson(),
+        title: 't',
+        mediaUrl: 'http://192.168.1.10/1.m3u8',
+        sourceId: 'sid-1',
+        endedAt: DateTime.now(),
+      );
+      controller.resumeProvider = (record) async =>
+          throw Exception('恢复重新解析挂了');
+
+      final ok = await controller.resumeLastSession();
+
+      expect(ok, isTrue, reason: '解析失败不堵死恢复，回退记录 URL');
+      expect(transport.calls.first,
+          startsWith('setUri:http://192.168.1.10/1.m3u8'));
+      expect(
+        ErrorLog.instance.entries.any((e) =>
+            e.source == '投屏会话恢复解析' && e.message.contains('恢复重新解析挂了')),
+        isTrue,
+      );
+      controller.dispose();
+    });
+
+    test('sourceId 空（CMS 源）→ 不调 provider，直接走记录 URL', () async {
+      final transport = FakeTransport();
+      final recorder = _MemoryRecorder();
+      final controller = CastController(
+        transportFactory: (_) => transport,
+        sessionRecorder: recorder,
+      );
+      recorder.lastSession = CastSessionRecord(
+        targetPersistJson: _target('d1').toPersistJson(),
+        title: 't',
+        mediaUrl: 'http://192.168.1.10/1.mp4',
+        endedAt: DateTime.now(),
+      );
+      var providerCalled = false;
+      controller.resumeProvider = (record) async {
+        providerCalled = true;
+        return const CastMedia(
+            url: 'http://192.168.1.10/fresh.mp4', title: 't');
+      };
+
+      final ok = await controller.resumeLastSession();
+
+      expect(ok, isTrue);
+      expect(providerCalled, isFalse, reason: '无 sourceId 无从重新解析');
+      expect(transport.calls.first,
+          startsWith('setUri:http://192.168.1.10/1.mp4'));
+      controller.dispose();
+    });
+
+    test('加密分集 provider 产物 viaRelay=true → 选路恒直投'
+        '（产物已是解密 HLS，不再套转码/代理）', () async {
+      final transport = FakeTransport();
+      final recorder = _MemoryRecorder();
+      final controller = CastController(
+        transportFactory: (_) => transport,
+        sessionRecorder: recorder,
+      );
+      recorder.lastSession = CastSessionRecord(
+        targetPersistJson: _target('d1').toPersistJson(),
+        title: '短剧 · 第2集',
+        mediaUrl: 'http://192.168.1.10/old/2.m3u8',
+        positionMs: 5000,
+        sourceId: 'sid-2',
+        episodeIndex: 2,
+        endedAt: DateTime.now(),
+      );
+      controller.resumeProvider = (record) async => const CastMedia(
+            url: 'http://127.0.0.1:29170/cast/tok/index.m3u8',
+            recordUrl: 'http://cdn.example.com/fresh/2.m3u8',
+            title: '短剧 · 第2集',
+            episodeIndex: 2,
+            viaRelay: true,
+            codecHint: 'hevc',
+          );
+
+      final ok = await controller.resumeLastSession();
+
+      expect(ok, isTrue);
+      // 直投中继产物 URL 原样（未被代理/转码改写；hevc 提示不触发二次转码）。
+      expect(transport.calls.first,
+          startsWith('setUri:http://127.0.0.1:29170/cast/tok/index.m3u8'));
+      // 重写记录存源地址（产物随会话回收即死链）。
+      expect(recorder.lastSession?.mediaUrl,
+          'http://cdn.example.com/fresh/2.m3u8');
+      controller.dispose();
+    });
+
+    test('会话收尾 resumeProvider 恢复回兜底 default（常驻，非 null）', () async {
+      final transport = FakeTransport();
+      final controller = CastController(transportFactory: (_) => transport);
+      Future<CastMedia?> fallback(CastSessionRecord record) async => null;
+      controller.defaultResumeProvider = fallback;
+      controller.resumeProvider = (record) async => null;
+      await controller.castTo(_target('d1'), _media());
+      await controller.disconnect();
+      expect(identical(controller.resumeProvider, fallback), isTrue,
+          reason: '面板随时可能一键恢复，兜底 provider 必须常驻'
+              '（同 transcodeResolver/defaultTranscodeResolver 先例）');
       controller.dispose();
     });
   });
