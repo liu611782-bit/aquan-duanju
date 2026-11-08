@@ -141,4 +141,18 @@ void main() {
       expect(castDeepScanAvailable(null), isFalse);
     });
   });
+
+  group('本机 IP 提示行（11-08 用户补充：直连区展示本机地址）', () {
+    test('有 IP：完整文案含地址与点按复制提示', () {
+      expect(
+        castLocalIpHint('192.168.31.159'),
+        '本机 IP：192.168.31.159（点按复制，另一台设备直连本机时填这个）',
+      );
+    });
+
+    test('null / 空串：返回 null（该行隐藏，不占位）', () {
+      expect(castLocalIpHint(null), isNull);
+      expect(castLocalIpHint(''), isNull);
+    });
+  });
 }

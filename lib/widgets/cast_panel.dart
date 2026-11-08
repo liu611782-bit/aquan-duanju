@@ -11,6 +11,7 @@ import '../core/cast/cast_diagnostics.dart';
 import '../core/cast/cast_recipe.dart';
 import '../core/cast/cast_target.dart';
 import '../core/cast/didl.dart';
+import '../core/cast/local_media_server.dart';
 import '../core/cast/web_cast.dart';
 import '../core/cast/mirror/mirror_controller.dart';
 import '../core/cast/cast_service.dart';
@@ -308,6 +309,20 @@ Future<String?> showCastSheet(
 Widget castSessionSheetForTest({CastController? controller}) =>
     _CastSessionSheet(controller: controller);
 
+/// 「本机 IP」提示行文案（11-08 用户补充）：面板手动直连输入区展示本机
+/// 地址——另一台设备要直连本机接收端时，用户就知道该在对面填什么。
+/// [ip] 空时返回 null（该行隐藏，如枚举失败/无私网地址）。
+@visibleForTesting
+String? castLocalIpHint(String? ip) =>
+    ip == null || ip.isEmpty
+        ? null
+        : '本机 IP：$ip（点按复制，另一台设备直连本机时填这个）';
+
+/// 测试注入点：本机 IP 解析。生产走 [LocalMediaServer.resolveLanIPv4]
+/// （跳虚拟网卡、192.168.* > 10.* > 172.16-31 排序）。
+@visibleForTesting
+Future<String?> Function()? castPanelLocalIpResolver;
+
 /// 设备选择抽屉。
 class _CastDeviceSheet extends StatefulWidget {
   const _CastDeviceSheet({
@@ -350,6 +365,9 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
   String _diagSoap = '暂无';
   String _stage = '扫描';
 
+  /// 本机 LAN IP（手动直连区提示行用）；null = 未解析到（该行隐藏）。
+  String? _localIp;
+
   @override
   void initState() {
     super.initState();
@@ -360,6 +378,33 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
       _transcodeMode = widget.scope.cast.recipes.lookup(last)?.transcodeMode ??
           CastTranscodeMode.auto;
     }
+    unawaited(_loadLocalIp());
+  }
+
+  /// 解析本机 LAN IP（失败静默：提示行隐藏，绝不影响面板主体）。
+  Future<void> _loadLocalIp() async {
+    try {
+      final resolver =
+          castPanelLocalIpResolver ?? LocalMediaServer.resolveLanIPv4;
+      final ip = await resolver();
+      if (!mounted) return;
+      setState(() => _localIp = ip);
+    } catch (_) {
+      // 枚举异常（无 Wi-Fi 盒子等）：隐藏提示行即可。
+    }
+  }
+
+  /// 点按复制本机 IP（用户拿到另一台设备上填）。
+  void _copyLocalIp() {
+    final ip = _localIp;
+    if (ip == null || ip.isEmpty) return;
+    unawaited(Clipboard.setData(ClipboardData(text: ip)));
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text('已复制本机 IP：$ip'),
+        duration: const Duration(milliseconds: 1200),
+      ));
   }
 
   @override
@@ -618,6 +663,17 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
                 ),
               ],
             ),
+            if (castLocalIpHint(_localIp) != null) ...[
+              const SizedBox(height: 4),
+              GestureDetector(
+                onTap: _copyLocalIp,
+                child: Text(
+                  castLocalIpHint(_localIp)!,
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.outline),
+                ),
+              ),
+            ],
             const SizedBox(height: 8),
             _webCastButton(context),
             if (_error != null) ...[
