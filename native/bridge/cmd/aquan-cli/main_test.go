@@ -59,3 +59,22 @@ func TestControlSummaryCast(t *testing.T) {
 		t.Fatalf("cast failure summary = %q", got)
 	}
 }
+
+func TestIsAllDigits(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"7701350814786259993", true},
+		{"12345", true},
+		{"", false},
+		{"万妖图录传", false},
+		{"12abc", false},
+		{"12 3", false},
+	}
+	for _, c := range cases {
+		if got := isAllDigits(c.in); got != c.want {
+			t.Fatalf("isAllDigits(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}

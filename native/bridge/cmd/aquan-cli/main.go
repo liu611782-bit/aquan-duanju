@@ -119,10 +119,24 @@ func main() {
 			return
 		}
 		if len(rest) > 0 {
+			target := rest[0]
+			// 非纯数字 = 关键词：自动搜索挑最佳匹配提取剧集 ID（AI 单命令直达）。
+			if !isAllDigits(target) {
+				opt0 := splitArgs(args, options{limit: 10})
+				p, err := search(target, 10, searchFilters(opt0.filter))
+				if err != nil {
+					fail(err)
+				}
+				best := bestMatch(target, p.Items)
+				if best == nil || best.ID == "" {
+					fail(errors.New("没搜到「" + target + "」对应的剧集"))
+				}
+				target = best.ID
+			}
 			opt := splitArgs(args, options{limit: 10})
 			payload := map[string]any{
 				"kind":    "cast_series",
-				"value":   rest[0],
+				"value":   target,
 				"episode": opt.episode,
 			}
 			reply, err := sendCommand(payload)
@@ -486,6 +500,18 @@ func printPage(query string, p *page, limit int) {
 	for i, it := range p.Items {
 		fmt.Printf("%2d  %s  ID %s  %d集\n", i+1, it.Title, it.ID, it.EpisodeCount)
 	}
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func bestMatch(query string, items []item) *item {
