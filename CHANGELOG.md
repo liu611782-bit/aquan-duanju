@@ -5,7 +5,9 @@
 命令行投屏控制。
 
 - `aquan-cli cast`：一键恢复上次投屏（跨天重新解析同款链路）；
-  `aquan-cli cast stop`：断开投屏——脚本与 AI 助手可指挥电视
+  `aquan-cli cast stop`：断开投屏；
+  `aquan-cli cast <剧集ID> [--episode N]`：把指定剧集投到上次设备——
+  脚本与 AI 助手可全自动指挥电视（search 拿 ID → cast 投送 → 控制播放）
 - 帮助文本同步
 
 ## 1.9.0 (2026-11-08)

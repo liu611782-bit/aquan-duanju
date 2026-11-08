@@ -108,13 +108,37 @@ func main() {
 			fail(err)
 		}
 	case "cast":
-		// cast        → 恢复上次投屏（跨天重新解析）
-		// cast stop   → 断开投屏
+		// cast              → 恢复上次投屏（跨天重新解析）
+		// cast stop         → 断开投屏
+		// cast <ID> [--episode N] → 把指定剧集投到上次设备
 		rest := splitArgs(args, options{limit: 10}).positional
 		if len(rest) > 0 && rest[0] == "stop" {
 			if err := runControl("cast_stop", "", nil); err != nil {
 				fail(err)
 			}
+			return
+		}
+		if len(rest) > 0 {
+			opt := splitArgs(args, options{limit: 10})
+			payload := map[string]any{
+				"kind":    "cast_series",
+				"value":   rest[0],
+				"episode": opt.episode,
+			}
+			reply, err := sendCommand(payload)
+			if err != nil {
+				if errors.Is(err, errNotRunning) {
+					fail(errors.New("阿圈短剧没在运行；先启动应用再投屏"))
+				}
+				fail(err)
+			}
+			if !opt.json {
+				fmt.Println(controlSummary("cast_series", reply))
+				return
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(reply)
 			return
 		}
 		if err := runControl("cast", "", nil); err != nil {
@@ -310,17 +334,17 @@ func splitArgs(args []string, defaults options) options {
 					out.limit = n
 				}
 			}
+		case "--episode", "-episode":
+			if i+1 < len(args) {
+				i++
+				if n, err := strconv.Atoi(args[i]); err == nil && n > 0 {
+					out.episode = n
+				}
+			}
 		case "--app", "-app":
 			if i+1 < len(args) {
 				i++
 				out.app = args[i]
-			}
-		case "--episode", "-episode":
-			if i+1 < len(args) {
-				i++
-				if n, err := strconv.Atoi(args[i]); err == nil {
-					out.episode = n
-				}
 			}
 		case "--filter", "-filter":
 			if i+1 < len(args) {

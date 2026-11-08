@@ -581,6 +581,14 @@ class _AquaAppState extends State<AquaApp> {
       await CastService.instance.controller.disconnect();
       return {'ok': true};
     }
+    if (command.kind == 'cast_series') {
+      final episode = command.episode > 0 ? command.episode : 1;
+      final error = await CastService.instance.controller
+          .castSeriesToLastTarget(command.value, episode);
+      return error == null
+          ? {'ok': true}
+          : {'ok': false, 'error': error};
+    }
     // 播放控制不需要抢窗口焦点，直接下发给当前播放器。
     if (LaunchCommand.isPlayerKind(command.kind)) {
       return PlayerBus.instance.dispatch(command);

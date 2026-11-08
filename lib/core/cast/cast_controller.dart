@@ -760,6 +760,41 @@ class CastController extends ChangeNotifier {
   ///
   /// 降级链位次 [castProtocolFallbackRank]：dlna → chromecast → airplay
   /// （AirPlay 一期排末位——经典 `/play` 接收端覆盖面最小，其余协议优先）。
+  /// 无 UI 直投：把指定剧集（[sourceId]/[episode]）投到「上次投屏设备」。
+  ///
+  /// 供 `aquan-cli cast <seriesId>` 使用（AI 助手/脚本全自动投屏）：解析走
+  /// [defaultResumeProvider]（新鲜 URL + 加密中继，与恢复同款链路），目标设备
+  /// 复用最近会话记录。返回错误文案（null = 成功）。
+  Future<String?> castSeriesToLastTarget(String sourceId, int episode) async {
+    final record = sessionRecorder?.lastSession;
+    if (record == null) return '没有投屏记录，请先在应用里投屏一次';
+    final target = record.resolveTarget();
+    if (target == null) return '上次投屏设备不可用，请重新投屏';
+    final provider = defaultResumeProvider;
+    if (provider == null) return '本机转码初始化未完成，请稍后再试';
+    final positioned = CastSessionRecord(
+      targetPersistJson: record.targetPersistJson,
+      title: record.title,
+      mediaUrl: record.mediaUrl,
+      positionMs: 0,
+      sourceId: sourceId,
+      episodeIndex: episode,
+      endedAt: record.endedAt,
+    );
+    try {
+      final media = await provider(positioned);
+      if (media == null) return '该剧集解析不到可投的流';
+      await castTo(target, media);
+      return null;
+    } on CastException catch (e) {
+      ErrorLog.instance.record('投屏 · CLI 直投', e, StackTrace.current);
+      return e.message;
+    } on Exception catch (e, stack) {
+      ErrorLog.instance.record('投屏 · CLI 直投', e, stack);
+      return '恢复/投送失败，请重新投屏';
+    }
+  }
+
   Future<void> castTo(CastTarget target, CastMedia media) async {
     try {
       await _castWith(target, media);

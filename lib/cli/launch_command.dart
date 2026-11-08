@@ -88,6 +88,9 @@ class LaunchCommand {
           kind = 'cast';
         case '--cast-stop':
           kind = 'cast_stop';
+        case '--cast-series':
+          kind = 'cast_series';
+          value = next() ?? '';
         case '--episode':
           episode = int.tryParse(next() ?? '') ?? 0;
         case '--limit':
@@ -112,6 +115,7 @@ class LaunchCommand {
       return none;
     }
     if (kind == 'series' && value.trim().isEmpty) return none;
+    if (kind == 'cast_series' && value.trim().isEmpty) return none;
     if (kind == 'seek' && value.trim().isEmpty) return none;
     if (kind == 'volume' && value.trim().isEmpty) return none;
     if (kind == 'speed' && value.trim().isEmpty) return none;

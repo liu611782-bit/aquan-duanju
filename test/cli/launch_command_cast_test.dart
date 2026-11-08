@@ -18,6 +18,18 @@ void main() {
     test('cast 不在播放控制类词表（不走 PlayerBus）', () {
       expect(LaunchCommand.isPlayerKind('cast'), isFalse);
       expect(LaunchCommand.isPlayerKind('cast_stop'), isFalse);
+      expect(LaunchCommand.isPlayerKind('cast_series'), isFalse);
+    });
+
+    test('aquan-cli cast <ID> --episode N → kind=cast_series', () {
+      final cmd = LaunchCommand.parse(['--cast-series', '7701350814786259993', '--episode', '3']);
+      expect(cmd.kind, 'cast_series');
+      expect(cmd.value, '7701350814786259993');
+      expect(cmd.episode, 3);
+    });
+
+    test('cast_series 缺 ID → none', () {
+      expect(LaunchCommand.parse(['--cast-series']).isEmpty, isTrue);
     });
   });
 }
