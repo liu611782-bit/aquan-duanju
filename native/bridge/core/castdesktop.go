@@ -88,6 +88,9 @@ func castDesktopStart(opts desktopOptions) (*relaySessionInfo, error) {
 		removeCastDir(dir)
 		return nil, relayFail(ErrRelayUnavailable, "ffmpeg 启动失败: "+err.Error())
 	}
+	// 与 castrelay 同款（castrelay_job_windows.go）：桌面镜像的 ffmpeg 同样
+	// 挂进程级 Job，app 强杀/崩溃不留孤儿转码进程。
+	assignFfmpegToJob(cmd.Process)
 	session.waitCh = make(chan struct{})
 	go func() {
 		session.waitErr = cmd.Wait()
