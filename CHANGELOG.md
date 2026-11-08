@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## 1.9.6 (2026-11-08)
+
+安卓投屏真机修复批 + 播放键同步修复（三批用户真机反馈，fcc1ec1/5fab612/4f876e1）。
+
+- 投屏中继（安卓必败修复）：Android 进程无 TMPDIR，MkdirTemp 落 /tmp 必败
+  ——Dart 解析临时目录经 work_dir 透传；https 上游补 CA 定位（内置
+  cacert.pem → SSL_CERT_FILE）；ffmpeg stderr 落盘、提前退出取去 URL 尾部
+  拼错误详情，失败弹窗展示原始原因并写诊断时间线
+- 投屏面板：设备选择面板全屏化（原 9/16 限高溢出选不中设备）；直连区
+  展示本机 IP（点按复制），另一台设备直连本机时可知对面该填什么
+- 镜像投屏：Android 14+ 顺序修复（startForeground(mediaProjection) 先于
+  getMediaProjection，原顺序 SecurityException 全灭）；worker catch
+  Throwable 优雅停机；未捕获异常落 native_crash.log（崩溃行为不变只增可观测）
+- x86_64 补 libffmpeg.so（模拟器/平板不再缺二进制）
+- 播放器：双击暂停后播放键图标停在播放态——StreamBuilder 种子写死
+  initialData:true + broadcast 流不回放 + 控制栏条件移出树重订阅，
+  改读引擎真实状态
+
 ## 1.9.5 (2026-11-08)
 
 发版收口（自 1.6.1 起 55 个提交的五端 CI 产物；接 1.9.4 条目）。
