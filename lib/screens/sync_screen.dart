@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../core/sync/book_sync.dart';
 import '../core/sync/remote_store.dart';
+import '../widgets/common.dart';
 
 /// 书库云同步：配置 WebDAV / S3，手动「备份到远端」或「从远端合并恢复」。
 ///
@@ -82,12 +83,19 @@ class _SyncScreenState extends State<SyncScreen> {
           : '请先填写 S3 地址与 Bucket');
       return null;
     }
+    // 三个阅读状态库取自全局 AppScope（11-08-book-sync-race）：恢复合并走
+    // 各库写队列并同步刷新内存，恢复后即时生效。先取再 await，避免异步间隙
+    // 后再用 context。
+    final scope = AppScope.read(context);
     await _configStore.save(config);
     final support = await getApplicationSupportDirectory();
     return BookSyncService(
       supportDir: support,
       libraryDir: Directory('${support.path}/book_library'),
       store: widget.storeOverride ?? config.buildStore(),
+      progress: scope.reading,
+      bookmarks: scope.bookmarks,
+      markings: scope.markings,
     );
   }
 

@@ -21,6 +21,7 @@ import '../core/sources/source_health.dart';
 import '../core/sources/source_probe.dart';
 import '../core/sources/source_import.dart';
 import '../core/sources/source_seed.dart';
+import '../core/sync/merge.dart';
 import '../models/models.dart';
 import '../models/play_skip.dart';
 
@@ -2137,6 +2138,26 @@ class ReadingProgressStore extends _JsonFileStore {
     await _flush();
   }
 
+  /// 云同步恢复（11-08-book-sync-race）：把远端进度 JSON 记录级合并进本库
+  /// （同书 `updated_at` 较新者胜，新书补入），返回合并进来的条数。
+  ///
+  /// local 基线取**内存态**（内存 = 启动加载的文件内容 + 未落盘写者，是唯一
+  /// 事实源；队列外裸读文件反而可能比内存旧——常规写者都是先改内存再入队
+  /// 落盘）。合并结果经 [_replaceEntries]（loadFromDisk 同款解析）重建内存后
+  /// 走常规 [_flush] 入队原子写——与 record/fillCover/remove 同构：所有写者
+  /// 共享同一内存、落盘串行，并发混合写不丢键。无变化时不写盘不通知。
+  Future<int> mergeRemoteJson(String remoteJson) async {
+    await ensureLoaded();
+    final localJson = jsonEncode({
+      for (final entry in _entries.entries) entry.key: entry.value.toJson(),
+    });
+    final merged = mergeProgressJson(localJson, remoteJson);
+    if (!merged.changed) return 0;
+    _replaceEntries(jsonDecode(merged.json) as Map<String, dynamic>);
+    await _flush();
+    return merged.changedCount;
+  }
+
   /// 全量写盘（阅读进度整表覆写）。读改写整体入队（[_updateJson]，
   /// 11-07-store-write-race-migration）：高频进度写与封面回填/删除并发时
   /// 不再互相覆盖；仍维持「每次全量读文件」的现状模式，无增量缓存。
@@ -2147,13 +2168,18 @@ class ReadingProgressStore extends _JsonFileStore {
     notifyListeners();
   }
 
-  @override
-  Future<void> loadFromDisk() async {
-    final json = await _readJson();
+  /// loadFromDisk 与 mergeRemoteJson 共用的内存重建（解析口径一致）。
+  void _replaceEntries(Map<String, dynamic> json) {
     _entries.clear();
     json.forEach((k, v) {
       if (v is Map<String, dynamic>) _entries[k] = ReadingEntry.fromJson(k, v);
     });
+  }
+
+  @override
+  Future<void> loadFromDisk() async {
+    final json = await _readJson();
+    _replaceEntries(json);
     _loaded = true;
     notifyListeners();
   }
@@ -2631,6 +2657,44 @@ class BookmarkStore extends _JsonFileStore {
     await _flush();
   }
 
+  /// 云同步恢复（11-08-book-sync-race）：把远端书签 JSON 按 id 取并集合并进
+  /// 本库（同 id 取较新 `created_at`），返回合并进来的条数。
+  ///
+  /// local 基线取**内存态**（内存 = 启动加载的文件内容 + 未落盘写者，是唯一
+  /// 事实源）。合并结果经 [_replaceByBook]（loadFromDisk 同款解析）重建内存
+  /// 后走常规 [_flush] 入队原子写——与 add/updateNote/remove 同构：所有写者
+  /// 共享同一内存、落盘串行，并发混合写不丢键。无变化时不写盘不通知。
+  Future<int> mergeRemoteJson(String remoteJson) async {
+    await ensureLoaded();
+    final localJson = jsonEncode({
+      for (final entry in _byBook.entries)
+        entry.key: <Map<String, dynamic>>[
+          for (final item in entry.value) item.toJson(),
+        ],
+    });
+    final merged = mergeListJson(localJson, remoteJson);
+    if (!merged.changed) return 0;
+    _replaceByBook(jsonDecode(merged.json) as Map<String, dynamic>);
+    await _flush();
+    return merged.changedCount;
+  }
+
+  /// loadFromDisk 与 mergeRemoteJson 共用的内存重建（解析口径一致）。
+  void _replaceByBook(Map<String, dynamic> json) {
+    _byBook.clear();
+    json.forEach((bookId, value) {
+      if (value is! List) return;
+      final list = <ReaderBookmark>[];
+      for (final item in value) {
+        if (item is Map<String, dynamic>) {
+          final bookmark = ReaderBookmark.fromJson(item);
+          if (bookmark.id.isNotEmpty) list.add(bookmark);
+        }
+      }
+      if (list.isNotEmpty) _byBook[bookId] = list;
+    });
+  }
+
   /// 全量写盘（整表覆写）。读改写整体入队（[_updateJson]，
   /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
   /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
@@ -2647,18 +2711,7 @@ class BookmarkStore extends _JsonFileStore {
   @override
   Future<void> loadFromDisk() async {
     final json = await _readJson();
-    _byBook.clear();
-    json.forEach((bookId, value) {
-      if (value is! List) return;
-      final list = <ReaderBookmark>[];
-      for (final item in value) {
-        if (item is Map<String, dynamic>) {
-          final bookmark = ReaderBookmark.fromJson(item);
-          if (bookmark.id.isNotEmpty) list.add(bookmark);
-        }
-      }
-      if (list.isNotEmpty) _byBook[bookId] = list;
-    });
+    _replaceByBook(json);
     _loaded = true;
     notifyListeners();
   }
@@ -2776,6 +2829,46 @@ class MarkingStore extends _JsonFileStore {
     await _flush();
   }
 
+  /// 云同步恢复（11-08-book-sync-race）：把远端划线 JSON 按 id 取并集合并进
+  /// 本库（同 id 取较新 `created_at`），返回合并进来的条数。
+  ///
+  /// local 基线取**内存态**（内存 = 启动加载的文件内容 + 未落盘写者，是唯一
+  /// 事实源）。合并结果经 [_replaceByBook]（loadFromDisk 同款解析）重建内存
+  /// 后走常规 [_flush] 入队原子写——与 add/updateNote/remove 同构：所有写者
+  /// 共享同一内存、落盘串行，并发混合写不丢键。无变化时不写盘不通知。
+  Future<int> mergeRemoteJson(String remoteJson) async {
+    await ensureLoaded();
+    final localJson = jsonEncode({
+      for (final entry in _byBook.entries)
+        entry.key: <Map<String, dynamic>>[
+          for (final item in entry.value) item.toJson(),
+        ],
+    });
+    final merged = mergeListJson(localJson, remoteJson);
+    if (!merged.changed) return 0;
+    _replaceByBook(jsonDecode(merged.json) as Map<String, dynamic>);
+    await _flush();
+    return merged.changedCount;
+  }
+
+  /// loadFromDisk 与 mergeRemoteJson 共用的内存重建（解析口径一致）。
+  void _replaceByBook(Map<String, dynamic> json) {
+    _byBook.clear();
+    json.forEach((bookId, value) {
+      if (value is! List) return;
+      final list = <ReaderMarking>[];
+      for (final item in value) {
+        if (item is Map<String, dynamic>) {
+          final marking = ReaderMarking.fromJson(item);
+          if (marking.id.isNotEmpty && marking.charEnd > marking.charStart) {
+            list.add(marking);
+          }
+        }
+      }
+      if (list.isNotEmpty) _byBook[bookId] = list;
+    });
+  }
+
   /// 全量写盘（整表覆写）。读改写整体入队（[_updateJson]，
   /// 11-08-store-race-final）：文档仍由内存态构建，入队后与其它写者串行，
   /// 并发混合写不再互相覆盖。顺序行为与旧版逐字节一致。
@@ -2792,20 +2885,7 @@ class MarkingStore extends _JsonFileStore {
   @override
   Future<void> loadFromDisk() async {
     final json = await _readJson();
-    _byBook.clear();
-    json.forEach((bookId, value) {
-      if (value is! List) return;
-      final list = <ReaderMarking>[];
-      for (final item in value) {
-        if (item is Map<String, dynamic>) {
-          final marking = ReaderMarking.fromJson(item);
-          if (marking.id.isNotEmpty && marking.charEnd > marking.charStart) {
-            list.add(marking);
-          }
-        }
-      }
-      if (list.isNotEmpty) _byBook[bookId] = list;
-    });
+    _replaceByBook(json);
     _loaded = true;
     notifyListeners();
   }

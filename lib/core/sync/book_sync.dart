@@ -14,7 +14,10 @@ import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../store/stores.dart';
 import 'remote_store.dart';
+
+export 'merge.dart';
 
 /// 同步配置（WebDAV / S3 二选一）。
 class SyncConfig {
@@ -151,7 +154,7 @@ class SyncMergeReport {
   final int markingsAdded;
   final int booksAdded;
 
-  /// 写入的本地文件名（重启后生效）。
+  /// 合并发生变化的本地文件名（JSON 经 Store 队列合并后内存即时生效）。
   final List<String> written;
 
   bool get changed => written.isNotEmpty || booksAdded > 0;
@@ -164,7 +167,9 @@ class SyncMergeReport {
       if (markingsAdded > 0) '划线 +$markingsAdded',
       if (booksAdded > 0) '本地书 +$booksAdded 本',
     ];
-    return '已合并：${parts.join('，')}${written.isEmpty ? '' : '（重启后生效）'}';
+    // 三个 JSON 状态文件恢复后经 Store 即时生效并通知刷新，
+    // 媒体文件（books/）落盘即可用——无需重启。
+    return '已合并：${parts.join('，')}';
   }
 }
 
@@ -174,6 +179,9 @@ class BookSyncService {
     required this.supportDir,
     required this.libraryDir,
     required this.store,
+    required this.progress,
+    required this.bookmarks,
+    required this.markings,
   });
 
   /// 应用数据目录（含 `aquan_reading.json` 等）。
@@ -183,6 +191,12 @@ class BookSyncService {
   final Directory libraryDir;
 
   final RemoteStore store;
+
+  /// 三个阅读状态库（11-08-book-sync-race）：恢复合并改走各库写队列
+  /// （`mergeRemoteJson`），不再对 JSON 文件队列外直写。
+  final ReadingProgressStore progress;
+  final BookmarkStore bookmarks;
+  final MarkingStore markings;
 
   static const String progressFile = 'aquan_reading.json';
   static const String bookmarksFile = 'aquan_bookmarks.json';
@@ -285,24 +299,27 @@ class BookSyncService {
         continue;
       }
       if (name == progressFile || name == bookmarksFile || name == markingsFile) {
-        final local = File('${supportDir.path}/$name');
-        final localText = local.existsSync() ? await local.readAsString() : '';
         final remoteText = utf8.decode(file.content, allowMalformed: true);
-        final merged = name == progressFile
-            ? mergeProgressJson(localText, remoteText)
-            : mergeListJson(localText, remoteText);
-        if (merged.changed) {
-          await local.writeAsString(merged.json, flush: true);
+        // 记录级合并走 Store 写队列（11-08-book-sync-race）：以各库内存态为
+        // local 基线入队合并并同步刷新内存，不再对 JSON 文件队列外直写——
+        // 与常规写者（阅读进度落盘、加书签/划线）并发时不再互相覆盖丢键，
+        // 合并结果即时生效。
+        final changedCount = name == progressFile
+            ? await progress.mergeRemoteJson(remoteText)
+            : name == bookmarksFile
+                ? await bookmarks.mergeRemoteJson(remoteText)
+                : await markings.mergeRemoteJson(remoteText);
+        if (changedCount > 0) {
           written.add(name);
           if (name == progressFile) {
-            progressUpdated = merged.changedCount;
+            progressUpdated = changedCount;
           } else if (name == bookmarksFile) {
-            bookmarksAdded = merged.changedCount;
+            bookmarksAdded = changedCount;
           } else {
-            markingsAdded = merged.changedCount;
+            markingsAdded = changedCount;
           }
         }
-        mergedCount = (mergedCount ?? 0) + merged.changedCount;
+        mergedCount = (mergedCount ?? 0) + changedCount;
       }
     }
     if (mergedCount == null && booksAdded == 0 && booksSkipped == 0) {
@@ -318,89 +335,6 @@ class BookSyncService {
   }
 }
 
-/// 合并结果（内部）。
-class MergedJson {
-  const MergedJson({
-    required this.json,
-    required this.changed,
-    required this.changedCount,
-  });
-
-  final String json;
-  final bool changed;
-  final int changedCount;
-}
-
-/// 进度合并：同书取 `updated_at` 较新；新书补入。
-MergedJson mergeProgressJson(String localJson, String remoteJson) {
-  final local = _decodeMap(localJson);
-  final remote = _decodeMap(remoteJson);
-  var changed = 0;
-
-  for (final entry in remote.entries) {
-    final incoming = entry.value;
-    final existing = local[entry.key];
-    if (existing == null) {
-      local[entry.key] = incoming;
-      changed++;
-      continue;
-    }
-    final incomingAt = _timeOf(incoming);
-    final existingAt = _timeOf(existing);
-    if (incomingAt.isAfter(existingAt)) {
-      local[entry.key] = incoming;
-      changed++;
-    }
-  }
-  return MergedJson(
-    json: jsonEncode(local),
-    changed: changed > 0,
-    changedCount: changed,
-  );
-}
-
-/// 列表合并（书签/划线）：按 `id` 取并集，同 id 取较新 `created_at`。
-MergedJson mergeListJson(String localJson, String remoteJson) {
-  final local = _decodeMap(localJson);
-  final remote = _decodeMap(remoteJson);
-  var changed = 0;
-
-  for (final entry in remote.entries) {
-    final bookId = entry.key;
-    final incoming = _asList(entry.value);
-    final existing = _asList(local[bookId]);
-    final byId = <String, Map<String, dynamic>>{
-      for (final item in existing) _idOf(item): item,
-    };
-    var bookChanged = false;
-    for (final item in incoming) {
-      final id = _idOf(item);
-      if (id.isEmpty) continue;
-      final current = byId[id];
-      if (current == null) {
-        byId[id] = item;
-        bookChanged = true;
-        changed++;
-        continue;
-      }
-      if (_timeOf(item).isAfter(_timeOf(current))) {
-        byId[id] = item;
-        bookChanged = true;
-        changed++;
-      }
-    }
-    if (bookChanged) {
-      local[bookId] = byId.values.toList()
-        ..sort((a, b) => _timeOf(a).compareTo(_timeOf(b)));
-    }
-  }
-  return MergedJson(
-    json: jsonEncode(local),
-    changed: changed > 0,
-    changedCount: changed,
-  );
-}
-
 /// 打包（纯函数，测试可直接断言解包结果）。
 Uint8List buildBundle(Map<String, List<int>> files) {
   final archive = Archive();
@@ -409,36 +343,4 @@ Uint8List buildBundle(Map<String, List<int>> files) {
     archive.addFile(ArchiveFile(entry.key, data.length, data));
   }
   return Uint8List.fromList(ZipEncoder().encode(archive));
-}
-
-Map<String, dynamic> _decodeMap(String text) {
-  if (text.trim().isEmpty) return <String, dynamic>{};
-  try {
-    final json = jsonDecode(text);
-    if (json is Map<String, dynamic>) return json;
-  } catch (_) {
-    // 坏 JSON 当作空表（不阻断合并）。
-  }
-  return <String, dynamic>{};
-}
-
-List<Map<String, dynamic>> _asList(Object? value) {
-  if (value is! List) return const [];
-  return [
-    for (final item in value)
-      if (item is Map<String, dynamic>) item,
-  ];
-}
-
-String _idOf(Map<String, dynamic> item) => item['id']?.toString() ?? '';
-
-DateTime _timeOf(Map<String, dynamic> item) {
-  for (final key in ['updated_at', 'created_at', 'saved_at']) {
-    final raw = item[key];
-    if (raw is String) {
-      final parsed = DateTime.tryParse(raw);
-      if (parsed != null) return parsed;
-    }
-  }
-  return DateTime.fromMillisecondsSinceEpoch(0);
 }

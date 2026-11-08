@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## 1.8.8 (2026-11-08)
+
+book_sync 跨设备直写收敛：云同步恢复的进度/书签/划线合并改走 Store 写队列。
+
+- 此前 `BookSyncService.mergeBundle` 恢复段对 `aquan_reading.json` /
+  `aquan_bookmarks.json` / `aquan_markings.json` 在 Store 写队列外直读写
+  合并（非原子写、不经写队列），与已入队的常规写者（阅读进度落盘、加书签/
+  划线）并发时互相覆盖丢键
+- 现改为三个 Store 各增 `mergeRemoteJson`：以各库内存态为 local 基线做记录
+  级合并（新者胜/id 去重，算法不变），合并结果重建内存后经 `_updateJson`
+  入队原子写并即时生效；`BookSyncService` 改为构造注入三个 Store，恢复段
+  不再直写 JSON 文件（books/ 目录媒体文件仍直写，非 JSON 状态）
+- 合并函数（mergeProgressJson / mergeListJson）抽到 `lib/core/sync/merge.dart`
+  供 book_sync 与 stores 双方复用；合并报告计数口径不变
+- 新增 mergeRemoteJson 单测（新增/较新覆盖/较旧保留/空远端/坏 JSON 容错）
+  与并发回归锁（与 record/add 并发不丢键），sync_test 恢复用例改为注入 Store
+
 ## 1.8.7 (2026-11-08)
 
 Store 写竞态迁移收尾：`_updateJson` 推广到剩余 12 个 JSON 存储，全部写者入队串行。

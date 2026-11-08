@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:aquan_duanju/core/sync/book_sync.dart';
 import 'package:aquan_duanju/core/sync/remote_store.dart';
+import 'package:aquan_duanju/store/stores.dart';
 import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -35,6 +36,22 @@ class _MemoryStore implements RemoteStore {
     objects[path] = bytes;
   }
 }
+
+/// 构造被测服务：三个阅读状态库与 JSON 备份文件落在同一 support 目录
+/// （与生产同目录布局，11-08-book-sync-race 起恢复合并走 Store 写队列）。
+BookSyncService _service(
+  Directory support,
+  Directory library, {
+  RemoteStore? remote,
+}) =>
+    BookSyncService(
+      supportDir: support,
+      libraryDir: library,
+      store: remote ?? _MemoryStore(),
+      progress: ReadingProgressStore(testDirectory: support),
+      bookmarks: BookmarkStore(testDirectory: support),
+      markings: MarkingStore(testDirectory: support),
+    );
 
 void main() {
   group('进度合并', () {
@@ -145,17 +162,18 @@ void main() {
         'books/abc123/book.txt': utf8.encode('正文'),
       });
 
-      final service = BookSyncService(
-        supportDir: support,
-        libraryDir: library,
-        store: _MemoryStore(),
-      );
+      final service = _service(support, library);
       final report = await service.mergeBundle(Uint8List.fromList(bundle));
 
       expect(report.progressUpdated, 1);
       expect(report.bookmarksAdded, 1);
       expect(report.booksAdded, 1);
-      expect(report.summary, contains('重启后生效'));
+      expect(report.summary, contains('已合并'));
+
+      // 恢复经 Store 队列合并后内存即时生效（11-08-book-sync-race，
+      // 不再需要重启加载）。
+      expect(service.progress.entry('a')?.chapterIndex, 9);
+      expect(service.bookmarks.countOf('a'), 1);
 
       final progress = jsonDecode(
               await File('${support.path}/${BookSyncService.progressFile}')
@@ -172,11 +190,7 @@ void main() {
       final existing = Directory('${library.path}/abc')..createSync();
       await File('${existing.path}/book.txt').writeAsString('本地版');
 
-      final service = BookSyncService(
-        supportDir: support,
-        libraryDir: library,
-        store: _MemoryStore(),
-      );
+      final service = _service(support, library);
       final report = await service.mergeBundle(
         Uint8List.fromList(buildBundle({
           'books/abc/book.txt': utf8.encode('远端版'),
@@ -189,11 +203,7 @@ void main() {
     });
 
     test('损坏的包 → 明确报错', () async {
-      final service = BookSyncService(
-        supportDir: tmp,
-        libraryDir: tmp,
-        store: _MemoryStore(),
-      );
+      final service = _service(tmp, tmp);
       await expectLater(
         service.mergeBundle(Uint8List.fromList([1, 2, 3])),
         throwsA(isA<RemoteStoreException>()),
@@ -207,11 +217,7 @@ void main() {
           .writeAsString(jsonEncode({'a': {'updated_at': '2026-11-02T00:00:00.000Z'}}));
 
       final store = _MemoryStore();
-      final service = BookSyncService(
-        supportDir: support,
-        libraryDir: library,
-        store: store,
-      );
+      final service = _service(support, library, remote: store);
       final path = await service.backup();
       expect(store.objects.containsKey(path), isTrue);
 
@@ -223,20 +229,12 @@ void main() {
 
     test('没有数据时备份诚实报错', () async {
       final support = Directory('${tmp.path}/empty')..createSync();
-      final service = BookSyncService(
-        supportDir: support,
-        libraryDir: Directory('${support.path}/none'),
-        store: _MemoryStore(),
-      );
+      final service = _service(support, Directory('${support.path}/none'));
       await expectLater(service.backup(), throwsA(isA<RemoteStoreException>()));
     });
 
     test('远端没有备份时恢复诚实报错', () async {
-      final service = BookSyncService(
-        supportDir: tmp,
-        libraryDir: tmp,
-        store: _MemoryStore(),
-      );
+      final service = _service(tmp, tmp);
       await expectLater(service.restore(), throwsA(isA<RemoteStoreException>()));
     });
 
