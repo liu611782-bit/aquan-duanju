@@ -64,6 +64,7 @@ class CastMedia {
     this.episodeCount = 0,
     this.localPath = '',
     this.headers = const {},
+    this.recordUrl,
     this.subtitleUrl = '',
     this.isMirror = false,
     this.mimeHint = '',
@@ -85,6 +86,13 @@ class CastMedia {
   /// 源站请求头（Referer/UA 等）。非空且为 http(s) 直链时经 [CastMediaProxy]
   /// 包一层再投给电视（电视无法自带这些头）。本地文件路径下被忽略。
   final Map<String, String> headers;
+
+  /// 会话恢复记录应使用的 URL（选路前的源地址）。null 时记录用 [url]。
+  ///
+  /// 连播 provider 对加密分集会把本机中继产物塞进 [url]（产物随会话回收
+  /// 即死链）——恢复记录必须存源地址，否则「恢复上次投屏」传递死链
+  /// （UI 冒烟实证：恢复后 6 秒停）。
+  final String? recordUrl;
 
   /// 外挂字幕地址（srt/vtt）。DLNA 走 DIDL `sec:SubtitleUri`；
   /// Chromecast 先转 VTT 再作为 textTrack 投送。空表示无字幕。
@@ -941,7 +949,7 @@ class CastController extends ChangeNotifier {
       await _recordSessionStart(
         target,
         media,
-        sourceUrl: sessionSourceUrl,
+        sourceUrl: media.recordUrl ?? sessionSourceUrl,
         isMirror: sessionIsMirror,
         isLocalFile: sessionIsLocalFile,
       );
@@ -1305,7 +1313,7 @@ class CastController extends ChangeNotifier {
     unawaited(_recordSessionStart(
       device,
       next,
-      sourceUrl: next.url,
+      sourceUrl: next.recordUrl ?? next.url,
       isMirror: next.isMirror,
       isLocalFile: next.isLocalFile,
     ));

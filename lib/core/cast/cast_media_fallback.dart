@@ -50,6 +50,8 @@ Future<(CastMedia, bool)?> castMediaViaRelayOrDirect({
       mimeHint: viaRelay ? relayMimeHint : '',
       duration: duration,
       viaRelay: viaRelay,
+      // 恢复记录存源地址：中继产物随会话回收即死链。
+      recordUrl: directUrl,
     ),
     viaRelay,
   );

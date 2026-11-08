@@ -2567,6 +2567,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         episodeCount: widget.episodes.length,
         // M5-0：连播加密分集的产物已是本机中继 HLS，选路恒直投。
         viaRelay: nextViaRelay,
+        // 恢复记录存源地址（产物随会话回收即死链，见 CastMedia.recordUrl）。
+        recordUrl: stream.url,
         // 编码提示与首投同口径：缺了它 HEVC/AV1 分集连播时 auto 选路无证据
         // → 直投 → 接收端解不动（UI 冒烟实证的连播风暴根因之一）。
         codecHint: stream.codec,
