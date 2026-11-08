@@ -280,16 +280,34 @@ Future<String?> showCastSheet(
   if (context.mounted) {
     await showModalBottomSheet<String>(
       context: context,
-      // 11-08 真机修复：设备选择面板全屏化——默认限高 9/16 屏导致设备列表
-      // 被压到选不中；isScrollControlled + useSafeArea 后设备多时撑满整屏
-      // （内容整体可滚动），设备少时仍按内容高度。
+      // 11-09 用户反馈：仅放宽上限不够——面板高度仍随内容收缩（设备少/为空
+      // 时设备区被压扁）。改为**固定高度** + 内部 Expanded 设备列表撑满
+      // （见 _buildSheet）。手机/TV 取 94% 屏高；桌面限高 70% 且钳 720px，
+      // 防高分屏出巨型面板。键盘弹出随 viewInsets 收缩（sheet 布局自身
+      // 不做键盘避让，必须内容侧自算），手动 IP 输入框不被遮挡。
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (sheetContext) => _CastDeviceSheet(
-        scope: scope,
-        media: media,
-        initialMirrorMode: initialMirrorMode,
-      ),
+      builder: (sheetContext) {
+        final desktop =
+            Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+        final height = desktop
+            ? (MediaQuery.sizeOf(sheetContext).height * 0.7)
+                .clamp(0.0, 720.0)
+            : MediaQuery.sizeOf(sheetContext).height * 0.94;
+        final keyboard =
+            MediaQuery.viewInsetsOf(sheetContext).bottom;
+        return Padding(
+          padding: EdgeInsets.only(bottom: keyboard),
+          child: SizedBox(
+            height: (height - keyboard).clamp(0.0, double.infinity),
+            child: _CastDeviceSheet(
+              scope: scope,
+              media: media,
+              initialMirrorMode: initialMirrorMode,
+            ),
+          ),
+        );
+      },
     );
     result = controller.isCasting ? 'started' : null;
   }
@@ -368,6 +386,11 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
   /// 本机 LAN IP（手动直连区提示行用）；null = 未解析到（该行隐藏）。
   String? _localIp;
 
+  /// 复制成功闪现（11-09）：行内文案切「已复制」后由计时器还原——模态
+  /// 面板下的 SnackBar 看不见，不能作为唯一反馈。
+  bool _copiedFlash = false;
+  Timer? _copiedTimer;
+
   @override
   void initState() {
     super.initState();
@@ -379,6 +402,13 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
           CastTranscodeMode.auto;
     }
     unawaited(_loadLocalIp());
+  }
+
+  @override
+  void dispose() {
+    _copiedTimer?.cancel();
+    _ipController.dispose();
+    super.dispose();
   }
 
   /// 解析本机 LAN IP（失败静默：提示行隐藏，绝不影响面板主体）。
@@ -394,23 +424,17 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
     }
   }
 
-  /// 点按复制本机 IP（用户拿到另一台设备上填）。
+  /// 点按复制本机 IP（用户拿到另一台设备上填）。反馈在行内闪现——
+  /// SnackBar 挂在面板底下的 Scaffold 上，会被模态面板挡住。
   void _copyLocalIp() {
     final ip = _localIp;
     if (ip == null || ip.isEmpty) return;
     unawaited(Clipboard.setData(ClipboardData(text: ip)));
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text('已复制本机 IP：$ip'),
-        duration: const Duration(milliseconds: 1200),
-      ));
-  }
-
-  @override
-  void dispose() {
-    _ipController.dispose();
-    super.dispose();
+    _copiedTimer?.cancel();
+    setState(() => _copiedFlash = true);
+    _copiedTimer = Timer(const Duration(milliseconds: 1600), () {
+      if (mounted) setState(() => _copiedFlash = false);
+    });
   }
 
   @override
@@ -437,18 +461,54 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
       for (final d in cast.pinned)
         if (!devices.any((x) => x.id == d.id)) d,
     ];
-    // 11-08 真机修复：整体可滚动——头部行/兼容模式/画质/恢复卡都是不可压缩
-    // 的 inflexible 子项，设备多时加上设备列表会超出面板限高，原 Flexible +
-    // ListView 的组合会把它们顶出溢出。现在外层 SingleChildScrollView 滚动
-    // 兜底，设备列表改为 shrinkWrap 内嵌（不自行滚动）。
+    // 11-09 用户反馈：面板高度已由 showCastSheet 固定（手机/TV 94% 屏高、
+    // 桌面 70% 钳 720px），设备列表 Expanded 撑满头部与底部操作行之间——
+    // 设备少/为空时设备区不再被压扁。键盘弹出时面板随 viewInsets 收缩，
+    // 固定头部+底部行可能超出剩余空间：整列退化为滚动模式（设备区
+    // shrinkWrap 内嵌），键盘收起恢复 Expanded 撑满。
+    final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.all(16),
-        child: SingleChildScrollView(
-          child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+        child: keyboardOpen
+            ? SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: _sheetChildren(
+                    context,
+                    theme,
+                    devices: devices,
+                    pinnedOffline: pinnedOffline,
+                    scrollMode: true,
+                  ),
+                ),
+              )
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: _sheetChildren(
+                  context,
+                  theme,
+                  devices: devices,
+                  pinnedOffline: pinnedOffline,
+                  scrollMode: false,
+                ),
+              ),
+      ),
+    );
+  }
+
+  /// 面板内容行清单（11-09 自 _buildSheet 抽出）：固定头部 + 设备区 +
+  /// 停靠底部。[scrollMode]（键盘弹出整列可滚）时设备区 shrinkWrap 内嵌，
+  /// 否则设备区是 Expanded（调用列必须受界）。
+  List<Widget> _sheetChildren(
+    BuildContext context,
+    ThemeData theme, {
+    required List<CastTarget> devices,
+    required List<CastTarget> pinnedOffline,
+    required bool scrollMode,
+  }) =>
+      [
             Row(
               children: [
                 Text('投屏到设备', style: theme.textTheme.titleMedium),
@@ -560,84 +620,12 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
             // 会话恢复卡片（R1.2）：空闲态且有可恢复记录时显示在设备列表
             // 上方一行，不阻塞列表；损坏记录静默清理后隐藏。
             ..._resumeCard(context, theme),
-            ListView.builder(
-              shrinkWrap: true,
-              // 外层 SingleChildScrollView 统一滚动：内嵌列表只负责铺开。
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: devices.length +
-                  pinnedOffline.length +
-                  (devices.isEmpty && pinnedOffline.isEmpty ? 1 : 0),
-                itemBuilder: (itemContext, index) {
-                  if (index < devices.length) {
-                    final d = devices[index];
-                    return _tvItem(
-                      itemContext,
-                      label: '设备 ${d.name}',
-                      onTap: () => _connect(d),
-                      child: ListTile(
-                        key: ValueKey(d.id),
-                        dense: true,
-                        leading: Icon(
-                          switch (d.protocol) {
-                            CastProtocol.chromecast => Icons.cast,
-                            CastProtocol.airplay => Icons.airplay,
-                            CastProtocol.dlna => Icons.tv,
-                          },
-                          color: d.online
-                              ? theme.colorScheme.primary
-                              : theme.colorScheme.outline,
-                        ),
-                        title: Text(d.name,
-                            maxLines: 1, overflow: TextOverflow.ellipsis),
-                        subtitle: Text(
-                          [
-                            switch (d.protocol) {
-                              CastProtocol.chromecast => 'Chromecast',
-                              CastProtocol.airplay => 'AirPlay',
-                              CastProtocol.dlna => 'DLNA',
-                            },
-                            if (d.modelName.isNotEmpty) d.modelName,
-                            if (!d.online) '离线',
-                          ].join(' · '),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        trailing: cast.isPinned(d.id)
-                            ? const Icon(Icons.push_pin, size: 16)
-                            : null,
-                        // 点击交给 TvFocusable：避免 ListTile 内建 InkWell 与
-                        // 外层焦点节点形成双焦点。
-                      ),
-                    );
-                  }
-                  final pinnedIndex = index - devices.length;
-                  if (pinnedIndex < pinnedOffline.length) {
-                    // 钉选过但本轮没扫到的设备：仍可直连（同一局域网通常可达）。
-                    final d = pinnedOffline[pinnedIndex];
-                    return _tvItem(
-                      itemContext,
-                      label: '设备 ${d.name}',
-                      onTap: () => _connect(d),
-                      child: ListTile(
-                        key: ValueKey(d.id),
-                        dense: true,
-                        leading: Icon(Icons.tv,
-                            color: theme.colorScheme.outline),
-                        title: Text(d.name,
-                            maxLines: 1, overflow: TextOverflow.ellipsis),
-                        subtitle: const Text('未在本次扫描出现，点击尝试直连'),
-                      ),
-                    );
-                  }
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    child: Center(
-                      child: Text('同一 Wi-Fi 下还没有发现可投屏的设备',
-                          style: TextStyle(color: theme.colorScheme.outline)),
-                    ),
-                  );
-                },
-            ),
+            // 设备区（11-09）：固定高度模式下 Expanded 撑满；滚动模式（键盘
+            // 弹出）下 shrinkWrap 内嵌，避免固定头部+底部超出面板收缩高度。
+            ..._deviceArea(theme,
+                devices: devices,
+                pinnedOffline: pinnedOffline,
+                scrollMode: scrollMode),
             const SizedBox(height: 8),
             Row(
               children: [
@@ -665,12 +653,37 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
             ),
             if (castLocalIpHint(_localIp) != null) ...[
               const SizedBox(height: 4),
-              GestureDetector(
+              // 本机 IP 行（11-09 用户反馈：点按复制要有**看得见**的反馈——
+              // SnackBar 会被模态面板遮住）。InkWell 波纹 + 复制图标显性化
+              // 可点性；点按后行内文案闪现「已复制」约 1.6s 自动还原。
+              InkWell(
                 onTap: _copyLocalIp,
-                child: Text(
-                  castLocalIpHint(_localIp)!,
-                  style: theme.textTheme.bodySmall
-                      ?.copyWith(color: theme.colorScheme.outline),
+                borderRadius: BorderRadius.circular(6),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.copy_rounded,
+                          size: 13, color: theme.colorScheme.outline),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text(
+                          _copiedFlash
+                              ? '已复制本机 IP：$_localIp ✓'
+                              : castLocalIpHint(_localIp)!,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: _copiedFlash
+                                ? theme.colorScheme.primary
+                                : theme.colorScheme.outline,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -691,9 +704,114 @@ class _CastDeviceSheetState extends State<_CastDeviceSheet> {
                 padding: EdgeInsets.only(top: 8),
                 child: Center(child: AppLoading.inline()),
               ),
-          ],
+          ];
+
+  /// 设备区（11-09）：固定高度模式下 Expanded 撑满剩余高度（空态文案垂直
+  /// 居中）；滚动模式（键盘弹出整列可滚）下 shrinkWrap 内嵌、仅铺开不滚动。
+  List<Widget> _deviceArea(
+    ThemeData theme, {
+    required List<CastTarget> devices,
+    required List<CastTarget> pinnedOffline,
+    required bool scrollMode,
+  }) {
+    if (devices.isEmpty && pinnedOffline.isEmpty) {
+      return scrollMode
+          ? [
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                child: Text('同一 Wi-Fi 下还没有发现可投屏的设备',
+                    style: TextStyle(color: theme.colorScheme.outline)),
+              ),
+            ]
+          : [
+              Expanded(
+                child: Center(
+                  child: Text('同一 Wi-Fi 下还没有发现可投屏的设备',
+                      style: TextStyle(color: theme.colorScheme.outline)),
+                ),
+              ),
+            ];
+    }
+    final list = ListView.builder(
+      itemCount: devices.length + pinnedOffline.length,
+      itemBuilder: (itemContext, index) =>
+          _deviceTile(itemContext, index, devices, pinnedOffline),
+    );
+    return scrollMode
+        ? [
+            ListView.builder(
+              shrinkWrap: true,
+              // 外层 SingleChildScrollView 统一滚动：内嵌列表只负责铺开。
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: devices.length + pinnedOffline.length,
+              itemBuilder: (itemContext, index) =>
+                  _deviceTile(itemContext, index, devices, pinnedOffline),
+            )
+          ]
+        : [Expanded(child: list)];
+  }
+
+  /// 设备行（扫描命中 + 钉选离线两类；空态分支已由 [_deviceArea] 接管）。
+  Widget _deviceTile(
+    BuildContext itemContext,
+    int index,
+    List<CastTarget> devices,
+    List<CastTarget> pinnedOffline,
+  ) {
+    final theme = Theme.of(itemContext);
+    final cast = widget.scope.cast;
+    if (index < devices.length) {
+      final d = devices[index];
+      return _tvItem(
+        itemContext,
+        label: '设备 ${d.name}',
+        onTap: () => _connect(d),
+        child: ListTile(
+          key: ValueKey(d.id),
+          dense: true,
+          leading: Icon(
+            switch (d.protocol) {
+              CastProtocol.chromecast => Icons.cast,
+              CastProtocol.airplay => Icons.airplay,
+              CastProtocol.dlna => Icons.tv,
+            },
+            color:
+                d.online ? theme.colorScheme.primary : theme.colorScheme.outline,
           ),
+          title: Text(d.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+          subtitle: Text(
+            [
+              switch (d.protocol) {
+                CastProtocol.chromecast => 'Chromecast',
+                CastProtocol.airplay => 'AirPlay',
+                CastProtocol.dlna => 'DLNA',
+              },
+              if (d.modelName.isNotEmpty) d.modelName,
+              if (!d.online) '离线',
+            ].join(' · '),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: cast.isPinned(d.id)
+              ? const Icon(Icons.push_pin, size: 16)
+              : null,
+          // 点击交给 TvFocusable：避免 ListTile 内建 InkWell 与
+          // 外层焦点节点形成双焦点。
         ),
+      );
+    }
+    final d = pinnedOffline[index - devices.length];
+    // 钉选过但本轮没扫到的设备：仍可直连（同一局域网通常可达）。
+    return _tvItem(
+      itemContext,
+      label: '设备 ${d.name}',
+      onTap: () => _connect(d),
+      child: ListTile(
+        key: ValueKey(d.id),
+        dense: true,
+        leading: Icon(Icons.tv, color: theme.colorScheme.outline),
+        title: Text(d.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: const Text('未在本次扫描出现，点击尝试直连'),
       ),
     );
   }
