@@ -3223,7 +3223,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                         onPressed: () => _engine.playOrPause(),
                         icon: StreamBuilder<bool>(
                           stream: _engine.stream.playing,
-                          initialData: true,
+                          // initialData 必须读引擎真实状态（11-08 用户真机反馈）：
+                          // media_kit 的 stream.playing 是普通 broadcast 流——
+                          // 订阅时不回放当前值；而控制栏随 _showControls 条件
+                          // 整棵移出树（2787 行），重新显示即全新 StreamBuilder。
+                          // 写死 true 时「隐藏期间被双击暂停 → 再呼出控制栏」
+                          // 图标必然停在播放态，直到下一次 playing 事件才纠正。
+                          initialData: _engine.state.playing,
                           builder: (_, snap) => Icon(
                             snap.data == true
                                 ? Icons.pause_circle_filled
