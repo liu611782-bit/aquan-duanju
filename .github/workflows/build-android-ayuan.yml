@@ -1,6 +1,6 @@
 # =============================================================================
 # 仓库路径: .github/workflows/build-android-ayuan.yml
-# 变更类型: 【新增】或替换原 test 工作流
+# 变更类型: 替换
 # 说明:     构建「阿圆短剧」Android 手机 APK（arm64-v8a）
 # =============================================================================
 name: 阿圆短剧 · Build Android APK
@@ -36,12 +36,13 @@ concurrency:
 jobs:
   build-android:
     name: 构建阿圆短剧 APK
-    runs-on: ubuntu-latest
+    # 固定到 24.04，避免 ubuntu-latest 迁移到 Ubuntu 26 后环境变化
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -49,7 +50,7 @@ jobs:
           python-version: "3.12"
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -64,8 +65,8 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          # 与项目锁定版本一致时可再改
-          flutter-version: "3.24.5"
+          # 不固定版本，安装最新 stable，以满足 pubspec.yaml 中 SDK ^3.13.7 的要求。
+          # 若想固定，请改成本地 `flutter --version` 显示的版本号（Dart 需 >= 3.13.7）。
           channel: stable
           cache: true
 
@@ -88,7 +89,7 @@ jobs:
           go version
           flutter --version
           python --version
-          sdkmanager --list_installed | head -n 40
+          sdkmanager --list_installed || true
 
       - name: Flutter pub get
         run: |
@@ -101,7 +102,6 @@ jobs:
           BUILD_MODE: ${{ inputs.build_mode }}
           GOPROXY: https://proxy.golang.org,direct
           GOSUMDB: sum.golang.org
-          # 应用显示名（若脚本/Gradle 读取该变量可覆盖 label）
           APP_DISPLAY_NAME: 阿圆短剧
         run: |
           set -euo pipefail
@@ -109,10 +109,8 @@ jobs:
           # 优先走仓库统一脚本；不存在则回退 flutter build apk
           if [ -f scripts/build_android.py ]; then
             ARGS=(--abi "$ABI")
-            # 全 ABI
             if [ "$ABI" = "all" ]; then
               ARGS=(--abi arm64-v8a)
-              # 若脚本支持多 ABI，可改为不传或 --all-abi
             fi
             if [ "$BUILD_MODE" = "debug" ]; then
               ARGS+=(--debug)
@@ -121,19 +119,12 @@ jobs:
           else
             echo "scripts/build_android.py 不存在，使用 flutter build apk"
             case "$ABI" in
-              arm64-v8a)
-                TARGET_PLATFORM="android-arm64"
-                ;;
-              armeabi-v7a)
-                TARGET_PLATFORM="android-arm"
-                ;;
-              all)
-                TARGET_PLATFORM=""
-                ;;
-              *)
-                TARGET_PLATFORM="android-arm64"
-                ;;
+              arm64-v8a)   TARGET_PLATFORM="android-arm64" ;;
+              armeabi-v7a) TARGET_PLATFORM="android-arm" ;;
+              all)         TARGET_PLATFORM="" ;;
+              *)           TARGET_PLATFORM="android-arm64" ;;
             esac
+
             if [ "$BUILD_MODE" = "debug" ]; then
               if [ -n "$TARGET_PLATFORM" ]; then
                 flutter build apk --debug --target-platform="$TARGET_PLATFORM"
@@ -147,8 +138,8 @@ jobs:
                 flutter build apk --release
               fi
             fi
+
             mkdir -p dist/android
-            # 拷贝并统一命名为阿圆短剧
             if [ "$BUILD_MODE" = "debug" ]; then
               SRC=$(find build/app/outputs/flutter-apk -name "app-*-debug.apk" | head -n1 || true)
               [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
@@ -160,35 +151,16 @@ jobs:
             fi
           fi
 
-      - name: Rename APK to 阿圆短剧
-        run: |
-          set -euo pipefail
-          mkdir -p dist/android
-          # 脚本产物若在 dist/android，统一改成带中文名的文件
-          shopt -s nullglob
-          for f in dist/android/*.apk build/app/outputs/flutter-apk/*.apk; do
-            [ -f "$f" ] || continue
-            base=$(basename "$f")
-            case "$base" in
-              阿圆短剧*) continue ;;
-            esac
-            out="dist/android/阿圆短剧-${{ inputs.build_mode }}-${{ inputs.abi }}.apk"
-            cp -f "$f" "$out"
-            echo "renamed: $f -> $out"
-          done
-          ls -lah dist/android/ || true
-
       - name: Verify APK exists
         run: |
           set -euo pipefail
-          echo "APK list:"
-          find dist/android -maxdepth 1 -type f -name "*.apk" -print
-          test "$(find dist/android -maxdepth 1 -type f -name "*.apk" | wc -l)" -ge 1
+          if [ -z "$(find dist/android -name '*.apk' 2>/dev/null)" ]; then
+            echo "未找到 APK 产物"
+            exit 1
+          fi
+          ls -lh dist/android
 
       - name: Upload 阿圆短剧 APK
         uses: actions/upload-artifact@v4
         with:
-          name: 阿圆短剧-android-${{ inputs.build_mode }}-${{ inputs.abi }}
-          path: dist/android/*.apk
-          if-no-files-found: error
-          retention-days: 14
+          name: ayuan-apk-${{ inputs.abi }}-${{ input
