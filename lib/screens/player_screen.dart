@@ -2012,10 +2012,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     _showToast('将在 $minutes 分钟后暂停');
   }
 
-  /// 选集抽屉：点任意一集直接换集。
+    /// 选集抽屉：点任意一集直接换集；支持全部下载、单集下载与下载管理。
   Future<void> _openEpisodePicker() async {
     if (widget.episodes.isEmpty || _disposed) return;
     final downloads = AppScope.read(context).downloads;
+    void enqueue(List<Episode> eps) {
+      final added = downloads.enqueue(widget.series, eps);
+      _showToast(added > 0 ? '已加入 $added 集下载队列' : '没有需要下载的集');
+    }
     await showEpisodePicker(
       context,
       title: widget.series.title,
@@ -2026,14 +2030,15 @@ class _PlayerScreenState extends State<PlayerScreen>
         _openEpisode(i, Duration.zero, manual: true);
       },
       isDownloaded: (ep) => downloads.store.has(ep.id),
-      onDownload: () {
-        Navigator.of(context).pop();
-        showDownloadSheet(
-          context,
-          series: widget.series,
-          episodes: widget.episodes,
-        );
-      },
+      taskStateOf: (ep) => downloads.taskOf(ep.id)?.state,
+      refresh: Listenable.merge([downloads, downloads.store]),
+      onDownloadAll: () => enqueue(widget.episodes),
+      onDownloadEpisode: (i) => enqueue([widget.episodes[i]]),
+      onManageDownloads: () => showDownloadSheet(
+        context,
+        series: widget.series,
+        episodes: widget.episodes,
+      ),
     );
   }
 
