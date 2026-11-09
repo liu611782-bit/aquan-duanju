@@ -29,8 +29,14 @@ import '../widgets/reader/sleep_sheet.dart';
 import '../widgets/skeleton.dart';
 import 'reader_screen.dart';
 import '../widgets/loading.dart';
+import '../core/tts/voice_icons.dart';
 
 /// 听书页 → 阅读页的定位比例（章内 0..1）。
+avatar: voiceChipAvatar(
+  id: tone.id,
+  title: tone.title,
+  iconUrl: tone.icon,
+),
 ///
 /// 音轨只有段级时间点、没有字符坐标：拿时间比例去近似阅读位置是**唯一诚实**的做法。
 /// 总时长未知（还没拿到 track）时返回 0，宁可从头开始，也不编一个比例。
