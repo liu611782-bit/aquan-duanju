@@ -51,6 +51,8 @@ import '../widgets/player_info_dialog.dart';
 import '../widgets/player_track_sheet.dart';
 import '../widgets/tv_scope.dart';
 import '../widgets/loading.dart';
+import '../core/mp4_download_manager.dart';
+import 'mp4_downloads_screen.dart';
 
 /// 播放器页。
 ///
@@ -80,6 +82,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final PlayerEngine _engine;
   bool _prepared = false;
   bool _disposed = false;
+  bool _mp4Downloading = false;
 
   int _index = 0;
   PlaybackResult? _playback;
@@ -184,6 +187,104 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// 当前播放的流（备用容错用）；本地播放为 null。
   VideoStream? _currentVideoStream;
 
+  // ---------- MP4 导出下载（二次开发） ----------
+
+  /// 顶栏下载：立刻转圈防连点，导出走 [Mp4DownloadManager]（与官方离线缓存分离）。
+  Future<void> _downloadCurrentMp4() async {
+    if (_mp4Downloading) return;
+    final stream = _currentVideoStream;
+    if (stream == null || stream.url.isEmpty) {
+      _showToast('当前没有可下载的视频流');
+      return;
+    }
+    setState(() => _mp4Downloading = true);
+
+    final ep = (_index >= 0 && _index < widget.episodes.length)
+        ? widget.episodes[_index]
+        : null;
+    final epTitle = ep == null
+        ? ''
+        : (ep.title.isEmpty ? '第${ep.number}集' : ep.title);
+    final title = epTitle.isEmpty
+        ? widget.series.title
+        : '${widget.series.title} $epTitle';
+    final id = (ep?.id.isNotEmpty == true)
+        ? ep!.id
+        : 'url-${stream.url.hashCode.toRadixString(16)}';
+
+    try {
+      await Mp4DownloadManager.instance.start(
+        id: id,
+        title: title,
+        m3u8Url: stream.url,
+      );
+      if (!mounted) return;
+      final task = Mp4DownloadManager.instance.taskOf(id);
+      if (task == null) return;
+      if (task.state == Mp4TaskState.done) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              task.savedToGallery ? 'MP4 导出完成并已存相册' : 'MP4 导出完成',
+            ),
+            action: SnackBarAction(
+              label: '查看',
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const Mp4DownloadsScreen(),
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+      } else if (task.state == Mp4TaskState.failed) {
+        final msg = task.error ?? task.message;
+        if (msg.contains('支持下载')) {
+          await showDialog<void>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('无法下载'),
+              content: const Text('该视频无法下载'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('知道了'),
+                ),
+              ],
+            ),
+          );
+        } else if (msg.contains('未找到内置 ffmpeg')) {
+          _showToast('未找到内置 ffmpeg，无法导出');
+        } else {
+          _showToast(task.message.isNotEmpty ? task.message : '导出失败');
+        }
+      } else if (task.state == Mp4TaskState.cancelled) {
+        _showToast('已取消导出');
+      }
+    } catch (e) {
+      if (mounted) _showToast('导出失败：$e');
+    } finally {
+      if (mounted) setState(() => _mp4Downloading = false);
+    }
+  }
+
+  IconButton(
+                    tooltip: '下载(MP4)',
+                    icon: _mp4Downloading
+                        ? const SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.download_outlined),
+                    color: Colors.white,
+                    onPressed: _mp4Downloading ? null : _downloadCurrentMp4,
+                  ),
   /// 投屏解密中继会话（castrelay.go）：投屏结束/退出时回收。
   String? _relaySession;
 
