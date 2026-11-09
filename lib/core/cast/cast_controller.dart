@@ -70,6 +70,7 @@ class CastMedia {
     this.episodeIndex = 1,
     this.episodeCount = 0,
     this.localPath = '',
+    this.decKey = '',
     this.headers = const {},
     this.recordUrl,
     this.subtitleUrl = '',
@@ -89,6 +90,8 @@ class CastMedia {
   final int episodeCount;
 
   /// 本机文件路径。非空时由 [LocalMediaServer] 生成局域网 URL，[url] 被忽略。
+  /// 本地加密缓存的内容密钥（hex）。非空时本地文件必须经解密中继投放。
+  final String decKey;
   final String localPath;
 
   /// 源站请求头（Referer/UA 等）。非空且为 http(s) 直链时经 [CastMediaProxy]
@@ -578,25 +581,23 @@ class CastController extends ChangeNotifier {
     required CastUrlSuffixMode urlSuffixMode,
     Uri? subtitleUrl,
   }) async {
-    if (media.isLocalFile) {
-      // M0.5：按目标设备取路由源 IP 生成对外 URL（电视拉得到流的地址）。
-      final served = await _mediaServer.urlFor(media.localPath,
-          targetHost: target.host,
-          urlSuffixMode: urlSuffixMode,
-          subtitleUrl: subtitleUrl?.toString());
-      if (served == null) {
-        throw CastException('本地媒体服务启动失败（检查是否在局域网内）');
-      }
-      return (url: served, sourceType: null, viaRelay: false);
-    }
-    if (target.protocol != CastProtocol.dlna || media.isMirror) {
-      return _proxyOrDirect(
-        media,
-        target: target,
-        urlSuffixMode: urlSuffixMode,
-        hintMime: media.mimeHint,
+        if (media.isLocalFile && media.decKey.isNotEmpty) {
+      // 加密缓存在磁盘上是密文，直接推送电视只会黑屏。
+      // 必须经本机解密中继转成明文流；中继不可用时报错，不推送密文。
+      final relayed = await _transcodeResolve(
+        CastMedia(
+          url: media.localPath,
+          title: media.title,
+          decKey: media.decKey,
+        ),
+        relayFormat: relayFormatFor(sink),
       );
+      if (relayed == null || relayed.isEmpty) {
+        throw CastException('加密缓存需要本机解密中继，当前不可用（请确认 ffmpeg 可用后重试）');
+      }
+      return (url: relayed, sourceType: null, viaRelay: true);
     }
+    if (media.isLocalFile) {
     // 源媒体类型三级判定（显式 hint → URL 扩展名 → 内容嗅探；嗅探到
     // HTML/JSON 抛 CastException，把「错误页不喂电视」前移到投屏前）。
     final sourceType = await resolveCastMediaType(
@@ -899,6 +900,7 @@ class CastController extends ChangeNotifier {
         position: media.position,
         episodeIndex: media.episodeIndex,
         episodeCount: media.episodeCount,
+        decKey: media.decKey,
         localPath: media.localPath,
         headers: media.headers,
         subtitleUrl: subtitleUri?.toString() ?? '',
@@ -1115,6 +1117,7 @@ class CastController extends ChangeNotifier {
     try {
       await recipes.forget(target);
     } on Exception catch (e) {
+      decKey: fresh.decKey,
       ErrorLog.instance.record('投屏配方重置', e, StackTrace.current);
     }
   }
@@ -1407,6 +1410,7 @@ class CastController extends ChangeNotifier {
       url: playUrl,
       title: next.title,
       coverUrl: next.coverUrl,
+      decKey: next.decKey,
       episodeIndex: next.episodeIndex,
       episodeCount: next.episodeCount,
       localPath: next.localPath,
