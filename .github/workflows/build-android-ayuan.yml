@@ -1,7 +1,7 @@
 # =============================================================================
 # 仓库路径: .github/workflows/build-android-ayuan.yml
 # 变更类型: 替换
-# 说明:     构建「阿圆短剧」Android 手机 APK（arm64-v8a）
+# 说明:     构建「阿圆短剧」Android 手机 APK
 # =============================================================================
 name: 阿圆短剧 · Build Android APK
 
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       abi:
-        description: "目标 ABI（手机推荐 arm64-v8a）"
+        description: "目标 ABI（手机推荐 arm64-v8a，仅用于文件命名；脚本内部决定实际编译的 ABI）"
         required: true
         type: choice
         options:
@@ -18,7 +18,7 @@ on:
           - all
         default: arm64-v8a
       build_mode:
-        description: "构建类型"
+        description: "构建类型（脚本分支下仅用于文件命名）"
         required: true
         type: choice
         options:
@@ -105,8 +105,9 @@ jobs:
           APP_DISPLAY_NAME: 阿圆短剧
         run: |
           set -euo pipefail
+          mkdir -p dist/android
 
-          # 定位 NDK（由 setup-android 设置 ANDROID_HOME，上一步安装的 NDK 版本固定为 28.2.13676358）
+          # 定位 NDK（上一步安装的版本为 28.2.13676358）
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           NDK_HOME="${SDK_ROOT}/ndk/28.2.13676358"
           if [ ! -d "$NDK_HOME" ]; then
@@ -115,16 +116,18 @@ jobs:
           fi
           echo "NDK_HOME=$NDK_HOME"
 
-          # 优先走仓库统一脚本；不存在则回退 flutter build apk
           if [ -f scripts/build_android.py ]; then
-            ARGS=(--abi "$ABI" --ndk "$NDK_HOME")
-            if [ "$ABI" = "all" ]; then
-              ARGS=(--abi arm64-v8a --ndk "$NDK_HOME")
+            # 该脚本只接受 --ndk 和 --version，不接受 --abi / --debug
+            python scripts/build_android.py --ndk "$NDK_HOME"
+
+            # 在脚本产物中查找 APK（脚本输出位置未知，依次搜索 dist 和 build）
+            SRC=$(find dist build -name "*.apk" 2>/dev/null | head -n1 || true)
+            if [ -z "${SRC:-}" ]; then
+              echo "scripts/build_android.py 执行完成，但未找到 APK 产物"
+              exit 1
             fi
-            if [ "$BUILD_MODE" = "debug" ]; then
-              ARGS+=(--debug)
-            fi
-            python scripts/build_android.py "${ARGS[@]}"
+            echo "找到 APK: $SRC"
+            cp -f "$SRC" "dist/android/阿圆短剧-${ABI}-${BUILD_MODE}.apk"
           else
             echo "scripts/build_android.py 不存在，使用 flutter build apk"
             case "$ABI" in
@@ -140,24 +143,33 @@ jobs:
               else
                 flutter build apk --debug
               fi
+              SRC=$(find build/app/outputs/flutter-apk -name "app-*-debug.apk" | head -n1 || true)
+              [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
+              cp -f "$SRC" "dist/android/阿圆短剧-debug-${ABI}.apk"
             else
               if [ -n "$TARGET_PLATFORM" ]; then
                 flutter build apk --release --target-platform="$TARGET_PLATFORM"
               else
                 flutter build apk --release
               fi
-            fi
-
-            mkdir -p dist/android
-            if [ "$BUILD_MODE" = "debug" ]; then
-              SRC=$(find build/app/outputs/flutter-apk -name "app-*-debug.apk" | head -n1 || true)
-              [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
-              cp -f "$SRC" "dist/android/阿圆短剧-debug-${ABI}.apk"
-            else
               SRC=$(find build/app/outputs/flutter-apk -name "app-*-release.apk" | head -n1 || true)
               [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
               cp -f "$SRC" "dist/android/阿圆短剧-${ABI}.apk"
             fi
           fi
 
-    
+      - name: Verify APK exists
+        run: |
+          set -euo pipefail
+          if [ -z "$(find dist/android -name '*.apk' 2>/dev/null)" ]; then
+            echo "未找到 APK 产物"
+            exit 1
+          fi
+          ls -lh dist/android
+
+      - name: Upload 阿圆短剧 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ayuan-apk
+          path: dist/android/*.apk
+          if-no-files-found: error
