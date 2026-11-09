@@ -106,11 +106,20 @@ jobs:
         run: |
           set -euo pipefail
 
+          # 定位 NDK（由 setup-android 设置 ANDROID_HOME，上一步安装的 NDK 版本固定为 28.2.13676358）
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          NDK_HOME="${SDK_ROOT}/ndk/28.2.13676358"
+          if [ ! -d "$NDK_HOME" ]; then
+            echo "未找到 NDK: $NDK_HOME"
+            exit 1
+          fi
+          echo "NDK_HOME=$NDK_HOME"
+
           # 优先走仓库统一脚本；不存在则回退 flutter build apk
           if [ -f scripts/build_android.py ]; then
-            ARGS=(--abi "$ABI")
+            ARGS=(--abi "$ABI" --ndk "$NDK_HOME")
             if [ "$ABI" = "all" ]; then
-              ARGS=(--abi arm64-v8a)
+              ARGS=(--abi arm64-v8a --ndk "$NDK_HOME")
             fi
             if [ "$BUILD_MODE" = "debug" ]; then
               ARGS+=(--debug)
@@ -151,18 +160,4 @@ jobs:
             fi
           fi
 
-      - name: Verify APK exists
-        run: |
-          set -euo pipefail
-          if [ -z "$(find dist/android -name '*.apk' 2>/dev/null)" ]; then
-            echo "未找到 APK 产物"
-            exit 1
-          fi
-          ls -lh dist/android
-
-      - name: Upload 阿圆短剧 APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: ayuan-apk
-          path: dist/android/*.apk
-          if-no-files-found: error
+    
