@@ -10,29 +10,30 @@ import '../widgets/cast_panel.dart';
 import '../widgets/common.dart';
 import 'player_screen.dart';
 
-/// 我的下载：已缓存剧集列表（封面/集数/体积），点开直接离线播放。
-class DownloadsScreen extends StatelessWidget {
   /// 把本地缓存的某一集投到电视。
-  ///
-  /// 加密缓存（`keyHex` 非空）先挡掉：电视拿不到密钥，投过去只会黑屏。
-  Future<void> _castLocal(BuildContext context, DownloadEntry entry) async {
-    /// 把本地缓存的某一集投到电视。
-  ///
-  /// 加密缓存（`keyHex` 非空）先挡掉：电视拿不到密钥，投过去只会黑屏。
+  /// 加密缓存经本机解密中继转成明文流投放（原画优先），不再推送密文。
   Future<void> _castLocal(BuildContext context, DownloadEntry entry) async {
     final messenger = ScaffoldMessenger.maybeOf(context);
-    if (entry.keyHex.isNotEmpty) {
-      messenger?.showSnackBar(
-        const SnackBar(content: Text('该集是加密缓存，电视无法解码，暂不支持投屏')),
-      );
-      return;
-    }
     if (entry.filePath.isEmpty || !File(entry.filePath).existsSync()) {
       messenger?.showSnackBar(
         const SnackBar(content: Text('本地文件不存在，可能已被清理')),
       );
       return;
     }
+    await showCastSheet(
+      context,
+      media: CastMedia(
+        url: '',
+        title: '${entry.seriesTitle} 第${entry.number}集',
+        coverUrl: entry.coverUrl,
+        localPath: entry.filePath,
+        decKey: entry.keyHex,
+        episodeIndex: entry.number,
+      ),
+      onLocalPause: () async {},
+    );
+  }
+    
     await showCastSheet(
       context,
       media: CastMedia(
