@@ -111,6 +111,10 @@ Future<void> _start(List<String> args) async {
     }
   }
   final settings = await SettingsStore.load();
+      Mp4DownloadManager.instance.configure(
+    customOutputDir: settings.mp4OutputDir,
+    autoSave: settings.mp4AutoSaveGallery,
+  );
   // 运行形态只在启动时判定一次：TV 锁横屏，后续所有布局都读同一个结果。
   final formFactor = resolveFormFactor(
     isAndroid: Platform.isAndroid,
