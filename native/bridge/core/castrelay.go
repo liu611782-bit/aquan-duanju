@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -481,7 +482,8 @@ func startSweeper() {
 //   - hls（默认/空/未知值）：libx264+aac 转 HLS（guoappxxx 验证参数，
 //     **字节级保持现状**——hls 分支的任何改动都会影响已调通的设备）；
 //     x264 重编码参数按画质档位（R2）取 [x264VideoParams]，balanced 档
-//     与现状逐字节一致；
+//     与现状逐字节一致；`-hls_flags independent_segments` 按内核版本
+//     挂载（见 [ffmpegHasIndependentSegments]）；
 //   - ts：Sink 只认 TS 容器时 remux（-c copy 不重编码，WMP 族不认 HLS
 //     清单，TS 直流才是它们的母语；-muxdelay 0 / -muxpreload 0 降起播
 //     延迟），产物单文件 stream.ts。画质档位不影响本分支（无重编码）。
@@ -522,11 +524,84 @@ func buildFFmpegArgs(ffmpeg string, opts relayOptions, dir string, decKey string
 		"-f", "hls",
 		"-hls_time", "3",
 		"-hls_playlist_type", "event",
-		"-hls_flags", "independent_segments",
+	)
+	// independent_segments 是 ffmpeg 4.3（2020-06）新增的 hls flag——内置
+	// 2018 构建（4.0.x）不认识，Eval 解析报「Undefined constant」秒退
+	// （11-09 真机 stderr 实证）。按版本探测挂载：新内核保持原参数（桌面
+	// 已验证链路字节级不变）；旧内核摘除——该 flag 只给播放列表加
+	// #EXT-X-INDEPENDENT-SEGMENTS 建议性标签，摘除无兼容影响。
+	if ffmpegHasIndependentSegments(ffmpeg) {
+		args = append(args, "-hls_flags", "independent_segments")
+	}
+	args = append(args,
 		"-hls_segment_filename", filepath.Join(dir, "seg_%05d.ts"),
 		filepath.Join(dir, "index.m3u8"),
 	)
 	return args
+}
+
+// ffmpeg 能力探测缓存（key = 解析到的 ffmpeg 路径）：进程内每个二进制至多
+// 探一次 `ffmpeg -version`。
+var (
+	ffmpegCapsMu sync.Mutex
+	ffmpegCaps   = map[string]bool{}
+)
+
+// ffmpegHasIndependentSegments 该 ffmpeg 是否支持 hls_flags
+// independent_segments（≥4.3）。探测失败/解析失败一律按「不支持」——摘
+// flag 是全版本安全侧。
+func ffmpegHasIndependentSegments(ffmpeg string) bool {
+	ffmpegCapsMu.Lock()
+	cached, ok := ffmpegCaps[ffmpeg]
+	ffmpegCapsMu.Unlock()
+	if ok {
+		return cached
+	}
+	supported := probeFfmpegIndependentSegments(ffmpeg)
+	ffmpegCapsMu.Lock()
+	ffmpegCaps[ffmpeg] = supported
+	ffmpegCapsMu.Unlock()
+	return supported
+}
+
+func probeFfmpegIndependentSegments(ffmpeg string) bool {
+	out, err := execCommand([]string{ffmpeg, "-version"}).Output()
+	if err != nil {
+		return false
+	}
+	return ffmpegVersionAtLeast43(string(out))
+}
+
+// ffmpegVersionAtLeast43 解析 `ffmpeg -version` 输出的首行
+// "ffmpeg version X.Y…"：
+//   - 剥离 n/v 前缀（n4.3.1 / v4.0.2 拼写）；
+//   - '-'/'+/' 截断：git 日期构建（2024-05-05-git-…）按年份判=新；
+//     master 缩写（N-109483-g…）截成 "N" 解析失败按旧=安全侧；
+//   - 4.3（2020-06）起支持 independent_segments。
+func ffmpegVersionAtLeast43(versionOut string) bool {
+	const marker = "version "
+	i := strings.Index(versionOut, marker)
+	if i < 0 {
+		return false
+	}
+	fields := strings.Fields(versionOut[i+len(marker):])
+	if len(fields) == 0 {
+		return false
+	}
+	v := strings.TrimPrefix(strings.TrimPrefix(fields[0], "n"), "v")
+	if j := strings.IndexAny(v, "-+"); j >= 0 {
+		v = v[:j]
+	}
+	majorMinor := strings.Split(v, ".")
+	major, err := strconv.Atoi(majorMinor[0])
+	if err != nil || major <= 0 {
+		return false
+	}
+	minor := 0
+	if len(majorMinor) > 1 {
+		minor, _ = strconv.Atoi(majorMinor[1])
+	}
+	return major > 4 || (major == 4 && minor >= 3)
 }
 
 // x264VideoParams 按画质档位返回 x264 重编码参数（R2 画质三档）：

@@ -951,3 +951,68 @@ func TestRelayStderrTail(t *testing.T) {
 		t.Fatalf("超长日志应保留尾部内容: %s", tail)
 	}
 }
+
+// --- 11-09-cast-relay-ffmpeg-compat：independent_segments 版本门控 ---
+
+func TestFfmpegVersionAtLeast43(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"4.0.x（内置 2018 构建）", "ffmpeg version 4.0.2 Copyright (c) 2000-2018 the FFmpeg developers", false},
+		{"4.2 边界下", "ffmpeg version 4.2.9-0ubuntu0.1", false},
+		{"4.3 起支持", "ffmpeg version 4.3 Copyright (c) 2000-2020 the FFmpeg developers", true},
+		{"n 前缀 4.3.1", "ffmpeg version n4.3.1-22-gdb8806958c", true},
+		{"v 前缀 4.4", "ffmpeg version v4.4.2", true},
+		{"6.x", "ffmpeg version 6.1.1 Copyright", true},
+		{"git 日期构建按年份判新", "ffmpeg version 2024-05-05-git-abc123 Copyright", true},
+		{"master 缩写截断解析失败按旧", "ffmpeg version N-109483-gabc123", false},
+		{"3.x", "ffmpeg version 3.4.8", false},
+		{"无 version 字段", "garbage output", false},
+		{"空输出", "", false},
+	}
+	for _, c := range cases {
+		if got := ffmpegVersionAtLeast43(c.out); got != c.want {
+			t.Errorf("%s: ffmpegVersionAtLeast43 = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestBuildFFmpegArgsIndependentSegmentsGate(t *testing.T) {
+	opts := relayOptions{URL: "https://up/v.mp4", Format: "hls", Quality: "balanced"}
+	dir := t.TempDir()
+
+	containsFlag := func(args []string) bool {
+		for i, a := range args {
+			if a == "-hls_flags" && i+1 < len(args) && args[i+1] == "independent_segments" {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 旧内核（探测失败/解析失败同口径）：不挂 flag，其余参数原样。
+	ffmpegCapsMu.Lock()
+	ffmpegCaps["/fake/old"] = false
+	ffmpegCapsMu.Unlock()
+	old := buildFFmpegArgs("/fake/old", opts, dir, "")
+	if containsFlag(old) {
+		t.Fatal("旧内核不应挂 independent_segments")
+	}
+
+	// 新内核：字节级等于现状（含 flag）。
+	ffmpegCapsMu.Lock()
+	ffmpegCaps["/fake/new"] = true
+	ffmpegCapsMu.Unlock()
+	newArgs := buildFFmpegArgs("/fake/new", opts, dir, "")
+	if !containsFlag(newArgs) {
+		t.Fatal("新内核应挂 independent_segments（桌面现状）")
+	}
+
+	// 清理：不留缓存污染其他用例（真实 ffmpeg e2e 需要走真实探测）。
+	ffmpegCapsMu.Lock()
+	delete(ffmpegCaps, "/fake/old")
+	delete(ffmpegCaps, "/fake/new")
+	ffmpegCapsMu.Unlock()
+}
