@@ -397,7 +397,8 @@ class DownloadsScreen extends StatelessWidget {
     return '${active > 0 ? ' · 下载中 $active 集' : ''}'
         '${paused > 0 ? ' · 暂停 $paused 集' : ''}';
   }
-  _stateLabel(DownloadState state) => switch (state) {
+
+  String _stateLabel(DownloadState state) => switch (state) {
         DownloadState.queued => '排队中',
         DownloadState.running => '下载中',
         DownloadState.paused => '已暂停',
@@ -411,3 +412,5 @@ class DownloadsScreen extends StatelessWidget {
     if (bytes >= 1 << 20) return '${(bytes / (1 << 20)).toStringAsFixed(0)}MB';
     if (bytes >= 1 << 10) return '${(bytes / (1 << 10)).toStringAsFixed(0)}KB';
     return '${bytes}B';
+  }
+}
