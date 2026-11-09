@@ -16,6 +16,10 @@ class DownloadsScreen extends StatelessWidget {
   ///
   /// 加密缓存（`keyHex` 非空）先挡掉：电视拿不到密钥，投过去只会黑屏。
   Future<void> _castLocal(BuildContext context, DownloadEntry entry) async {
+    /// 把本地缓存的某一集投到电视。
+  ///
+  /// 加密缓存（`keyHex` 非空）先挡掉：电视拿不到密钥，投过去只会黑屏。
+  Future<void> _castLocal(BuildContext context, DownloadEntry entry) async {
     final messenger = ScaffoldMessenger.maybeOf(context);
     if (entry.keyHex.isNotEmpty) {
       messenger?.showSnackBar(
