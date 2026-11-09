@@ -10,6 +10,54 @@ import '../widgets/cast_panel.dart';
 import '../widgets/common.dart';
 import 'player_screen.dart';
 
+/// 我的下载：已缓存剧集列表（封面/集数/体积），点开直接离线播放。
+class DownloadsScreen extends StatelessWidget {
+  /// 一键删除：取消所有排队/进行中/暂停的任务，并删除全部已缓存分集文件。
+  Future<void> _deleteAll(BuildContext context) async {
+    final downloads = AppScope.read(context).downloads;
+    final list = List.of(downloads.store.seriesList);
+    final activeSeriesIds = downloads.tasks.values
+        .where((t) =>
+            t.state == DownloadState.queued ||
+            t.state == DownloadState.running ||
+            t.state == DownloadState.paused)
+        .map((t) => t.episode.seriesId)
+        .toSet();
+    if (list.isEmpty && activeSeriesIds.isEmpty) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text('没有可删除的下载')));
+      return;
+    }
+    final episodeCount =
+        list.fold<int>(0, (sum, s) => sum + s.episodes.length);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除全部下载？'),
+        content: Text('将取消 ${activeSeriesIds.length} 部剧的排队或进行中的下载，'
+            '并删除 ${list.length} 部剧共 $episodeCount 个已缓存分集。此操作不可恢复。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('全部删除')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    for (final id in activeSeriesIds) {
+      downloads.cancelSeries(id);
+    }
+    for (final s in list) {
+      await downloads.deleteSeries(s.seriesId);
+    }
+    if (!context.mounted) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(content: Text('已删除 ${list.length} 部剧的下载')));
+  }
+
   /// 把本地缓存的某一集投到电视。
   /// 加密缓存经本机解密中继转成明文流投放（原画优先），不再推送密文。
   Future<void> _castLocal(BuildContext context, DownloadEntry entry) async {
@@ -33,19 +81,7 @@ import 'player_screen.dart';
       onLocalPause: () async {},
     );
   }
-    
-    await showCastSheet(
-      context,
-      media: CastMedia(
-        url: '',
-        title: '${entry.seriesTitle} 第${entry.number}集',
-        coverUrl: entry.coverUrl,
-        localPath: entry.filePath,
-        episodeIndex: entry.number,
-      ),
-      onLocalPause: () async {},
-    );
-  }
+
   const DownloadsScreen({super.key});
 
   @override
@@ -53,7 +89,16 @@ import 'player_screen.dart';
     final scope = AppScope.read(context);
     final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('我的下载')),
+      appBar: AppBar(
+        title: const Text('我的下载'),
+        actions: [
+          IconButton(
+            tooltip: '全部删除',
+            icon: const Icon(Icons.delete_sweep_outlined),
+            onPressed: () => _deleteAll(context),
+          ),
+        ],
+      ),
       body: ListenableBuilder(
         listenable: Listenable.merge([scope.downloads, scope.downloads.store]),
         builder: (context, _) {
@@ -352,8 +397,7 @@ import 'player_screen.dart';
     return '${active > 0 ? ' · 下载中 $active 集' : ''}'
         '${paused > 0 ? ' · 暂停 $paused 集' : ''}';
   }
-
-  String _stateLabel(DownloadState state) => switch (state) {
+  _stateLabel(DownloadState state) => switch (state) {
         DownloadState.queued => '排队中',
         DownloadState.running => '下载中',
         DownloadState.paused => '已暂停',
@@ -367,5 +411,3 @@ import 'player_screen.dart';
     if (bytes >= 1 << 20) return '${(bytes / (1 << 20)).toStringAsFixed(0)}MB';
     if (bytes >= 1 << 10) return '${(bytes / (1 << 10)).toStringAsFixed(0)}KB';
     return '${bytes}B';
-  }
-}
