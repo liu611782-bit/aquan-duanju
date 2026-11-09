@@ -2599,6 +2599,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         url: m.url,
         userAgent: headerOf(m.headers, 'user-agent') ?? '',
         referer: headerOf(m.headers, 'referer') ?? '',
+        decKey: m.decKey,
         format: relayFormat ?? '',
         subtitleUrl: relaySubtitleUrl?.toString() ?? '',
         quality: castScope.settings.castRelayQuality,
