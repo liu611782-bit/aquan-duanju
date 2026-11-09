@@ -67,6 +67,20 @@ class SettingsStore extends ChangeNotifier {
   set scanConcurrency(int v) =>
       _prefs.setInt('market.scanConcurrency', v.clamp(1, 64));
 
+    // MP4 导出目录（空 = 默认 mp4_downloads）
+  String get mp4OutputDir => _prefs.getString('mp4.outputDir') ?? '';
+  set mp4OutputDir(String v) {
+    _prefs.setString('mp4.outputDir', v);
+    notifyListeners();
+  }
+
+  // MP4 导出完成后自动存相册
+  bool get mp4AutoSaveGallery => _prefs.getBool('mp4.autoSaveGallery') ?? false;
+  set mp4AutoSaveGallery(bool v) {
+    _prefs.setBool('mp4.autoSaveGallery', v);
+    notifyListeners();
+  }
+  
   String get cacheQuality => _prefs.getString('download.quality') ?? '540p';
   set cacheQuality(String v) {
     _prefs.setString('download.quality', v);
