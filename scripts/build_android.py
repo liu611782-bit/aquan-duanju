@@ -32,6 +32,8 @@ def main() -> None:
 
     sh([sys.executable, str(REPO / "scripts" / "build_native.py"),
         "--android", "--ndk", args.ndk, "--version", args.version])
+    # Repair known malformed Dart fragments in the checkout before compilation.
+    sh([sys.executable, str(REPO / "scripts" / "repair_android_dart_sources.py")])
     sh(["flutter", "build", "apk", "--release", "--split-per-abi"])
 
 
