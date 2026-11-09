@@ -345,18 +345,38 @@ class _MineScreenState extends State<MineScreen>
                   ),
                   // MP4 导出与官方离线缓存目录分离（Mp4DownloadManager.outputDir）。
                   ListTile(
+                                    ListTile(
                     contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.video_file_outlined),
-                    title: const Text('MP4 导出下载'),
-                    subtitle: const Text(
-                      '播放页导出 · 可存相册/分享\n目录 mp4_downloads · 相册专辑「阿圈短剧」',
-                    ),
-                    isThreeLine: true,
+                    leading: const Icon(Icons.folder_outlined),
+                    title: const Text('MP4 导出目录'),
+                    subtitle: Text(scope.settings.mp4OutputDir.isEmpty
+                        ? '默认（应用外部存储 mp4_downloads）'
+                        : scope.settings.mp4OutputDir),
                     trailing: const Icon(Icons.chevron_right),
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                          builder: (_) => const Mp4DownloadsScreen()),
-                    ),
+                    onTap: () async {
+                      final picked =
+                          await getDirectoryPath(confirmButtonText: '选择');
+                      if (picked == null) return;
+                      if (!await DownloadService.ensureWritable(
+                          Directory(picked))) {
+                        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                            const SnackBar(content: Text('该目录不可写，请选择其他目录')));
+                        return;
+                      }
+                      scope.settings.mp4OutputDir = picked;
+                      Mp4DownloadManager.instance
+                          .configure(customOutputDir: picked);
+                    },
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    secondary: const Icon(Icons.photo_library_outlined),
+                    title: const Text('导出完成后自动存相册'),
+                    value: scope.settings.mp4AutoSaveGallery,
+                    onChanged: (v) {
+                      scope.settings.mp4AutoSaveGallery = v;
+                      Mp4DownloadManager.instance.configure(autoSave: v);
+                    },
                   ),
                   const BackupPanel(),
                   const CachePanel(),
