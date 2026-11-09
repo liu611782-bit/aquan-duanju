@@ -106,6 +106,17 @@ func TestBuildFFmpegArgsFormatFallback(t *testing.T) {
 // 各自的 x264 参数 + 空/未知值缺省回 balanced；balanced 与现状参数逐字节
 // 一致（旧行为零回归）。
 func TestBuildFFmpegArgsQuality(t *testing.T) {
+	// 能力缓存按「新内核」预置：字节级断言不得依赖宿主是否装有 ffmpeg——
+	// CI runner 无 ffmpeg → 探测失败 → flag 被摘 → 断言必挂（11-09 CI 实证）。
+	ffmpegCapsMu.Lock()
+	ffmpegCaps["ffmpeg"] = true
+	ffmpegCapsMu.Unlock()
+	defer func() {
+		ffmpegCapsMu.Lock()
+		delete(ffmpegCaps, "ffmpeg")
+		ffmpegCapsMu.Unlock()
+	}()
+
 	balanced := []string{
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "25", "-pix_fmt", "yuv420p",
 	}
