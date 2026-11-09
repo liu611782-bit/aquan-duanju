@@ -24,6 +24,7 @@ CastTranscodeResolver defaultRelayResolver(
       url: m.url,
       userAgent: headerOf(m.headers, 'user-agent') ?? '',
       referer: headerOf(m.headers, 'referer') ?? '',
+      decKey: m.decKey,
       format: relayFormat ?? '',
       subtitleUrl: relaySubtitleUrl?.toString() ?? '',
       quality: quality?.call() ?? '',
