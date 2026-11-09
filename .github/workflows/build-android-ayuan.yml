@@ -118,7 +118,8 @@ jobs:
 
           if [ -f scripts/build_android.py ]; then
             # 该脚本只接受 --ndk 和 --version，不接受 --abi / --debug
-            python scripts/build_android.py --ndk "$NDK_HOME"
+            # 输出同时写入 build.log，pipefail 保证脚本失败时本步骤仍然失败
+            python scripts/build_android.py --ndk "$NDK_HOME" 2>&1 | tee build.log
 
             # 在脚本产物中查找 APK（脚本输出位置未知，依次搜索 dist 和 build）
             SRC=$(find dist build -name "*.apk" 2>/dev/null | head -n1 || true)
@@ -139,24 +140,32 @@ jobs:
 
             if [ "$BUILD_MODE" = "debug" ]; then
               if [ -n "$TARGET_PLATFORM" ]; then
-                flutter build apk --debug --target-platform="$TARGET_PLATFORM"
+                flutter build apk --debug --target-platform="$TARGET_PLATFORM" 2>&1 | tee build.log
               else
-                flutter build apk --debug
+                flutter build apk --debug 2>&1 | tee build.log
               fi
               SRC=$(find build/app/outputs/flutter-apk -name "app-*-debug.apk" | head -n1 || true)
               [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
               cp -f "$SRC" "dist/android/阿圆短剧-debug-${ABI}.apk"
             else
               if [ -n "$TARGET_PLATFORM" ]; then
-                flutter build apk --release --target-platform="$TARGET_PLATFORM"
+                flutter build apk --release --target-platform="$TARGET_PLATFORM" 2>&1 | tee build.log
               else
-                flutter build apk --release
+                flutter build apk --release 2>&1 | tee build.log
               fi
               SRC=$(find build/app/outputs/flutter-apk -name "app-*-release.apk" | head -n1 || true)
               [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
               cp -f "$SRC" "dist/android/阿圆短剧-${ABI}.apk"
             fi
           fi
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
 
       - name: Verify APK exists
         run: |
