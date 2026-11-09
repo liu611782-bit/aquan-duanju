@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 1.9.9 (2026-11-09)
+
+安卓内置 ffmpeg 升级 2018 构建（4.0.2）→ **自建 8.0.1**（最新稳定线）。
+
+- `scripts/build_android_ffmpeg.sh`（MSYS2 + NDK r28 交叉编译）：
+  ffmpeg 8.0.1 + x264 + openssl 3.5.4，全静态 PIE 三 ABI（28/24/34 MB），
+  产物纳入版本控制（SHA256 见 android/ffmpeg/README.md）
+- `-hls_flags independent_segments` 在安卓真正生效（版本门控 ≥4.3 自动放行）；
+  新 TLS（OpenSSL 3）顺带解决老证书链隐患
+- 许可升级 GPLv3+（version3 + openssl3 + x264），README 已登记
+
 ## 1.9.8 (2026-11-09)
 
 中继 ffmpeg 参数版本兼容（134a0c7，真机 stderr 实证根因）。
