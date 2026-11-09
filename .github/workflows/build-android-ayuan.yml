@@ -91,6 +91,10 @@ jobs:
           python --version
           sdkmanager --list_installed || true
 
+      - name: Flutter doctor
+        run: |
+          flutter doctor -v || true
+
       - name: Flutter pub get
         run: |
           set -euo pipefail
@@ -115,6 +119,9 @@ jobs:
             exit 1
           fi
           echo "NDK_HOME=$NDK_HOME"
+          # Flutter / Gradle 有时只读取环境变量，不读取脚本参数，因此同时导出
+          export ANDROID_NDK_HOME="$NDK_HOME"
+          export ANDROID_NDK_ROOT="$NDK_HOME"
 
           if [ -f scripts/build_android.py ]; then
             # 该脚本只接受 --ndk 和 --version，不接受 --abi / --debug
@@ -157,6 +164,18 @@ jobs:
               [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
               cp -f "$SRC" "dist/android/阿圆短剧-${ABI}.apk"
             fi
+          fi
+
+      - name: Show build errors
+        if: failure()
+        run: |
+          if [ -f build.log ]; then
+            echo "===== 关键错误行 ====="
+            grep -nE "FAILURE:|Execution failed|What went wrong|error:|Error:|^e: |ndk|cmake|go build|cgo|Could not|Gradle" build.log | head -n 80 || true
+            echo "===== build.log 末尾 150 行 ====="
+            tail -n 150 build.log
+          else
+            echo "build.log 不存在，构建可能在调用脚本之前就失败了"
           fi
 
       - name: Upload build log
