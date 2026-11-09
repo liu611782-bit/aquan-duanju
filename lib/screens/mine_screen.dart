@@ -323,13 +323,18 @@ class _MineScreenState extends State<MineScreen>
                         [scope.downloads, scope.downloads.store]),
                     builder: (context, _) {
                       final list = scope.downloads.store.seriesList;
+                      // 路径标注：与设置页「下载位置」同源（baseDir）。
+                      final dirLabel = scope.downloads.baseDir.path;
                       return ListTile(
                         contentPadding: EdgeInsets.zero,
                         leading: const Icon(Icons.download_outlined),
                         title: const Text('我的下载'),
-                        subtitle: Text(list.isEmpty
-                            ? '在短剧详情页点「缓存」即可离线观看'
-                            : '${list.length} 部剧集已缓存离线可看'),
+                        subtitle: Text(
+                          list.isEmpty
+                              ? '在短剧详情页点「缓存」即可离线观看\n$dirLabel'
+                              : '${list.length} 部剧集已缓存离线可看\n$dirLabel',
+                        ),
+                        isThreeLine: true,
                         trailing: const Icon(Icons.chevron_right),
                         onTap: () => Navigator.of(context).push(
                           MaterialPageRoute(
@@ -337,6 +342,21 @@ class _MineScreenState extends State<MineScreen>
                         ),
                       );
                     },
+                  ),
+                  // MP4 导出与官方离线缓存目录分离（Mp4DownloadManager.outputDir）。
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.video_file_outlined),
+                    title: const Text('MP4 导出下载'),
+                    subtitle: const Text(
+                      '播放页导出 · 可存相册/分享\n目录 mp4_downloads · 相册专辑「阿圈短剧」',
+                    ),
+                    isThreeLine: true,
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                          builder: (_) => const Mp4DownloadsScreen()),
+                    ),
                   ),
                   const BackupPanel(),
                   const CachePanel(),
