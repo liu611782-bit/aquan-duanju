@@ -155,6 +155,16 @@ jobs:
               [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
               cp -f "$SRC" "dist/android/阿圆短剧-debug-${ABI}.apk"
             else
+              if [ "$BUILD_MODE" = "debug" ]; then
+              if [ -n "$TARGET_PLATFORM" ]; then
+                flutter build apk --debug --target-platform="$TARGET_PLATFORM" 2>&1 | tee build.log
+              else
+                flutter build apk --debug 2>&1 | tee build.log
+              fi
+              SRC=$(find build/app/outputs/flutter-apk -name "app-*-debug.apk" | head -n1 || true)
+              [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
+              cp -f "$SRC" "dist/android/阿圆短剧-debug-${ABI}.apk"
+            else
               if [ -n "$TARGET_PLATFORM" ]; then
                 flutter build apk --release --target-platform="$TARGET_PLATFORM" 2>&1 | tee build.log
               else
@@ -177,6 +187,29 @@ jobs:
           else
             echo "build.log 不存在，构建可能在调用脚本之前就失败了"
           fi
+
+      - name: Write error summary
+        if: failure()
+        run: |
+          KEY=$(grep -nE "FAILURE:|What went wrong|Execution failed|error:|Error:|^e: |ndk|cmake|cgo|Could not|Failed to" build.log 2>/dev/null | tail -n 80 || true)
+          if [ -z "$KEY" ]; then
+            KEY="没有匹配到关键错误行"
+          fi
+          if [ -f build.log ]; then
+            TAIL=$(tail -n 300 build.log)
+          else
+            TAIL="build.log 不存在，构建可能在调用脚本之前就失败了"
+          fi
+          {
+            echo "## 构建失败：关键错误"
+            echo '```'
+            echo "$KEY"
+            echo '```'
+            echo "## 构建失败：build.log 末尾 300 行"
+            echo '```'
+            echo "$TAIL"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload build log
         if: failure()
