@@ -1,7 +1,5 @@
 # =============================================================================
-# 仓库路径: .github/workflows/build-android-ayuan.yml
-# 变更类型: 替换
-# 说明:     构建「阿圆短剧」Android 手机 APK
+# Build the Android APK for 阿圆短剧.
 # =============================================================================
 name: 阿圆短剧 · Build Android APK
 
@@ -9,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       abi:
-        description: "目标 ABI（手机推荐 arm64-v8a，仅用于文件命名；脚本内部决定实际编译的 ABI）"
+        description: "目标 ABI；all 会生成所有支持架构的 APK"
         required: true
         type: choice
         options:
@@ -18,7 +16,7 @@ on:
           - all
         default: arm64-v8a
       build_mode:
-        description: "构建类型（脚本分支下仅用于文件命名）"
+        description: "构建类型"
         required: true
         type: choice
         options:
@@ -36,7 +34,6 @@ concurrency:
 jobs:
   build-android:
     name: 构建阿圆短剧 APK
-    # 固定到 24.04，避免 ubuntu-latest 迁移到 Ubuntu 26 后环境变化
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
@@ -44,43 +41,33 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
       - name: Set up Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24.1"
+          go-version-file: native/bridge/go.mod
           cache: true
-          cache-dependency-path: native/go.sum
+          cache-dependency-path: native/bridge/go.sum
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          # 不固定版本，安装最新 stable，以满足 pubspec.yaml 中 SDK ^3.13.7 的要求。
-          # 若想固定，请改成本地 `flutter --version` 显示的版本号（Dart 需 >= 3.13.7）。
           channel: stable
           cache: true
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
 
       - name: Install Android SDK and NDK
         run: |
           set -euo pipefail
           sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
-          # 手机安装包常用 API
-          sdkmanager "platforms;android-34" || true
 
       - name: Verify build tools
         run: |
@@ -89,125 +76,56 @@ jobs:
           go version
           flutter --version
           python --version
-          sdkmanager --list_installed || true
+          test -x "$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
 
-      - name: Flutter doctor
-        run: |
-          flutter doctor -v || true
+      - name: Resolve Flutter dependencies
+        run: flutter pub get
 
-      - name: Flutter pub get
-        run: |
-          set -euo pipefail
-          flutter pub get
-
-      - name: Build APK（阿圆短剧）
+      - name: Build APK
         env:
           ABI: ${{ inputs.abi }}
           BUILD_MODE: ${{ inputs.build_mode }}
           GOPROXY: https://proxy.golang.org,direct
           GOSUMDB: sum.golang.org
-          APP_DISPLAY_NAME: 阿圆短剧
         run: |
           set -euo pipefail
           mkdir -p dist/android
-
-          # 定位 NDK（上一步安装的版本为 28.2.13676358）
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-          NDK_HOME="${SDK_ROOT}/ndk/28.2.13676358"
-          if [ ! -d "$NDK_HOME" ]; then
-            echo "未找到 NDK: $NDK_HOME"
-            exit 1
-          fi
-          echo "NDK_HOME=$NDK_HOME"
-          # Flutter / Gradle 有时只读取环境变量，不读取脚本参数，因此同时导出
-          export ANDROID_NDK_HOME="$NDK_HOME"
-          export ANDROID_NDK_ROOT="$NDK_HOME"
-
-          if [ -f scripts/build_android.py ]; then
-            # 该脚本只接受 --ndk 和 --version，不接受 --abi / --debug
-            # 输出同时写入 build.log，pipefail 保证脚本失败时本步骤仍然失败
-            python scripts/build_android.py --ndk "$NDK_HOME" 2>&1 | tee build.log
-
-            # 在脚本产物中查找 APK（脚本输出位置未知，依次搜索 dist 和 build）
-            SRC=$(find dist build -name "*.apk" 2>/dev/null | head -n1 || true)
-            if [ -z "${SRC:-}" ]; then
-              echo "scripts/build_android.py 执行完成，但未找到 APK 产物"
-              exit 1
-            fi
-            echo "找到 APK: $SRC"
-            cp -f "$SRC" "dist/android/阿圆短剧-${ABI}-${BUILD_MODE}.apk"
-          else
-            echo "scripts/build_android.py 不存在，使用 flutter build apk"
-            case "$ABI" in
-              arm64-v8a)   TARGET_PLATFORM="android-arm64" ;;
-              armeabi-v7a) TARGET_PLATFORM="android-arm" ;;
-              all)         TARGET_PLATFORM="" ;;
-              *)           TARGET_PLATFORM="android-arm64" ;;
-            esac
-
-            if [ "$BUILD_MODE" = "debug" ]; then
-              if [ -n "$TARGET_PLATFORM" ]; then
-                flutter build apk --debug --target-platform="$TARGET_PLATFORM" 2>&1 | tee build.log
-              else
-                flutter build apk --debug 2>&1 | tee build.log
-              fi
-              SRC=$(find build/app/outputs/flutter-apk -name "app-*-debug.apk" | head -n1 || true)
-              [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
-              cp -f "$SRC" "dist/android/阿圆短剧-debug-${ABI}.apk"
-            else
-              if [ "$BUILD_MODE" = "debug" ]; then
-              if [ -n "$TARGET_PLATFORM" ]; then
-                flutter build apk --debug --target-platform="$TARGET_PLATFORM" 2>&1 | tee build.log
-              else
-                flutter build apk --debug 2>&1 | tee build.log
-              fi
-              SRC=$(find build/app/outputs/flutter-apk -name "app-*-debug.apk" | head -n1 || true)
-              [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
-              cp -f "$SRC" "dist/android/阿圆短剧-debug-${ABI}.apk"
-            else
-              if [ -n "$TARGET_PLATFORM" ]; then
-                flutter build apk --release --target-platform="$TARGET_PLATFORM" 2>&1 | tee build.log
-              else
-                flutter build apk --release 2>&1 | tee build.log
-              fi
-              SRC=$(find build/app/outputs/flutter-apk -name "app-*-release.apk" | head -n1 || true)
-              [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
-              cp -f "$SRC" "dist/android/阿圆短剧-${ABI}.apk"
-            fi
-          fi
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+          python scripts/build_android.py \
+            --ndk "$ANDROID_NDK_HOME" \
+            --abi "$ABI" \
+            --mode "$BUILD_MODE" \
+            --output-dir dist/android 2>&1 | tee build.log
 
       - name: Show build errors
         if: failure()
         run: |
           if [ -f build.log ]; then
             echo "===== 关键错误行 ====="
-            grep -nE "FAILURE:|Execution failed|What went wrong|error:|Error:|^e: |ndk|cmake|go build|cgo|Could not|Gradle" build.log | head -n 80 || true
-            echo "===== build.log 末尾 150 行 ====="
-            tail -n 150 build.log
+            grep -nEi "FAILURE:|Execution failed|What went wrong|error:|Error:|^e: |ndk|cmake|go build|cgo|Could not|Gradle" build.log | tail -n 80 || true
+            echo "===== build.log 末尾 200 行 ====="
+            tail -n 200 build.log
           else
-            echo "build.log 不存在，构建可能在调用脚本之前就失败了"
+            echo "build.log 不存在；失败发生在构建命令启动之前。"
           fi
 
-      - name: Write error summary
+      - name: Write failure summary
         if: failure()
+        env:
+          ABI: ${{ inputs.abi }}
+          BUILD_MODE: ${{ inputs.build_mode }}
         run: |
-          KEY=$(grep -nE "FAILURE:|What went wrong|Execution failed|error:|Error:|^e: |ndk|cmake|cgo|Could not|Failed to" build.log 2>/dev/null | tail -n 80 || true)
-          if [ -z "$KEY" ]; then
-            KEY="没有匹配到关键错误行"
-          fi
-          if [ -f build.log ]; then
-            TAIL=$(tail -n 300 build.log)
-          else
-            TAIL="build.log 不存在，构建可能在调用脚本之前就失败了"
-          fi
           {
-            echo "## 构建失败：关键错误"
-            echo '```'
-            echo "$KEY"
-            echo '```'
-            echo "## 构建失败：build.log 末尾 300 行"
-            echo '```'
-            echo "$TAIL"
+            echo "## Android 构建失败"
+            echo "- ABI: ${ABI}"
+            echo "- Mode: ${BUILD_MODE}"
+            echo "- Go: $(go version 2>&1 || true)"
+            echo "- Flutter: $(flutter --version 2>&1 | head -n 1 || true)"
+            echo
+            echo "### build.log（末尾 200 行）"
+            echo '```text'
+            if [ -f build.log ]; then tail -n 200 build.log; else echo "build.log 不存在"; fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -215,22 +133,25 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: android-build-log
           path: build.log
           if-no-files-found: ignore
+          retention-days: 7
 
-      - name: Verify APK exists
+      - name: Verify APK outputs
         run: |
           set -euo pipefail
-          if [ -z "$(find dist/android -name '*.apk' 2>/dev/null)" ]; then
+          mapfile -t apks < <(find dist/android -maxdepth 1 -type f -name '*.apk' -print)
+          if [ "${#apks[@]}" -eq 0 ]; then
             echo "未找到 APK 产物"
             exit 1
           fi
-          ls -lh dist/android
+          ls -lh "${apks[@]}"
 
       - name: Upload 阿圆短剧 APK
         uses: actions/upload-artifact@v4
         with:
-          name: ayuan-apk
+          name: ayuan-apk-${{ inputs.abi }}-${{ inputs.build_mode }}
           path: dist/android/*.apk
           if-no-files-found: error
+          retention-days: 14
