@@ -634,11 +634,6 @@ func x264VideoParams(quality string) []string {
 }
 
 // findFFmpeg 按优先级定位可执行的 ffmpeg。
-//
-// Android 上没有 PATH 里的 ffmpeg，也没有「exe 同目录」的概念：二进制由
-// jniLibs 打包、系统解压到 nativeLibraryDir，文件名 libffmpeg.so（是 PIE
-// 可执行文件而不是共享库，改名只是为了让它进 nativeLibraryDir）。
-// 因此额外两跳：环境变量 AQUAN_FFMPEG → nativeLibraryDir。
 func findFFmpeg() (string, error) {
 	if p := os.Getenv("AQUAN_FFMPEG"); isExecutableFile(p) {
 		return p, nil
@@ -662,10 +657,6 @@ func findFFmpeg() (string, error) {
 	return exec.LookPath("ffmpeg")
 }
 
-// isExecutableFile 要求路径存在、是普通文件、且有任一执行位。
-//
-// Windows 不看权限位（os.Stat 在那里的 perm 不反映 ACL），只看存在性——
-// 桌面端原本就是「exe 旁有 ffmpeg.exe 就用」，不能因为权限位判断退化。
 func isExecutableFile(path string) bool {
 	if path == "" {
 		return false
@@ -680,10 +671,6 @@ func isExecutableFile(path string) bool {
 	return info.Mode().Perm()&0o111 != 0
 }
 
-// nativeLibraryDir 在 Android 上定位应用的原生库目录。
-//
-// Go 侧拿不到 Java 的 ApplicationInfo，但进程 maps 里一定有 libaquan_core.so，
-// 它所在目录就是 nativeLibraryDir。非 Android 直接返回空串。
 func nativeLibraryDir() string {
 	if runtime.GOOS != "android" {
 		return ""
@@ -695,20 +682,23 @@ func nativeLibraryDir() string {
 	return parseNativeLibDir(string(data))
 }
 
-// parseNativeLibDir 从 /proc/self/maps 内容里取出 libaquan_core.so 所在目录。
+// parseNativeLibDir 从 /proc/self/maps 内容里取出原生库目录。
 //
 // 行格式：`7f... r-xp 00000000 fd:01 1234 /data/app/.../lib/arm64/libaquan_core.so`
-// 第 6 列是映射文件路径。
+// 第 6 列起是映射文件路径（路径本身可能含空格）。
 func parseNativeLibDir(maps string) string {
 	for _, line := range strings.Split(maps, "\n") {
-		if !strings.Contains(line, "libaquan_core.so") {
+		// 同时匹配核心库与 libffmpeg.so，避免只认 libaquan_core.so 时漏检。
+		if !strings.Contains(line, "libaquan_core.so") &&
+			!strings.Contains(line, "libffmpeg.so") {
 			continue
 		}
 		fields := strings.Fields(line)
 		if len(fields) < 6 {
 			continue
 		}
-		mapped := fields[5]
+		// 第 6 列及之后重新拼接，兼容路径含空格。
+		mapped := strings.Join(fields[5:], " ")
 		if !strings.HasPrefix(mapped, "/") {
 			continue
 		}
