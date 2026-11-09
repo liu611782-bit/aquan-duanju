@@ -44,6 +44,7 @@ import 'widgets/common.dart';
 import 'widgets/receiver_admission_dialog.dart';
 import 'widgets/tv_focus_scope.dart';
 import 'widgets/tv_scope.dart';
+import 'core/mp4_download_manager.dart';
 
 /// 全局根导航：单实例转交过来的命令（AI 让「搜某部剧并播放」）需要
 /// 从 App 顶层直接推详情页。
