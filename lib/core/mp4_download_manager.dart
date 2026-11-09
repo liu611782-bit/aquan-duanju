@@ -33,8 +33,14 @@ class Mp4DownloadTask {
   DateTime? startedAt;
   DateTime? finishedAt;
   /// 是否已写入系统相册。
-  bool savedToGallery = false;
-}
+    /// 用户自定义导出目录（null 或空 = 默认目录）。
+  String? _customOutputDir;
+
+  /// 由设置页与启动时调用，同步用户设置到管理器。
+  void configure({String? customOutputDir, bool? autoSave}) {
+    if (customOutputDir != null) _customOutputDir = customOutputDir;
+    if (autoSave != null) autoSaveToGallery = autoSave;
+  }
 
 /// MP4 导出下载管理器（二次开发）。
 ///
@@ -49,25 +55,44 @@ class Mp4DownloadManager extends ChangeNotifier {
   final Map<String, Process> _procs = {};
   String? _ffmpegPath;
   Future<String>? _finding;
+    /// 用户自定义导出目录（null 或空 = 默认目录）。
+  String? _customOutputDir;
 
-  /// 导出完成后是否自动写入相册（默认 false，由设置或调用方决定）。
-  bool autoSaveToGallery = false;
+  /// 由设置页与启动时调用，同步用户设置到管理器。
+  void configure({String? customOutputDir, bool? autoSave}) {
+    if (customOutputDir != null) _customOutputDir = customOutputDir;
+    if (autoSave != null) autoSaveToGallery = autoSave;
+  }
 
-  /// 当前导出根目录的可读路径（列表页顶部标注用）。
-  String? lastOutputDirPath;
-
-  Map<String, Mp4DownloadTask> get tasks => Map.unmodifiable(_tasks);
-
-  Mp4DownloadTask? taskOf(String id) => _tasks[id];
-
-  List<Mp4DownloadTask> get orderedTasks {
-    final list = _tasks.values.toList();
-    list.sort((a, b) {
-      final ta = a.startedAt?.millisecondsSinceEpoch ?? 0;
-      final tb = b.startedAt?.millisecondsSinceEpoch ?? 0;
-      return tb.compareTo(ta);
-    });
-    return list;
+  /// 导出根目录（UI 标注与写入共用）。
+  /// 优先使用用户自定义目录；不可写时回退到默认目录。
+  Future<Directory> outputDir() async {
+    final custom = _customOutputDir;
+    if (custom != null && custom.isNotEmpty) {
+      try {
+        final d = Directory(custom);
+        if (!await d.exists()) await d.create(recursive: true);
+        final probe = File(p.join(d.path,
+            '.aquan-write-test-${DateTime.now().microsecondsSinceEpoch}'));
+        await probe.writeAsString('ok', flush: true);
+        await probe.delete();
+        return d;
+      } catch (_) {
+        debugPrint('自定义导出目录不可写，回退默认目录: $custom');
+      }
+    }
+    try {
+      final ext = await getExternalStorageDirectory();
+      if (ext != null) {
+        final d = Directory(p.join(ext.path, 'mp4_downloads'));
+        if (!await d.exists()) await d.create(recursive: true);
+        return d;
+      }
+    } catch (_) {}
+    final support = await getApplicationSupportDirectory();
+    final d = Directory(p.join(support.path, 'mp4_downloads'));
+    if (!await d.exists()) await d.create(recursive: true);
+    return d;
   }
 
   /// 立刻进入 running 并开始，提升按钮点击反馈。
