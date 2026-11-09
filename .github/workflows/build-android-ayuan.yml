@@ -155,16 +155,6 @@ jobs:
               [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
               cp -f "$SRC" "dist/android/阿圆短剧-debug-${ABI}.apk"
             else
-              if [ "$BUILD_MODE" = "debug" ]; then
-              if [ -n "$TARGET_PLATFORM" ]; then
-                flutter build apk --debug --target-platform="$TARGET_PLATFORM" 2>&1 | tee build.log
-              else
-                flutter build apk --debug 2>&1 | tee build.log
-              fi
-              SRC=$(find build/app/outputs/flutter-apk -name "app-*-debug.apk" | head -n1 || true)
-              [ -n "${SRC:-}" ] || SRC=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
-              cp -f "$SRC" "dist/android/阿圆短剧-debug-${ABI}.apk"
-            else
               if [ -n "$TARGET_PLATFORM" ]; then
                 flutter build apk --release --target-platform="$TARGET_PLATFORM" 2>&1 | tee build.log
               else
